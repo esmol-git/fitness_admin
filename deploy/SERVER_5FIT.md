@@ -58,6 +58,29 @@ docker compose --env-file deploy/.env.production -f docker-compose.prod.yml up -
 - Шаблон **PDF** для AcroForm при необходимости положите в `backend/templates/` и пересоберите образ `api`.
 - Redis в текущем коде не используется — в compose prod не включён.
 
-## 7. MinIO (как локально)
+## 7. Мало места на диске (`no space left on device`)
 
-В `docker-compose.prod.yml` есть сервис **minio** (порты **9100** / **9101**). В `deploy/.env.production` заполните **`MINIO_ROOT_*`** и блок **`S3_*`** по образцу из `deploy/env.production.example`: **`S3_SECRET_ACCESS_KEY`** совпадает с **`MINIO_ROOT_PASSWORD`**, **`S3_ENDPOINT`** и **`S3_PUBLIC_BASE_URL`** — с вашим **публичным IP или доменом** и портом **9100**. Консоль MinIO: `http://ВАШ_IP:9101`. После `git pull` выполните `docker compose ... up -d` (пересборка образов не обязательна, если менялись только compose/env).
+На маленьких VPS образ MinIO и Chromium в `api` быстро забивают диск.
+
+```bash
+df -h /
+docker system df
+docker builder prune -af
+docker system prune -af   # не добавляйте --volumes без понимания — удалите том postgres
+```
+
+При необходимости увеличьте диск у провайдера до **≥15–20 GB** свободного под образы и сборки.
+
+## 8. MinIO (опционально)
+
+Сервис **minio** включён только с профилем **`minio`** — базовый `up` не тянет образ MinIO и не жрёт место под него.
+
+С MinIO:
+
+```bash
+docker compose --env-file deploy/.env.production -f docker-compose.prod.yml --profile minio up -d --build
+```
+
+В `deploy/.env.production` заполните **`MINIO_ROOT_*`** и блок **`S3_*`** по образцу из `deploy/env.production.example`: ключи совпадают с MinIO, **`S3_ENDPOINT`** / **`S3_PUBLIC_BASE_URL`** — ваш IP или домен и порт **9100**. Консоль: `http://ВАШ_IP:9101`. UFW: порты **9100**, **9101**.
+
+Без MinIO (экономия диска): запускайте **без** `--profile minio` и **очистите `S3_BUCKET`** в `.env.production` (оставьте пустым), иначе API при старте может падать при попытке подключиться к S3.

@@ -16,7 +16,7 @@ import { RequestContextService } from '../common/request-context.service';
 import { utcCalendarDayMs, utcTodayCalendarDayMs } from '../common/utc-calendar-day';
 import { StorageService } from '../storage/storage.service';
 import { PDFDocument, PDFDropdown, PDFOptionList, PDFTextField } from 'pdf-lib';
-import puppeteer from 'puppeteer';
+import puppeteer from 'puppeteer-core';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';

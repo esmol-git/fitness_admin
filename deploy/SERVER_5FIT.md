@@ -66,6 +66,7 @@ docker compose --env-file deploy/.env.production -f docker-compose.prod.yml up -
 df -h /
 docker system df
 docker builder prune -af
+docker image prune -af    # часто даёт гигабайты: старые fitnessapp-api/web без тега
 docker system prune -af   # не добавляйте --volumes без понимания — удалите том postgres
 ```
 

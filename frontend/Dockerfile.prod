@@ -7,7 +7,8 @@ RUN npm ci
 
 COPY . .
 
-RUN npm run build
+# На малом VPS «npm run build» (vite + vue-tsc параллельно) падает по памяти; типы проверяйте локально/CI.
+RUN npm run build-only
 
 FROM nginx:1.27-alpine
 

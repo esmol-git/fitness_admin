@@ -51,6 +51,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        INSTALL_CHROMIUM: ${INSTALL_CHROMIUM:-1}
     restart: unless-stopped
     env_file:
       - ./deploy/.env.production

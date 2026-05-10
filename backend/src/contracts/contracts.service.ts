@@ -1,10 +1,12 @@
 import {
   BadRequestException,
   ConflictException,
+  HttpException,
   Injectable,
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
@@ -409,6 +411,11 @@ export class ContractsService {
     let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null;
     try {
       const executablePath = this.resolveBrowserExecutablePath();
+      if (!executablePath) {
+        throw new ServiceUnavailableException(
+          'Contract PDF is unavailable: Chromium is not installed in this API image. Rebuild with INSTALL_CHROMIUM=1 or run PDF on a machine with more disk.',
+        );
+      }
       browser = await puppeteer.launch({
         headless: true,
         executablePath,
@@ -424,6 +431,9 @@ export class ContractsService {
       this.logger.log(`Generated contract PDF from HTML, bytes=${pdf.length}`);
       return pdf;
     } catch (error: unknown) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
       const reason =
         error instanceof Error ? `${error.name}: ${error.message}` : 'Unknown error';
       this.logger.error(`Failed to render contract PDF: ${reason}`);

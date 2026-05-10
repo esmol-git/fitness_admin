@@ -54,7 +54,7 @@ docker compose --env-file deploy/.env.production -f docker-compose.prod.yml up -
 
 ## 6. Замечания
 
-- Контейнер **api** содержит **Chromium** для генерации PDF договоров (Puppeteer).
+- По умолчанию образ **api** ставит **Chromium** для PDF договоров (Puppeteer). Если при сборке не хватает места на диске, в **`deploy/.env.production`** задайте **`INSTALL_CHROMIUM=0`**, затем **`docker compose ... build api`** и **`up`**. PDF из HTML будет недоступен до сборки полного образа на машине с большим диском или после расширения диска VPS.
 - Шаблон **PDF** для AcroForm при необходимости положите в `backend/templates/` и пересоберите образ `api`.
 - Redis в текущем коде не используется — в compose prod не включён.
 
@@ -70,6 +70,8 @@ docker system prune -af   # не добавляйте --volumes без пони�
 ```
 
 При необходимости увеличьте диск у провайдера до **≥15–20 GB** свободного под образы и сборки.
+
+Если ошибка падает на шаге **`apt-get install chromium`** внутри Dockerfile (**`dpkg ... No space left on device`**), освободите место и повторите сборку либо соберите образ **`api` локально или в CI** и загрузите в registry, а на VPS делайте только **`pull`**.
 
 ## 8. MinIO (опционально)
 

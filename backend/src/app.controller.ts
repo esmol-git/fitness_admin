@@ -1,4 +1,5 @@
 import { Controller, Get, ServiceUnavailableException } from '@nestjs/common';
+import { SkipThrottle } from '@nestjs/throttler';
 import { PrismaService } from './prisma/prisma.service';
 import { StorageService } from './storage/storage.service';
 import { AppService } from './app.service';
@@ -17,11 +18,13 @@ export class AppController {
   }
 
   @Get('health/live')
+  @SkipThrottle()
   getLiveness() {
     return { ok: true, service: 'backend' };
   }
 
   @Get('health/ready')
+  @SkipThrottle()
   async getReadiness() {
     let dbOk = false;
     try {

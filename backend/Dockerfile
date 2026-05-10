@@ -45,9 +45,14 @@ RUN apt-get update \
 COPY package*.json ./
 COPY prisma ./prisma/
 
+# postinstall @prisma/client создаёт .prisma — удаляем и подставляем сгенерированное в builder (один проход generate).
+# Узкий диск: в npm-пакете есть тяжёлые артефакты компилятора под CockroachDB — datasource у нас только PostgreSQL.
 RUN npm ci --omit=dev \
-  && npx prisma generate \
+  && find node_modules/@prisma/client -name '*cockroachdb*' -delete 2>/dev/null || true \
+  && rm -rf node_modules/.prisma \
   && npm cache clean --force
+
+COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 
 COPY --from=builder /app/dist ./dist
 COPY templates ./templates/

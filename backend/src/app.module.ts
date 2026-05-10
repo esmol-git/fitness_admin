@@ -1,4 +1,4 @@
-import { MiddlewareConsumer, Module, NestModule, RequestMethod } from '@nestjs/common';
+import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
 import { ScheduleModule } from '@nestjs/schedule';
@@ -18,7 +18,6 @@ import { SettingsModule } from './settings/settings.module';
 import { StorageModule } from './storage/storage.module';
 import { UsersModule } from './users/users.module';
 import { VisitsModule } from './visits/visits.module';
-import { RequestContextMiddleware } from './common/request-context.middleware';
 import { CommonModule } from './common/common.module';
 
 @Module({
@@ -54,11 +53,4 @@ import { CommonModule } from './common/common.module';
     },
   ],
 })
-export class AppModule implements NestModule {
-  configure(consumer: MiddlewareConsumer) {
-    consumer.apply(RequestContextMiddleware).forRoutes({
-      path: '*path',
-      method: RequestMethod.ALL,
-    });
-  }
-}
+export class AppModule {}

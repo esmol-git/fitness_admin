@@ -2,10 +2,13 @@ import { Logger, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
+import { randomUUID } from 'node:crypto';
 import cookieParser from 'cookie-parser';
+import type { NextFunction, Request, Response } from 'express';
 import { json, urlencoded } from 'express';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
+import { RequestContextService } from './common/request-context.service';
 
 /** Лимит JSON (фото в карточке клиента как data URL сильно раздувает PATCH). По умолчанию Express ~100kb → 413. */
 const JSON_BODY_LIMIT = '15mb';
@@ -70,6 +73,18 @@ async function bootstrap() {
     bodyParser: false,
   });
   bootstrapLogger.log('NestFactory.create finished');
+
+  const requestContext = app.get(RequestContextService);
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const headerId = req.headers['x-request-id'];
+    const requestId =
+      (Array.isArray(headerId) ? headerId[0] : headerId)?.toString().trim() ||
+      randomUUID();
+
+    res.setHeader('x-request-id', requestId);
+    requestContext.run(requestId, next);
+  });
+
   app.use(json({ limit: JSON_BODY_LIMIT }));
   app.use(urlencoded({ extended: true, limit: JSON_BODY_LIMIT }));
   app.enableShutdownHooks();
@@ -103,7 +118,6 @@ async function bootstrap() {
     }),
   );
   const port = Number(process.env.PORT) || 3000;
-  bootstrapLogger.log(`Listening on 0.0.0.0:${port} …`);
   await app.listen(port, '0.0.0.0');
   bootstrapLogger.log(`HTTP server listening on 0.0.0.0:${port}`);
 }

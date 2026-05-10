@@ -119,3 +119,5 @@ docker compose --env-file deploy/.env.production -f docker-compose.prod.yml exec
 ```
 
 После `git pull` с актуальным репозиторием **`web` ждёт `service_healthy` для `api`**, чтобы не подниматься, пока localhost **`127.0.0.1:3000`** внутри **`api`** не начинает отвечать.
+
+В логах **`api`** после успешного старта должны появиться строки **`NestFactory.create finished`**, затем **`Listening on 0.0.0.0:3000`** и **`HTTP server listening`**. Если есть маппинг маршрутов, но этих строк нет — процесс застрял до **`listen`** (смотрите полный **`logs api`**, не только `--tail`).

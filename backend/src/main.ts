@@ -65,9 +65,11 @@ function logSecurityProfile(config: ConfigService) {
 }
 
 async function bootstrap() {
+  bootstrapLogger.log('Creating Nest application…');
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bodyParser: false,
   });
+  bootstrapLogger.log('NestFactory.create finished');
   app.use(json({ limit: JSON_BODY_LIMIT }));
   app.use(urlencoded({ extended: true, limit: JSON_BODY_LIMIT }));
   app.enableShutdownHooks();
@@ -101,6 +103,13 @@ async function bootstrap() {
     }),
   );
   const port = Number(process.env.PORT) || 3000;
+  bootstrapLogger.log(`Listening on 0.0.0.0:${port} …`);
   await app.listen(port, '0.0.0.0');
+  bootstrapLogger.log(`HTTP server listening on 0.0.0.0:${port}`);
 }
-void bootstrap();
+
+bootstrap().catch((err: unknown) => {
+  const msg = err instanceof Error ? err.stack ?? err.message : String(err);
+  bootstrapLogger.error(`Bootstrap failed: ${msg}`);
+  process.exit(1);
+});

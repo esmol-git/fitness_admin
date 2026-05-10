@@ -7,6 +7,7 @@
 - Запись **A** для `5fit.work.gd` → `31.70.72.232` (при необходимости отдельно `www`).
 - На сервере: Ubuntu/Debian с **Docker Engine** и **Docker Compose v2** (`docker compose`).
 - Открыть входящие порты **22** (SSH), **80** (HTTP), **443** (HTTPS после выпуска сертификата).
+- Для **MinIO**: **9100** (S3 API), **9101** (веб-консоль), например: `sudo ufw allow 9100/tcp` и `sudo ufw allow 9101/tcp`.
 
 ## 2. Код на сервере
 
@@ -56,3 +57,7 @@ docker compose --env-file deploy/.env.production -f docker-compose.prod.yml up -
 - Контейнер **api** содержит **Chromium** для генерации PDF договоров (Puppeteer).
 - Шаблон **PDF** для AcroForm при необходимости положите в `backend/templates/` и пересоберите образ `api`.
 - Redis в текущем коде не используется — в compose prod не включён.
+
+## 7. MinIO (как локально)
+
+В `docker-compose.prod.yml` есть сервис **minio** (порты **9100** / **9101**). В `deploy/.env.production` заполните **`MINIO_ROOT_*`** и блок **`S3_*`** по образцу из `deploy/env.production.example`: **`S3_SECRET_ACCESS_KEY`** совпадает с **`MINIO_ROOT_PASSWORD`**, **`S3_ENDPOINT`** и **`S3_PUBLIC_BASE_URL`** — с вашим **публичным IP или доменом** и портом **9100**. Консоль MinIO: `http://ВАШ_IP:9101`. После `git pull` выполните `docker compose ... up -d` (пересборка образов не обязательна, если менялись только compose/env).

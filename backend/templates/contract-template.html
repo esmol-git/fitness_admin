@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font-family: Arial, sans-serif; font-size: 11pt; }
+    .title { text-align: center; font-weight: bold; font-size: 14pt; margin-bottom: 5px; }
+    .section { margin-bottom: 10px; }
+    .clause { margin-bottom: 5px; text-indent: 1.5em; }
+  </style>
+</head>
+<body>
+
+<div class="title">
+  <b>ДОГОВОР № {{contractNumber}}</b>
+</div>
+
+<div class="title">
+  <b>о предоставлении спортивно-оздоровительных услуг</b>
+</div>
+
+<p>
+  <b>г. {{city}} {{contractDateVerbose}}</b>
+</p>
+
+<p>
+  <b>Исполнитель</b>: {{executorName}},
+  в лице {{executorRepresentative}}, действующего на основании Устава / Доверенности,
+  именуемое в дальнейшем «<b>Исполнитель</b>», и
+  <br>
+  <b>Заказчик</b>: {{fullName}},
+  паспорт: {{passportNumber}}, выдан {{passportIssuedBy}},
+  дата рождения {{birthDateVerbose}}, проживающий по адресу: {{address}},
+  именуемый далее «<b>Заказчик</b>»,
+  <br>
+  вместе именуемые «<b>Стороны</b>», заключили настоящий Договор о нижеследующем:
+</p>
+
+<div class="section">
+  <span class="clause">1. Предмет договора</span>
+  <div class="clause">
+    1.1. Исполнитель обязуется предоставлять Заказчику спортивно-оздоровительные услуги в фитнес-клубе
+    по адресу: {{clubAddress}}, включая:
+    <br>
+    — доступ в тренажерный зал;
+    — посещение групповых занятий (по расписанию);
+    — пользование душевыми и раздевалками;
+    — при наличии — бассейн, сауну, другие зоны (при необходимости указать).
+  </div>
+  <div class="clause">
+    1.2. Услуги оказываются в виде абонемента «{{serviceName}}»
+    на срок с {{serviceStartDateVerbose}} по {{serviceEndDateVerbose}} (включительно).
+  </div>
+</div>
+
+<div class="section">
+  <span class="clause">2. Права и обязанности сторон</span>
+  <div class="clause">
+    2.1. Исполнитель обязан:
+    <br>
+    — обеспечить доступ к оборудованию и помещениям в соответствии с правилами клуба;
+    — соблюдать санитарно-гигиенические нормы и правила;
+    — информировать Заказчика о временных ограничениях работы клуба.
+  </div>
+  <div class="clause">
+    2.2. Заказчик обязан:
+    <br>
+    — соблюдать внутренний распорядок и правила поведения в клубе;
+    — использовать оборудование аккуратно и по назначению;
+    — своевременно оплачивать услуги в соответствии с п. 3 настоящего Договора.
+  </div>
+</div>
+
+<div class="section">
+  <span class="clause">3. Стоимость услуг и порядок оплаты</span>
+  <div class="clause">
+    3.1. Стоимость услуг составляет {{servicePrice}} рублей.
+  </div>
+  <div class="clause">
+    3.2. Оплата производится Заказчиком в полном объёме до начала оказания услуг.
+  </div>
+</div>
+
+<div class="section">
+  <span class="clause">4. Ответственность сторон</span>
+  <div class="clause">
+    4.1. Исполнитель не несёт ответственности за утрату или повреждение личных вещей Заказчика.
+  </div>
+  <div class="clause">
+    4.2. Заказчик возмещает ущерб, причинённый имуществу Исполнителя.
+  </div>
+</div>
+
+<div class="section">
+  <span class="clause">5. Заключение, изменение и расторжение договора</span>
+  <div class="clause">
+    5.1. Настоящий Договор вступает в силу с момента подписания Сторонами.
+  </div>
+  <div class="clause">
+    5.2. Изменения и дополнения к Договору оформляются в письменной форме.
+  </div>
+  <div class="clause">
+    5.3. Одностороннее расторжение Договора возможно в порядке, предусмотренном законодательством РФ.
+  </div>
+</div>
+
+<div class="section">
+  <span class="clause">6. Прочие условия</span>
+  <div class="clause">
+    6.1. Споры, возникающие из настоящего Договора, урегулируются путём переговоров.
+  </div>
+  <div class="clause">
+    6.2. Заказчик подтверждает, что ознакомлен с Правилами клуба и согласен с ними.
+  </div>
+</div>
+
+<table style="width: 100%; margin-top: 30px;">
+  <tr>
+    <td style="width: 50%; vertical-align: top;">
+      <b>Исполнитель:</b><br>
+      {{executorName}}<br>
+      {{executorRepresentative}}<br>
+      <br>
+      ____________________<br>
+      подпись
+    </td>
+    <td style="width: 50%; vertical-align: top;">
+      <b>Заказчик:</b><br>
+      {{fullName}}<br>
+      {{phone}} / {{email}}<br>
+      <br>
+      ____________________<br>
+      подпись
+    </td>
+  </tr>
+</table>
+
+</body>
+</html>

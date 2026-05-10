@@ -1,0 +1,321 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  MANAGER
+  TRAINER
+  RECEPTIONIST
+  TRAINEE
+}
+
+enum MembershipStatus {
+  ACTIVE
+  EXPIRED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum PaymentOperationType {
+  SALE
+  REFUND
+}
+
+enum RefundMethod {
+  CASH
+  CARD
+  TRANSFER
+}
+
+enum ThemeMode {
+  LIGHT
+  DARK
+  SYSTEM
+}
+
+enum ClientStatus {
+  ACTIVE
+  PAUSED
+  INACTIVE
+  BLOCKED
+}
+
+enum Gender {
+  MALE
+  FEMALE
+}
+
+enum MembershipDurationUnit {
+  DAY
+  WEEK
+  MONTH
+  TRIAL
+}
+
+enum VisitSessionStatus {
+  IN_GYM
+  LEFT
+  OVERDUE
+  FORCE_CLOSED
+}
+
+enum VisitCloseReason {
+  NORMAL
+  LOST_KEY
+  FOUND_LATER
+  ADMIN_CORRECTION
+  AUTO_TIMEOUT
+  BLOCKED
+}
+
+model ThemeSettings {
+  id            String   @id @default(cuid())
+  defaultPreset String   @default("blue")
+  defaultLocale String   @default("ru")
+  updatedAt     DateTime @updatedAt
+}
+
+model User {
+  id             String    @id @default(cuid())
+  login          String    @unique
+  email          String?   @unique
+  firstName      String?
+  lastName       String?
+  birthDate      DateTime? @db.Date
+  position       String?
+  password       String
+  role           Role
+  phone          String?
+  salary         Decimal?  @db.Decimal(12, 2)
+  isEmployee     Boolean   @default(true)
+  preferredTheme ThemeMode @default(SYSTEM)
+  preferredPreset String   @default("blue")
+  preferredLocale String   @default("ru")
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  clientProfile Client?
+  gymClasses    GymClass[]      @relation("TrainerClasses")
+  clientLinks   ClientTrainer[]
+  managedClients Client[]       @relation("ClientManager")
+  processedPayments Payment[]   @relation("ProcessedByUser")
+  createdFreezes ContractFreeze[] @relation("ContractFreezeCreatedBy")
+  enteredVisitSessions VisitSession[] @relation("VisitEnteredBy")
+  exitedVisitSessions  VisitSession[] @relation("VisitExitedBy")
+  refreshTokens RefreshToken[]
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Client {
+  id                String       @id @default(cuid())
+  userId            String?      @unique
+  managerId         String?
+  name              String
+  firstName         String
+  lastName          String
+  middleName        String?
+  gender            Gender?
+  status            ClientStatus @default(ACTIVE)
+  birthDate         DateTime?    @db.Date
+  phone             String
+  email             String?
+  passport          String?
+  address           String?
+  notes             String?
+  contractNumber    String?      @unique
+  contractStartDate DateTime?    @db.Date
+  contractEndDate   DateTime?    @db.Date
+  paymentDate       DateTime?    @db.Date
+  cardNumber        String?      @unique
+  accessKey         String?
+  membershipType    String?
+  photoUrl          String?
+
+  user         User?           @relation(fields: [userId], references: [id], onDelete: SetNull)
+  manager      User?           @relation("ClientManager", fields: [managerId], references: [id], onDelete: SetNull)
+  memberships  Membership[]
+  bookings     Booking[]
+  trainerLinks ClientTrainer[]
+  contracts    ContractDocument[]
+  payments     Payment[]
+  visitSessions VisitSession[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([managerId])
+  @@index([status])
+}
+
+model VisitSession {
+  id           String   @id @default(cuid())
+  clientId     String
+  lockerNumber String
+  enteredAt    DateTime @default(now())
+  exitedAt     DateTime?
+  status       VisitSessionStatus @default(IN_GYM)
+  closeReason  VisitCloseReason?
+  enteredById  String?
+  exitedById   String?
+  comment      String?
+
+  client    Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  enteredBy User?  @relation("VisitEnteredBy", fields: [enteredById], references: [id], onDelete: SetNull)
+  exitedBy  User?  @relation("VisitExitedBy", fields: [exitedById], references: [id], onDelete: SetNull)
+
+  @@index([clientId, enteredAt])
+  @@index([exitedAt])
+  @@index([lockerNumber, exitedAt])
+}
+
+model ContractDocument {
+  id             String   @id @default(cuid())
+  clientId       String
+  contractNumber String   @unique
+  status         String   @default("DRAFT")
+  contractDate   DateTime? @db.Date
+  serviceStartDate DateTime? @db.Date
+  serviceEndDate DateTime? @db.Date
+  servicePrice   Decimal? @db.Decimal(12, 2)
+  s3Key          String?
+  s3Url          String?
+  payload        Json
+  createdAt      DateTime @default(now())
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  payments Payment[]
+  freezes ContractFreeze[]
+
+  @@index([clientId, createdAt])
+  @@index([status, createdAt])
+}
+
+model ContractFreeze {
+  id           String   @id @default(cuid())
+  contractId   String
+  startDate    DateTime @db.Date
+  endDate      DateTime @db.Date
+  durationDays Int
+  reason       String?
+  createdById  String?
+  createdAt    DateTime @default(now())
+
+  contract  ContractDocument @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  createdBy User?            @relation("ContractFreezeCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([contractId, startDate, endDate])
+}
+
+model MembershipCatalog {
+  id           String   @id @default(cuid())
+  name         String   @unique
+  price        Decimal? @db.Decimal(12, 2)
+  durationValue Int?
+  durationUnit  MembershipDurationUnit?
+  description  String?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model ClientTrainer {
+  clientId  String
+  trainerId String
+  client    Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  trainer   User   @relation(fields: [trainerId], references: [id], onDelete: Cascade)
+
+  @@id([clientId, trainerId])
+}
+
+model Membership {
+  id         String           @id @default(cuid())
+  clientId   String
+  type       String
+  price      Decimal          @db.Decimal(12, 2)
+  startDate  DateTime
+  endDate    DateTime?
+  status     MembershipStatus @default(ACTIVE)
+  visitsLeft Int?
+
+  client      Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  attendances Attendance[]
+  payments    Payment[]
+}
+
+model GymClass {
+  id        String   @id @default(cuid())
+  name      String
+  trainerId String
+  startTime DateTime
+  endTime   DateTime
+  capacity  Int      @default(20)
+
+  trainer  User      @relation("TrainerClasses", fields: [trainerId], references: [id], onDelete: Cascade)
+  bookings Booking[]
+}
+
+model Booking {
+  id         String   @id @default(cuid())
+  clientId   String
+  gymClassId String
+  createdAt  DateTime @default(now())
+
+  client   Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  gymClass GymClass @relation(fields: [gymClassId], references: [id], onDelete: Cascade)
+
+  @@unique([clientId, gymClassId])
+}
+
+model Attendance {
+  id           String    @id @default(cuid())
+  membershipId String
+  checkIn      DateTime
+  checkOut     DateTime?
+
+  membership Membership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+}
+
+model Payment {
+  id                 String        @id @default(cuid())
+  membershipId       String?
+  clientId           String?
+  contractDocumentId String?
+  amount             Decimal       @db.Decimal(12, 2)
+  paidAt             DateTime      @default(now())
+  status             PaymentStatus @default(PENDING)
+  operationType      PaymentOperationType @default(SALE)
+  refundMethod       RefundMethod?
+  externalId         String?
+  comment            String?
+  processedById      String?
+
+  membership Membership?      @relation(fields: [membershipId], references: [id], onDelete: SetNull)
+  client     Client?          @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  contract   ContractDocument? @relation(fields: [contractDocumentId], references: [id], onDelete: SetNull)
+  processedBy User?            @relation("ProcessedByUser", fields: [processedById], references: [id], onDelete: SetNull)
+
+  @@index([clientId, paidAt])
+  @@index([contractDocumentId, paidAt])
+}

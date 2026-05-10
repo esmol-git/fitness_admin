@@ -1,0 +1,145 @@
+// Эталонная схема для админ-панели фитнес-центра (RBAC, Client/User, темы).
+// Копируй в backend/prisma/schema.prisma по частям или целиком после согласования.
+// Запуск: npx prisma migrate dev
+//
+// Примечание: синтаксис datasource с url в schema — для Prisma 5.x–6.x (частый выбор с NestJS).
+// Если используешь Prisma 7+, следуй официальному переносу URL в prisma.config.ts.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  MANAGER
+  TRAINER
+  RECEPTIONIST
+  TRAINEE
+}
+
+enum MembershipStatus {
+  ACTIVE
+  EXPIRED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+/// Дефолты для киоска / новых сессий (опционально расширь под центр)
+model ThemeSettings {
+  id            String   @id @default(cuid())
+  defaultPreset String   @default("blue")
+  defaultLocale String   @default("ru")
+  updatedAt     DateTime @updatedAt
+}
+
+model User {
+  id          String   @id @default(cuid())
+  email       String   @unique
+  password    String
+  role        Role
+  phone       String?
+  salary      Decimal? @db.Decimal(12, 2)
+  isEmployee  Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  clientProfile Client?
+  gymClasses    GymClass[]      @relation("TrainerClasses")
+  clientLinks   ClientTrainer[]
+}
+
+model Client {
+  id        String    @id @default(cuid())
+  userId    String?   @unique
+  name      String
+  email     String?
+  phone     String?
+  photoUrl  String?
+  birthDate DateTime?
+  notes     String?
+
+  user         User?            @relation(fields: [userId], references: [id], onDelete: SetNull)
+  memberships  Membership[]
+  bookings     Booking[]
+  trainerLinks ClientTrainer[]
+}
+
+/// Явная связь «тренер ведёт клиента» для фильтрации списков TRAINER
+model ClientTrainer {
+  clientId  String
+  trainerId String
+  client    Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  trainer   User   @relation(fields: [trainerId], references: [id], onDelete: Cascade)
+
+  @@id([clientId, trainerId])
+}
+
+model Membership {
+  id          String            @id @default(cuid())
+  clientId    String
+  type        String
+  price       Decimal           @db.Decimal(12, 2)
+  startDate   DateTime
+  endDate     DateTime?
+  status      MembershipStatus  @default(ACTIVE)
+  visitsLeft  Int?
+
+  client      Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  attendances Attendance[]
+  payments    Payment[]
+}
+
+model GymClass {
+  id        String   @id @default(cuid())
+  name      String
+  trainerId String
+  startTime DateTime
+  endTime   DateTime
+  capacity  Int      @default(20)
+
+  trainer  User      @relation("TrainerClasses", fields: [trainerId], references: [id], onDelete: Cascade)
+  bookings Booking[]
+}
+
+model Booking {
+  id         String   @id @default(cuid())
+  clientId   String
+  gymClassId String
+  createdAt  DateTime @default(now())
+
+  client   Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  gymClass GymClass @relation(fields: [gymClassId], references: [id], onDelete: Cascade)
+
+  @@unique([clientId, gymClassId])
+}
+
+model Attendance {
+  id           String    @id @default(cuid())
+  membershipId String
+  checkIn      DateTime
+  checkOut     DateTime?
+
+  membership Membership @relation(fields: [membershipId], references: [id], onDelete: Cascade)
+}
+
+model Payment {
+  id           String        @id @default(cuid())
+  membershipId String?
+  amount       Decimal       @db.Decimal(12, 2)
+  paidAt       DateTime      @default(now())
+  status       PaymentStatus @default(PENDING)
+  externalId   String?
+
+  membership Membership? @relation(fields: [membershipId], references: [id], onDelete: SetNull)
+}

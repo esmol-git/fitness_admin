@@ -1,0 +1,63 @@
+# Продакшен: Postgres + Nest API + Nginx (SPA + proxy /api)
+#
+# Перед запуском: cp deploy/env.production.example deploy/.env.production и заполните секреты.
+# Подстановка POSTGRES_PASSWORD в DATABASE_URL делается на этапе парсинга compose — передайте файл:
+#   docker compose --env-file deploy/.env.production -f docker-compose.prod.yml up -d --build
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fitness
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in deploy/.env.production and use --env-file}
+      POSTGRES_DB: fitnessdb
+    volumes:
+      - pgdata_prod:/var/lib/postgresql/data
+    networks:
+      - fitness_internal
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U fitness -d fitnessdb']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ./deploy/.env.production
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+      DATABASE_URL: postgresql://fitness:${POSTGRES_PASSWORD}@postgres:5432/fitnessdb
+      CONTRACT_TEMPLATE_PATH: /app/templates/contract-template.pdf
+      CONTRACT_TEMPLATE_HTML_PATH: /app/templates/contract-template.html
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - '3000'
+    networks:
+      - fitness_internal
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+    restart: unless-stopped
+    ports:
+      - '80:80'
+    depends_on:
+      - api
+    networks:
+      - fitness_internal
+
+networks:
+  fitness_internal:
+    driver: bridge
+
+volumes:
+  pgdata_prod:

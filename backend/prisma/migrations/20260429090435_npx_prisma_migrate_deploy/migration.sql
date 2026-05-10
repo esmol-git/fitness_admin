@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "Client" ALTER COLUMN "birthDate" SET DATA TYPE DATE,
+ALTER COLUMN "updatedAt" DROP DEFAULT;

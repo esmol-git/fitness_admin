@@ -1,0 +1,140 @@
+/*
+  VaModal: у .va-modal__dialog и .va-modal__inner оба overflow:auto — при фокусе, outline
+  и появлении VaMessageList высота «прыгает» и появляется лишний вертикальный скролл.
+*/
+
+/* Модалки без fixed-layout (подтверждение удаления и т.п.) */
+.va-modal:not(.va-modal--fixed-layout):not(.va-modal--fullscreen) .va-modal__inner {
+  overflow-x: hidden;
+  overflow-y: visible;
+}
+
+.va-modal:not(.va-modal--fixed-layout):not(.va-modal--fullscreen) .va-modal__dialog {
+  overflow-x: hidden;
+}
+
+/*
+  fixed-layout: диалог без прокрутки, прокрутка только у блока контента (.va-modal__message).
+  min-height: 0 — обязательная часть flex, иначе браузер не сжимает колонку и появляется ложный скролл.
+*/
+.va-modal--fixed-layout .va-modal__dialog {
+  min-height: 0;
+  max-height: calc(100vh - 2rem);
+  overflow: hidden !important;
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--app-card-radius);
+}
+
+.va-modal--fixed-layout .va-modal__inner {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.va-modal--fixed-layout .va-modal__inner > .va-modal__message {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin-bottom: 0;
+  padding: var(--app-modal-padding);
+}
+
+/* Пустой слот #header не оставляет полосу */
+.va-modal--fixed-layout .va-modal__header:empty {
+  display: none;
+}
+
+.va-modal .va-button:focus-visible {
+  outline-offset: 1px;
+}
+
+/*
+  Тёмная тема: VaModal — фон диалога задаётся через inline getColor(background-secondary) со светлой палитрой.
+  Белая модалка + текст с var(--app-text) в тёмной теме (почти белый) = «невидимый» текст.
+*/
+:root[data-theme='dark'] .va-modal__dialog {
+  background-color: var(--app-surface) !important;
+  color: var(--app-text) !important;
+  border: 1px solid var(--app-border);
+}
+
+:root[data-theme='dark'] .va-modal__inner {
+  color: var(--app-text);
+}
+
+:root[data-theme='dark'] .va-modal__title {
+  color: var(--app-text);
+}
+
+:root[data-theme='dark'] .va-modal__close {
+  color: var(--app-muted);
+}
+
+/*
+  Тёмная тема: VaDropdownContent / VaSelect задают фон через inline getColor() со светлой палитрой по умолчанию.
+  Усиливаем фон и цвет текста (inline перебивается только через !important).
+*/
+:root[data-theme='dark'] .va-dropdown__content {
+  background-color: var(--app-surface) !important;
+  color: var(--app-text) !important;
+  border: 1px solid var(--app-border);
+}
+
+:root[data-theme='dark'] .va-select-dropdown__options-wrapper {
+  background: var(--app-surface) !important;
+}
+
+:root[data-theme='dark'] .va-select-option {
+  color: var(--app-text);
+}
+
+:root[data-theme='dark'] .va-select-option:hover {
+  background-color: color-mix(in srgb, var(--app-accent) 22%, transparent);
+}
+
+:root[data-theme='dark'] .va-select-content__placeholder {
+  color: var(--app-muted) !important;
+}
+
+/* Календарь VaDateInput — та же проблема с панелью */
+:root[data-theme='dark'] .va-date-picker {
+  --va-background-secondary: var(--app-surface);
+  color: var(--app-text);
+}
+
+/*
+  Значения в полях (Поиск, сортировка, фильтры VaSelect/VaInput/VaDateInput):
+  Vuestic считает --va-text-color-computed от светлой палитры — текст остаётся тёмным на тёмном поле.
+*/
+:root[data-theme='dark'] .va-input-wrapper__field {
+  color: var(--app-text) !important;
+}
+
+:root[data-theme='dark'] .va-input-wrapper__text {
+  color: var(--app-text) !important;
+  caret-color: var(--app-text);
+}
+
+:root[data-theme='dark'] .va-input-wrapper__text input,
+:root[data-theme='dark'] .va-input-wrapper__text textarea {
+  color: var(--app-text) !important;
+}
+
+/* Placeholder остаётся приглушённым */
+:root[data-theme='dark'] .va-input-wrapper__text input::placeholder,
+:root[data-theme='dark'] .va-input-wrapper__text textarea::placeholder {
+  color: var(--app-muted) !important;
+  opacity: 0.85;
+}
+
+:root[data-theme='dark'] .va-date-input input.va-date-input__input {
+  color: var(--app-text) !important;
+}
+
+:root[data-theme='dark'] .va-select-content {
+  color: var(--app-text) !important;
+}

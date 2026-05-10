@@ -34,7 +34,7 @@ ENV CHROME_PATH=/usr/bin/chromium
 ENV PUPPETEER_SKIP_DOWNLOAD=true
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends openssl ca-certificates \
+  && apt-get install -y --no-install-recommends openssl ca-certificates curl \
   && if [ "$INSTALL_CHROMIUM" = "1" ]; then \
        apt-get install -y --no-install-recommends chromium fonts-liberation fontconfig; \
      fi \

@@ -1,6 +1,9 @@
 # Продакшен: Postgres + Nest API + Nginx (SPA + proxy /api). MinIO опционально: --profile minio
 #
 # Перед запуском: cp deploy/env.production.example deploy/.env.production и заполните секреты.
+# На малом VPS: сначала «docker compose ... build api», затем «build web», затем «up --no-build»
+# — иначе «up» может снова пересобрать api/web и долго держать api без ответа (web ждёт healthy).
+#
 # Подстановка POSTGRES_PASSWORD в DATABASE_URL делается на этапе парсинга compose — передайте файл:
 #   docker compose --env-file deploy/.env.production -f docker-compose.prod.yml up -d --build
 # С MinIO (после освобождения места на диске):
@@ -68,15 +71,11 @@ services:
     expose:
       - '3000'
     healthcheck:
-      test:
-        - CMD
-        - node
-        - -e
-        - "fetch('http://127.0.0.1:3000/api/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      test: ['CMD-SHELL', 'curl -fsS -o /dev/null http://127.0.0.1:3000/api/health/live']
       interval: 15s
       timeout: 10s
-      retries: 8
-      start_period: 180s
+      retries: 12
+      start_period: 240s
     networks:
       - fitness_internal
 

@@ -52,6 +52,14 @@ docker compose --env-file deploy/.env.production -f docker-compose.prod.yml up -
 
 Миграции Prisma выполняются при старте контейнера `api` (`prisma migrate deploy`).
 
+На **малом диске / малой RAM** надёжнее не смешивать долгую пересборку и **`up`**: Compose может снова запускать **`build`** во время **`up`**, из‑за чего **`api`** долго не отвечает на healthcheck, а **`web`** ждёт **`service_healthy`** и кажется «сломанным». Тогда:
+
+```bash
+docker compose --env-file deploy/.env.production -f docker-compose.prod.yml build api
+docker compose --env-file deploy/.env.production -f docker-compose.prod.yml build web
+docker compose --env-file deploy/.env.production -f docker-compose.prod.yml up -d --no-build --force-recreate api web
+```
+
 ## 6. Замечания
 
 - По умолчанию образ **api** ставит **Chromium** для PDF договоров (Puppeteer). Если при сборке не хватает места на диске, в **`deploy/.env.production`** задайте **`INSTALL_CHROMIUM=0`**, затем **`docker compose ... build api`** и **`up`**. PDF из HTML будет недоступен до сборки полного образа на машине с большим диском или после расширения диска VPS.

@@ -52,7 +52,9 @@ docker compose --env-file deploy/.env.production -f docker-compose.prod.yml up -
 
 Миграции Prisma выполняются при старте контейнера `api` (`prisma migrate deploy`).
 
-На **малом диске / малой RAM** надёжнее не смешивать долгую пересборку и **`up`**: Compose может снова запускать **`build`** во время **`up`**, из‑за чего **`api`** долго не отвечает на healthcheck, а **`web`** ждёт **`service_healthy`** и кажется «сломанным». Тогда:
+На **малом диске / малой RAM** надёжнее не смешивать долгую пересборку и **`up`**: Compose может снова запускать **`build`** во время **`up`**, из‑за чего **`api`** долго не слушает порт. **`web`** ждёт только **`api`** (**`service_started`**): nginx поднимается сразу, несколько секунд возможны **502** на `/api`, пока Nest не готов.
+
+Надёжная последовательность без лишнего **`build`** при **`up`**:
 
 ```bash
 docker compose --env-file deploy/.env.production -f docker-compose.prod.yml build api

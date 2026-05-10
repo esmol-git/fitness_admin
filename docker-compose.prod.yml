@@ -2,7 +2,8 @@
 #
 # Перед запуском: cp deploy/env.production.example deploy/.env.production и заполните секреты.
 # На малом VPS: сначала «docker compose ... build api», затем «build web», затем «up --no-build»
-# — иначе «up» может снова пересобрать api/web и долго держать api без ответа (web ждёт healthy).
+# — иначе «up» может снова пересобрать api/web и долго держать api без ответа. Web ждёт только старт api;
+# несколько секунд после up возможны 502 на /api, пока Nest не слушает :3000.
 #
 # Подстановка POSTGRES_PASSWORD в DATABASE_URL делается на этапе парсинга compose — передайте файл:
 #   docker compose --env-file deploy/.env.production -f docker-compose.prod.yml up -d --build
@@ -70,8 +71,13 @@ services:
         condition: service_healthy
     expose:
       - '3000'
+    # TCP через Node — проверяется только прослушивание :3000 (без curl и без HTTP/маршрутов).
     healthcheck:
-      test: ['CMD-SHELL', 'curl -fsS -o /dev/null http://127.0.0.1:3000/api/health/live']
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('net').createConnection({ port: 3000, host: '127.0.0.1' }).on('connect', () => process.exit(0)).on('error', () => process.exit(1)); setTimeout(() => process.exit(1), 9500);"
       interval: 15s
       timeout: 10s
       retries: 12
@@ -89,7 +95,7 @@ services:
       - '80:80'
     depends_on:
       api:
-        condition: service_healthy
+        condition: service_started
     networks:
       - fitness_internal
 

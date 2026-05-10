@@ -69,7 +69,11 @@ docker builder prune -af
 docker system prune -af   # не добавляйте --volumes без понимания — удалите том postgres
 ```
 
+После **прерванной** сборки (`COPY node_modules`, `overlayfs ... no space`) обязательно выполните prune и проверьте **`df -h`**: часть места занята «висячими» слоями BuildKit до очистки.
+
 При необходимости увеличьте диск у провайдера до **≥15–20 GB** свободного под образы и сборки.
+
+Образ **`api`** в репозитории собирается так, чтобы **не копировать `node_modules` из стадии builder** (меньше пиковое место на диске) и чтобы **`PUPPETEER_SKIP_DOWNLOAD`** не тянул второй Chromium при `npm ci`.
 
 Если ошибка падает на шаге **`apt-get install chromium`** внутри Dockerfile (**`dpkg ... No space left on device`**), освободите место и повторите сборку либо соберите образ **`api` локально или в CI** и загрузите в registry, а на VPS делайте только **`pull`**.
 

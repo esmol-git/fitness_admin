@@ -90,3 +90,32 @@ docker compose --env-file deploy/.env.production -f docker-compose.prod.yml --pr
 В `deploy/.env.production` заполните **`MINIO_ROOT_*`** и блок **`S3_*`** по образцу из `deploy/env.production.example`: ключи совпадают с MinIO, **`S3_ENDPOINT`** / **`S3_PUBLIC_BASE_URL`** — ваш IP или домен и порт **9100**. Консоль: `http://ВАШ_IP:9101`. UFW: порты **9100**, **9101**.
 
 Без MinIO (экономия диска): запускайте **без** `--profile minio` и **очистите `S3_BUCKET`** в `.env.production` (оставьте пустым), иначе API при старте может падать при попытке подключиться к S3.
+
+## 9. `Connection refused` с `web` на `http://api:3000`
+
+Значит с **`web`** до процесса Node на порту **3000** не добиться: контейнер **`api` не слушает** (ещё не стартовал, упал после старта, завис на миграциях) или имя **`api`** в DNS указывает не на тот контейнер.
+
+Проверьте по порядку:
+
+```bash
+docker compose --env-file deploy/.env.production -f docker-compose.prod.yml ps
+docker compose --env-file deploy/.env.production -f docker-compose.prod.yml logs api --tail=100
+```
+
+С самого **`api`** (если контейнер в статусе **Up**):
+
+```bash
+docker compose --env-file deploy/.env.production -f docker-compose.prod.yml exec api \
+  node -e "fetch('http://127.0.0.1:3000/api/health/live').then(r=>console.log(r.status)).catch(e=>{console.error(e);process.exit(1)})"
+```
+
+Если здесь ошибка — смотрите логи **`api`** (часто: миграции Prisma, база, нехватка памяти, ошибка при bootstrap).
+
+Сверка IP контейнера **`api`** на хосте (должен совпасть с тем, что видит **`ping api`** из **`web`**):
+
+```bash
+docker inspect "$(docker compose --env-file deploy/.env.production -f docker-compose.prod.yml ps -q api)" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'
+docker compose --env-file deploy/.env.production -f docker-compose.prod.yml exec web ping -c1 api
+```
+
+После `git pull` с актуальным репозиторием **`web` ждёт `service_healthy` для `api`**, чтобы не подниматься, пока localhost **`127.0.0.1:3000`** внутри **`api`** не начинает отвечать.

@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import {
@@ -12,6 +12,7 @@ import {
 
 @Injectable()
 export class StorageService implements OnModuleInit {
+  private readonly logger = new Logger(StorageService.name);
   private readonly s3: S3Client;
   private readonly bucket: string | null;
   private readonly publicBaseUrl: string | null;
@@ -39,7 +40,12 @@ export class StorageService implements OnModuleInit {
   }
 
   async onModuleInit() {
-    await this.ensureBucket();
+    if (!this.bucket) return;
+    // Не блокируем bootstrap API на узком VPS/без MinIO: бакет проверяется в фоне.
+    void this.ensureBucket().catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`S3 bucket check/create skipped on startup: ${message}`);
+    });
   }
 
   private async ensureBucket() {

@@ -105,6 +105,14 @@ docker compose --env-file deploy/.env.production -f docker-compose.prod.yml --pr
 
 Без MinIO (экономия диска): запускайте **без** `--profile minio` и **очистите `S3_BUCKET`** в `.env.production` (оставьте пустым), иначе вызовы storage могут зависать или давать ошибки.
 
+### Фото клиента не загружается (PUT на `:9100` красный в Network)
+
+1. **`MINIO_CORS_ALLOW_ORIGIN`** в **`deploy/.env.production`** (см. **`deploy/env.production.example`**) — список origin’ов SPA **через запятую** (и **`http://`**, и **`https://`**, если используете оба). В **`docker-compose.prod.yml`** это пробрасывается в MinIO как **`MINIO_API_CORS_ALLOW_ORIGIN`**. После правки: **`docker compose ... --profile minio up -d --force-recreate minio`**.
+
+2. **Mixed content:** если админка открыта по **`https://`**, а **`S3_ENDPOINT`** в presigned URL — **`http://31.70.72.232:9100`**, браузер **блокирует** запись файла (политика безопасности). Варианты: временно заходить по **HTTP** на тот же хост, что и MinIO; либо вынести MinIO за **HTTPS** (поддомен + reverse proxy / тот же nginx с TLS); либо один общий HTTPS-фронт, который проксирует и SPA, и путь к S3 на том же origin (отдельная настройка инфраструктуры).
+
+3. **Место на диске:** если ранее был **`no space left on device`**, MinIO может не записать объект — проверьте **`df -h`**.
+
 ## 9. `Connection refused` с `web` на `http://api:3000`
 
 Значит с **`web`** до процесса Node на порту **3000** не добиться: контейнер **`api` не слушает** (ещё не стартовал, упал после старта, завис на миграциях) или имя **`api`** в DNS указывает не на тот контейнер.

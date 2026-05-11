@@ -43,6 +43,9 @@ services:
       # Без :? — иначе compose падает при `up` без профиля minio, если переменная не задана.
       # С профилем minio задайте сильный пароль в deploy/.env.production.
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-}
+      # Браузер шлёт PUT на :9100 с Origin вашего сайта — без CORS загрузка фото падает (preflight).
+      # Задайте в deploy/.env.production те же схемы/домены, что и у SPA (через запятую). По умолчанию разрешаем любой origin.
+      MINIO_API_CORS_ALLOW_ORIGIN: ${MINIO_CORS_ALLOW_ORIGIN:-*}
     volumes:
       - minio_data_prod:/data
     ports:

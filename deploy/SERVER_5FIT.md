@@ -203,13 +203,21 @@ docker compose --env-file deploy/.env.production -f docker-compose.prod.yml --pr
 
 Если **`WEB_IMAGE`** не задан: **`pull api`**, затем **`build web`** на сервере (или один раз запустите **Docker Web** в Actions и задайте **`WEB_IMAGE`**).
 
+Одной командой из корня репозитория (после **`git pull`** и **`chmod +x deploy/scripts/vps-pull-up.sh`** при первом запуске):
+
+```bash
+./deploy/scripts/vps-pull-up.sh --minio
+```
+
+Без MinIO уберите флаг **`--minio`**. Скрипт делает **`pull api web`**, **`up --no-build`**, **`ps`** и проверку **`/api/health/live`**.
+
 **Важно:** CI снимает нехватку места **на этапе сборки**. **RAM 1 GB** на VPS по-прежнему может не хватить на **одновременную** работу Postgres, API и **Chromium при генерации PDF** — полноценный прод лучше планировать с **≥4 GB RAM** и запасом диска под данные.
 
 ## 12. Пока ждёте апгрейд сервера (чеклист)
 
 1. **CI** — пуш в **`main`** по **`backend/`** (workflow **Docker API**) и/или по **`frontend/`** (**Docker Web**), либо вручную **Run workflow** для обоих. Пакеты в **Packages** / GHCR.
 2. **VPS** — в **`deploy/.env.production`** задайте **`API_IMAGE`** и при необходимости **`WEB_IMAGE`** (§11); при приватном репозитории — **`docker login ghcr.io`**.
-3. **Деплой** — **`pull api`** (и **`pull web`**, если задан **`WEB_IMAGE`**) и **`up --no-build`**; иначе **`web`** — **`build web`** на сервере.
+3. **Деплой** — **`./deploy/scripts/vps-pull-up.sh --minio`** (или вручную **`pull`** / **`up`** из §11); без **`WEB_IMAGE`** — **`build web`** на сервере.
 4. **HTTPS** — §4 и краткая подсказка выше; обновите **`CORS_ORIGIN`** / **`COOKIE_SECURE`**.
 5. **Полная приёмка договоров + PDF** — на стенде с **≥4 GB RAM** или после апгрейда прод-сервера.
 

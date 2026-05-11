@@ -78,6 +78,7 @@
 
 - **[deploy/SERVER_5FIT.md](deploy/SERVER_5FIT.md)** — DNS, Docker Compose, MinIO, HTTPS, узкий диск, **образы из GHCR** (`API_IMAGE` / `WEB_IMAGE`).
 - В GitHub Actions: **Docker API (GHCR)** и **Docker Web (GHCR)** — сборка без Chromium на сервере; на VPS достаточно **`docker compose pull`** и **`up --no-build`**.
+- Скрипт **`deploy/scripts/vps-pull-up.sh`** — один проход **`pull` + `up`** и проверка health (см. **`deploy/SERVER_5FIT.md`** §11).
 
 ## Документы
 

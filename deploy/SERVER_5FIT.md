@@ -211,6 +211,8 @@ docker compose --env-file deploy/.env.production -f docker-compose.prod.yml --pr
 
 Без MinIO уберите флаг **`--minio`**. Скрипт делает **`pull api web`**, **`up --no-build`**, **`ps`** и проверку **`/api/health/live`**.
 
+**Если `docker pull` пишет `pull access denied for fitnessapp-api`:** в **`deploy/.env.production`** не заданы **`API_IMAGE`** / **`WEB_IMAGE`** с **`ghcr.io/...`** — compose подставляет значения по умолчанию, и Docker ищет образы на Docker Hub. Добавьте строки из примера выше (имена из **Actions → Summary**). Скрипт **`vps-pull-up.sh`** теперь проверяет **`API_IMAGE`** до **`pull`**.
+
 **Важно:** CI снимает нехватку места **на этапе сборки**. **RAM 1 GB** на VPS по-прежнему может не хватить на **одновременную** работу Postgres, API и **Chromium при генерации PDF** — полноценный прод лучше планировать с **≥4 GB RAM** и запасом диска под данные.
 
 ## 12. Пока ждёте апгрейд сервера (чеклист)

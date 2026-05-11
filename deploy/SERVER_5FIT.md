@@ -42,6 +42,8 @@ docker compose --env-file deploy/.env.production -f docker-compose.prod.yml exec
 
 Важно: при HTTPS в `deploy/.env.production` должны быть `COOKIE_SECURE=true` и актуальный `CORS_ORIGIN` с `https://`.
 
+Краткий порядок для **TLS перед Docker** (частый вариант): на хосте **Caddy** или **nginx** на **443** с сертификатами Certbot, прокси на **`127.0.0.1:80`** (куда проброшен контейнер `web`). Тогда в compose можно не трогать **443** у `web`. После выпуска сертификатов перезапустите стек и проверьте вход по **https://**.
+
 ## 5. Обновление приложения
 
 ```bash
@@ -64,7 +66,8 @@ docker compose --env-file deploy/.env.production -f docker-compose.prod.yml up -
 
 ## 6. Замечания
 
-- По умолчанию образ **api** ставит **Chromium** для PDF договоров (Puppeteer). Если при сборке не хватает места на диске, в **`deploy/.env.production`** задайте **`INSTALL_CHROMIUM=0`**, затем **`docker compose ... build api`** и **`up`**. PDF из HTML будет недоступен до сборки полного образа на машине с большим диском или после расширения диска VPS.
+- **PDF договоры и Chromium.** Образ с **`INSTALL_CHROMIUM=1`** тянет пакет **chromium** из Debian (~700 MB только apt + слои Docker + `npm ci`). На VPS с диском **~8–10 GB** сборка почти всегда заканчивается **`No space left on device`** (как на **`dpkg ... chromium`**, так и на распаковке слоя). На таком сервере держите **`INSTALL_CHROMIUM=0`**: форма договора вернёт **503** по PDF до тех пор, пока вы не **увеличите диск**, не соберёте образ **`api`** на машине с запасом места и не загрузите его в registry (**`docker pull`** на VPS), либо не вынесете генерацию PDF в отдельный сервис.
+- Если места достаточно (или сборка в CI): **`INSTALL_CHROMIUM=1`** в **`deploy/.env.production`**, затем **`build api`** и **`up`**.
 - Шаблон **PDF** для AcroForm при необходимости положите в `backend/templates/` и пересоберите образ `api`.
 - Redis в текущем коде не используется — в compose prod не включён.
 
@@ -98,9 +101,9 @@ docker system prune -af   # не добавляйте --volumes без пони�
 docker compose --env-file deploy/.env.production -f docker-compose.prod.yml --profile minio up -d --build
 ```
 
-В `deploy/.env.production` заполните **`MINIO_ROOT_*`** и блок **`S3_*`** по образцу из `deploy/env.production.example`: ключи совпадают с MinIO, **`S3_ENDPOINT`** / **`S3_PUBLIC_BASE_URL`** — ваш IP или домен и порт **9100**. Консоль: `http://ВАШ_IP:9101`. UFW: порты **9100**, **9101**.
+В `deploy/.env.production` заполните **`MINIO_ROOT_*`** и блок **`S3_*`** по образцу из `deploy/env.production.example`: ключи совпадают с MinIO. **`S3_ENDPOINT`** — адрес, который попадает в **presigned URL** (должен открываться из браузера), обычно `http://ВАШ_IP:9100`. **`S3_INTERNAL_ENDPOINT=http://minio:9000`** — для запросов SDK из контейнера **`api`** к MinIO по Docker-сети (иначе часто таймаут на публичный IP своего VPS). **`S3_PUBLIC_BASE_URL`** — база для отображаемых URL объектов. Консоль MinIO: `http://ВАШ_IP:9101`. UFW: порты **9100**, **9101**.
 
-Без MinIO (экономия диска): запускайте **без** `--profile minio` и **очистите `S3_BUCKET`** в `.env.production` (оставьте пустым), иначе API при старте может падать при попытке подключиться к S3.
+Без MinIO (экономия диска): запускайте **без** `--profile minio` и **очистите `S3_BUCKET`** в `.env.production` (оставьте пустым), иначе вызовы storage могут зависать или давать ошибки.
 
 ## 9. `Connection refused` с `web` на `http://api:3000`
 
@@ -129,6 +132,87 @@ docker inspect "$(docker compose --env-file deploy/.env.production -f docker-com
 docker compose --env-file deploy/.env.production -f docker-compose.prod.yml exec web ping -c1 api
 ```
 
-После `git pull` с актуальным репозиторием **`web` ждёт `service_healthy` для `api`**, чтобы не подниматься, пока localhost **`127.0.0.1:3000`** внутри **`api`** не начинает отвечать.
+После `git pull` с актуальным репозиторием **`web` ждёт только старт контейнера `api`** (**`service_started`**); healthcheck **`api`** отражает готовность порта **3000**, но не блокирует подъём nginx.
+
+## 10. Быстрый деплой (узкий VPS, ~8 GB диска)
+
+```bash
+cd /opt/fitnessApp
+git pull
+
+docker compose --env-file deploy/.env.production -f docker-compose.prod.yml down
+docker builder prune -af
+docker image prune -af
+docker container prune -f
+df -h
+
+# Инфраструктура без сборки приложений (при нужде MinIO — с профилем)
+docker compose --env-file deploy/.env.production -f docker-compose.prod.yml --profile minio up -d --no-build postgres minio
+
+# Сборка только по очереди (не «build api web» одной командой)
+docker compose --env-file deploy/.env.production -f docker-compose.prod.yml build --no-cache api
+docker compose --env-file deploy/.env.production -f docker-compose.prod.yml build --no-cache web
+
+docker compose --env-file deploy/.env.production -f docker-compose.prod.yml --profile minio up -d --no-build --force-recreate api web
+
+docker compose --env-file deploy/.env.production -f docker-compose.prod.yml ps
+curl -sS http://127.0.0.1/api/health/live
+```
+
+Рекомендуется **`INSTALL_CHROMIUM=0`** на этом классе VPS, если образ **`api`** собираете **на сервере**. Если образ с Chromium приходит **из GHCR** (см. §11), на VPS **`INSTALL_CHROMIUM`** влияет только на локальный **`build`** (который при деплое из registry не вызывают).
+
+## 11. CI: образ `api` с Chromium в GHCR (без `docker build` на VPS)
+
+В репозитории workflow **`.github/workflows/docker-api.yml`**: при пуше в **`main`**, если менялся **`backend/**`**, собирается образ с **`INSTALL_CHROMIUM=1`** и публикуется в **GitHub Container Registry**:
+
+- **`ghcr.io/<owner-lowercase>/<repo-lowercase>/fitness-api:latest`**
+- тот же реестр с тегом **`:<git-sha>`**
+
+После первого успешного прогона откройте **Actions** → последний run → шаг **Summary** с полными именами образов.
+
+### Настройка доступа к пакету
+
+- Репозиторий **публичный** — **`docker pull`** с VPS без логина (достаточно указать **`API_IMAGE`**).
+- Репозиторий **приватный** — на VPS один раз: **`docker login ghcr.io`** (PAT GitHub с правом **`read:packages`**, пользователь — ваш GitHub username).
+
+### VPS: `deploy/.env.production`
+
+```env
+API_IMAGE=ghcr.io/ВАШ_OWNER/ВАШ_РЕПО/fitness-api:latest
+WEB_IMAGE=ghcr.io/ВАШ_OWNER/ВАШ_РЕПО/fitness-web:latest
+```
+
+Дополнительно (MinIO из контейнера `api` без таймаута на свой публичный IP):
+
+```env
+S3_INTERNAL_ENDPOINT=http://minio:9000
+```
+
+### Деплой только pull (без сборки api/web на диске VPS)
+
+Образ **`web`**: workflow **`.github/workflows/docker-web.yml`** (изменения в **`frontend/**`**) → **`ghcr.io/<owner>/<repo>/fitness-web:latest`**. В **`deploy/.env.production`** задайте **`WEB_IMAGE`** (по желанию вместе с **`API_IMAGE`**).
+
+```bash
+cd /opt/fitnessApp
+git pull
+
+docker compose --env-file deploy/.env.production -f docker-compose.prod.yml pull api web
+
+docker compose --env-file deploy/.env.production -f docker-compose.prod.yml --profile minio up -d --no-build --force-recreate api web
+```
+
+Если **`WEB_IMAGE`** не задан: **`pull api`**, затем **`build web`** на сервере (или один раз запустите **Docker Web** в Actions и задайте **`WEB_IMAGE`**).
+
+**Важно:** CI снимает нехватку места **на этапе сборки**. **RAM 1 GB** на VPS по-прежнему может не хватить на **одновременную** работу Postgres, API и **Chromium при генерации PDF** — полноценный прод лучше планировать с **≥4 GB RAM** и запасом диска под данные.
+
+## 12. Пока ждёте апгрейд сервера (чеклист)
+
+1. **CI** — пуш в **`main`** по **`backend/`** (workflow **Docker API**) и/или по **`frontend/`** (**Docker Web**), либо вручную **Run workflow** для обоих. Пакеты в **Packages** / GHCR.
+2. **VPS** — в **`deploy/.env.production`** задайте **`API_IMAGE`** и при необходимости **`WEB_IMAGE`** (§11); при приватном репозитории — **`docker login ghcr.io`**.
+3. **Деплой** — **`pull api`** (и **`pull web`**, если задан **`WEB_IMAGE`**) и **`up --no-build`**; иначе **`web`** — **`build web`** на сервере.
+4. **HTTPS** — §4 и краткая подсказка выше; обновите **`CORS_ORIGIN`** / **`COOKIE_SECURE`**.
+5. **Полная приёмка договоров + PDF** — на стенде с **≥4 GB RAM** или после апгрейда прод-сервера.
+
+## 13. Логи успешного старта `api`
 
 В логах **`api`** после успешного старта в конце должна быть строка **`HTTP server listening on 0.0.0.0:3000`** (раньше — **`NestFactory.create finished`** и маппинг маршрутов). Если маршруты есть, а финальной строки нет — **`listen`** не завершился (смотрите полный **`logs api`**).

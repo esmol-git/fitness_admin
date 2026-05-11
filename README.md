@@ -74,6 +74,11 @@
 
 Тесты бэка: `cd backend && npm test && npm run test:e2e`. Сборка фронта: `cd frontend && npm run build`.
 
+## Деплой прод (VPS)
+
+- **[deploy/SERVER_5FIT.md](deploy/SERVER_5FIT.md)** — DNS, Docker Compose, MinIO, HTTPS, узкий диск, **образы из GHCR** (`API_IMAGE` / `WEB_IMAGE`).
+- В GitHub Actions: **Docker API (GHCR)** и **Docker Web (GHCR)** — сборка без Chromium на сервере; на VPS достаточно **`docker compose pull`** и **`up --no-build`**.
+
 ## Документы
 
 - **[docs/ADMIN_PANEL_DEVELOPMENT_PLAN.md](docs/ADMIN_PANEL_DEVELOPMENT_PLAN.md)** — пошаговый план, RBAC, Vuestic, i18n, темы, плагины, деплой, лучшие практики.

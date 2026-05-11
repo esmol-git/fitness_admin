@@ -13,7 +13,10 @@ import {
 @Injectable()
 export class StorageService implements OnModuleInit {
   private readonly logger = new Logger(StorageService.name);
-  private readonly s3: S3Client;
+  /** HeadBucket / Put / Delete из контейнера api (часто `http://minio:9000`). */
+  private readonly s3Internal: S3Client;
+  /** Presigned URL — хост должен совпадать с тем, куда ходит браузер (`S3_ENDPOINT`). */
+  private readonly s3Signing: S3Client;
   private readonly bucket: string | null;
   private readonly publicBaseUrl: string | null;
 
@@ -22,17 +25,28 @@ export class StorageService implements OnModuleInit {
     this.bucket = this.config.get<string>('S3_BUCKET') ?? null;
     this.publicBaseUrl = this.config.get<string>('S3_PUBLIC_BASE_URL') ?? null;
 
-    this.s3 = new S3Client({
-      region,
-      credentials: this.config.get<string>('S3_ACCESS_KEY_ID')
-        ? {
-            accessKeyId: this.config.get<string>('S3_ACCESS_KEY_ID') as string,
-            secretAccessKey: this.config.get<string>('S3_SECRET_ACCESS_KEY') as string,
-          }
-        : undefined,
-      endpoint: this.config.get<string>('S3_ENDPOINT') ?? undefined,
-      forcePathStyle: this.config.get<string>('S3_FORCE_PATH_STYLE') === 'true',
-    });
+    const credentials = this.config.get<string>('S3_ACCESS_KEY_ID')
+      ? {
+          accessKeyId: this.config.get<string>('S3_ACCESS_KEY_ID') as string,
+          secretAccessKey: this.config.get<string>('S3_SECRET_ACCESS_KEY') as string,
+        }
+      : undefined;
+    const forcePathStyle = this.config.get<string>('S3_FORCE_PATH_STYLE') === 'true';
+
+    const signingEndpoint = this.config.get<string>('S3_ENDPOINT') ?? undefined;
+    const internalEndpoint =
+      this.config.get<string>('S3_INTERNAL_ENDPOINT')?.trim() || signingEndpoint;
+
+    const client = (endpoint: string | undefined) =>
+      new S3Client({
+        region,
+        credentials,
+        endpoint,
+        forcePathStyle,
+      });
+
+    this.s3Signing = client(signingEndpoint);
+    this.s3Internal = client(internalEndpoint);
   }
 
   isConfigured() {
@@ -51,13 +65,13 @@ export class StorageService implements OnModuleInit {
   private async ensureBucket() {
     if (!this.bucket) return;
     try {
-      await this.s3.send(
+      await this.s3Internal.send(
         new HeadBucketCommand({
           Bucket: this.bucket,
         }),
       );
     } catch {
-      await this.s3.send(
+      await this.s3Internal.send(
         new CreateBucketCommand({
           Bucket: this.bucket,
         }),
@@ -79,7 +93,7 @@ export class StorageService implements OnModuleInit {
       Key: key,
       ContentType: contentType,
     });
-    const uploadUrl = await getSignedUrl(this.s3, command, { expiresIn: expiresInSeconds });
+    const uploadUrl = await getSignedUrl(this.s3Signing, command, { expiresIn: expiresInSeconds });
     const publicUrl = this.publicBaseUrl
       ? `${this.publicBaseUrl.replace(/\/+$/, '')}/${key}`
       : null;
@@ -92,7 +106,7 @@ export class StorageService implements OnModuleInit {
     }
     await this.ensureBucket();
 
-    await this.s3.send(
+    await this.s3Internal.send(
       new PutObjectCommand({
         Bucket: this.bucket,
         Key: key,
@@ -109,7 +123,7 @@ export class StorageService implements OnModuleInit {
 
   async deleteObject(key: string) {
     if (!this.bucket || !key) return;
-    await this.s3.send(
+    await this.s3Internal.send(
       new DeleteObjectCommand({
         Bucket: this.bucket,
         Key: key,
@@ -121,7 +135,7 @@ export class StorageService implements OnModuleInit {
     if (!this.bucket || !key) return null;
     await this.ensureBucket();
     return getSignedUrl(
-      this.s3,
+      this.s3Signing,
       new GetObjectCommand({
         Bucket: this.bucket,
         Key: key,
@@ -176,7 +190,7 @@ export class StorageService implements OnModuleInit {
       return { configured: false, ok: true };
     }
     try {
-      await this.s3.send(
+      await this.s3Internal.send(
         new HeadBucketCommand({
           Bucket: this.bucket,
         }),

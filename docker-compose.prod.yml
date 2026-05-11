@@ -51,7 +51,10 @@ services:
     networks:
       - fitness_internal
 
+  # Образ из CI: задайте API_IMAGE в deploy/.env.production (GHCR), на сервере pull + up --no-build api.
+  # Локальная сборка: не задавайте API_IMAGE (по умолчанию fitnessapp-api:latest) и docker compose build api.
   api:
+    image: ${API_IMAGE:-fitnessapp-api:latest}
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -85,8 +88,10 @@ services:
     networks:
       - fitness_internal
 
+  # Образ из CI: WEB_IMAGE в deploy/.env.production → pull + up --no-build web.
   # Если после перезапуска только api снова 502 на /api — пересоздайте web (или убедитесь, что в образе nginx есть resolver 127.0.0.11 в location /api).
   web:
+    image: ${WEB_IMAGE:-fitnessapp-web:latest}
     build:
       context: ./frontend
       dockerfile: Dockerfile.prod

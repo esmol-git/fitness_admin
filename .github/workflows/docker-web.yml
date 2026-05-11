@@ -1,0 +1,56 @@
+# Сборка SPA (nginx) в GitHub Actions → GHCR. На VPS: pull + up --no-build web.
+
+name: Docker Web (GHCR)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - '.github/workflows/docker-web.yml'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Image name (GHCR требует lowercase)
+        id: image
+        run: |
+          lower=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')
+          echo "full=${{ env.REGISTRY }}/${lower}/fitness-web" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile.prod
+          push: true
+          tags: |
+            ${{ steps.image.outputs.full }}:latest
+            ${{ steps.image.outputs.full }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          echo "Образы:"
+          echo "  ${{ steps.image.outputs.full }}:latest"
+          echo "  ${{ steps.image.outputs.full }}:${{ github.sha }}"
+          echo ""
+          echo "На VPS: WEB_IMAGE в deploy/.env.production, затем pull web + up --no-build (см. deploy/SERVER_5FIT.md)."

@@ -29,6 +29,8 @@ export interface ClientRow {
   accessKey: string | null
   photoUrl: string | null
   inGym?: boolean
+  /** Незакрытая сессия визита (exitedAt=null): IN_GYM или OVERDUE и т.д. */
+  openVisitStatus?: 'IN_GYM' | 'OVERDUE' | 'LEFT' | 'FORCE_CLOSED' | null
   lastVisitAt?: string | null
   createdAt: string
 }

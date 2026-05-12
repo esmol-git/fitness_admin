@@ -20,6 +20,7 @@ import {
   toRuDateText,
 } from '@/utils/ruDateInput'
 import { clientPhotoDisplayUrl } from '@/utils/clientPhotoUrl'
+import { meaningfulAlertText } from '@/utils/meaningfulAlertText'
 
 const props = defineProps<{
   modelValue: ClientForm
@@ -60,8 +61,7 @@ const emit = defineEmits<{
   (e: 'pause-contract-history-item', id: string): void
   (e: 'resume-contract-history-item', id: string): void
   (e: 'terminate-contract-history-item', id: string): void
-  /** После PATCH photoUrl в БД (редактирование клиента). */
-  (e: 'photo-url-persisted'): void
+  (e: 'photo-draft-changed', pending: boolean): void
 }>()
 const { t } = useI18n()
 const { init: notify } = useToast()
@@ -212,22 +212,46 @@ function contractStatusTone(status?: string): 'success' | 'warning' | 'danger' |
 const MAX_PHOTO_MB = 8
 const photoUploading = ref(false)
 const photoUploadError = ref<string | null>(null)
+/** Выбранный файл — превью сразу, в S3 только по «Сохранить». */
+const pendingPhotoFile = ref<File | null>(null)
+const pendingPhotoPreviewUrl = ref<string | null>(null)
+const photoCameraOpen = ref(false)
+const cameraVideoRef = ref<HTMLVideoElement | null>(null)
+const cameraStream = ref<MediaStream | null>(null)
 /** Ссылка в БД есть, но <img> не смог загрузить (404/403/CORS к объекту и т.д.). */
 const avatarLoadFailed = ref(false)
 
 const safeAvatarSrc = computed(() => clientPhotoDisplayUrl(props.modelValue.photoUrl))
 
-watch(
-  () => props.modelValue.photoUrl,
-  () => {
-    avatarLoadFailed.value = false
-  },
+const showPhotoPreviewImg = computed(
+  () => Boolean(pendingPhotoPreviewUrl.value) || (Boolean(safeAvatarSrc.value) && !avatarLoadFailed.value),
 )
 
-async function onPhotoSelected(event: Event) {
-  const input = event.target as HTMLInputElement | null
-  const file = input?.files?.[0]
-  if (!file) return
+const photoPreviewSrc = computed(() => pendingPhotoPreviewUrl.value || safeAvatarSrc.value || '')
+
+const photoErrorBanner = computed(() => meaningfulAlertText(photoUploadError.value))
+
+function resetPendingPhotoFile() {
+  if (pendingPhotoPreviewUrl.value) {
+    URL.revokeObjectURL(pendingPhotoPreviewUrl.value)
+    pendingPhotoPreviewUrl.value = null
+  }
+  pendingPhotoFile.value = null
+}
+
+function stopCameraStream() {
+  const s = cameraStream.value
+  if (s) {
+    for (const track of s.getTracks()) {
+      track.stop()
+    }
+    cameraStream.value = null
+  }
+  const v = cameraVideoRef.value
+  if (v) v.srcObject = null
+}
+
+function applyPhotoDraftFromFile(file: File, input: HTMLInputElement | null | undefined) {
   photoUploadError.value = null
   if (!file.type.startsWith('image/')) {
     photoUploadError.value = t('clients.photoUnsupportedType')
@@ -239,6 +263,135 @@ async function onPhotoSelected(event: Event) {
     if (input) input.value = ''
     return
   }
+  resetPendingPhotoFile()
+  pendingPhotoFile.value = file
+  pendingPhotoPreviewUrl.value = URL.createObjectURL(file)
+  if (input) input.value = ''
+}
+
+watch(photoCameraOpen, async (open) => {
+  if (!open) {
+    stopCameraStream()
+    return
+  }
+  photoUploadError.value = null
+  await nextTick()
+  await new Promise<void>((r) => requestAnimationFrame(() => r()))
+  if (!navigator.mediaDevices?.getUserMedia) {
+    photoUploadError.value = t('clients.photoCameraUnsupported')
+    photoCameraOpen.value = false
+    return
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'user' } },
+      audio: false,
+    })
+    cameraStream.value = stream
+    const el = cameraVideoRef.value
+    if (!el) {
+      stopCameraStream()
+      photoCameraOpen.value = false
+      return
+    }
+    el.srcObject = stream
+    await el.play()
+  } catch (e: unknown) {
+    stopCameraStream()
+    photoCameraOpen.value = false
+    const name = e && typeof e === 'object' && 'name' in e ? String((e as { name: unknown }).name) : ''
+    if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+      photoUploadError.value = t('clients.photoCameraDenied')
+    } else {
+      photoUploadError.value = t('clients.photoCameraFailed')
+    }
+  }
+}, { flush: 'post' })
+
+function canvasToJpegBlob(canvas: HTMLCanvasElement, quality: number): Promise<Blob | null> {
+  return new Promise((resolve) => {
+    canvas.toBlob((b) => resolve(b), 'image/jpeg', quality)
+  })
+}
+
+async function confirmPhotoCameraCapture() {
+  const video = cameraVideoRef.value
+  if (!video || video.videoWidth < 2 || video.videoHeight < 2) return
+
+  const vw = video.videoWidth
+  const vh = video.videoHeight
+  const maxEdge = 1920
+  let tw = vw
+  let th = vh
+  if (Math.max(tw, th) > maxEdge) {
+    if (tw >= th) {
+      th = Math.round((vh * maxEdge) / vw)
+      tw = maxEdge
+    } else {
+      tw = Math.round((vw * maxEdge) / vh)
+      th = maxEdge
+    }
+  }
+
+  const canvas = document.createElement('canvas')
+  canvas.width = tw
+  canvas.height = th
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+  ctx.drawImage(video, 0, 0, tw, th)
+
+  let quality = 0.92
+  let blob = await canvasToJpegBlob(canvas, quality)
+  while (blob && blob.size > MAX_PHOTO_MB * 1024 * 1024 && quality > 0.45) {
+    quality -= 0.07
+    blob = await canvasToJpegBlob(canvas, quality)
+  }
+  if (!blob || blob.size > MAX_PHOTO_MB * 1024 * 1024) {
+    photoUploadError.value = t('clients.photoTooLarge', { max: MAX_PHOTO_MB })
+    return
+  }
+
+  const file = new File([blob], 'camera.jpg', { type: 'image/jpeg' })
+  stopCameraStream()
+  photoCameraOpen.value = false
+  applyPhotoDraftFromFile(file, undefined)
+}
+
+function cancelPhotoCamera() {
+  photoCameraOpen.value = false
+}
+
+function resetPhotoDraft() {
+  photoUploadError.value = null
+  avatarLoadFailed.value = false
+  photoCameraOpen.value = false
+  stopCameraStream()
+  resetPendingPhotoFile()
+}
+
+watch(pendingPhotoFile, (f) => {
+  emit('photo-draft-changed', f != null)
+})
+
+watch(
+  () => props.modelValue.photoUrl,
+  () => {
+    avatarLoadFailed.value = false
+  },
+)
+
+function onPhotoSelected(event: Event) {
+  const input = event.target as HTMLInputElement | null
+  const file = input?.files?.[0]
+  if (!file) return
+  applyPhotoDraftFromFile(file, input ?? undefined)
+}
+
+/** Вызов перед POST/PATCH клиента: загрузка выбранного фото в хранилище и запись public URL в форму. */
+async function flushPendingPhotoUpload(): Promise<boolean> {
+  const file = pendingPhotoFile.value
+  if (!file) return true
+  photoUploadError.value = null
   photoUploading.value = true
   try {
     const cid = props.photoUploadClientId?.trim()
@@ -254,23 +407,9 @@ async function onPhotoSelected(event: Event) {
     if (!putRes.ok) {
       throw new Error(`HTTP ${putRes.status}`)
     }
-    const publicUrl = data.publicUrl
-    if (cid) {
-      try {
-        await api.patch(`/clients/${cid}`, { photoUrl: publicUrl })
-      } catch (e: unknown) {
-        photoUploadError.value = resolveApiErrorMessage(e, {
-          defaultMessage: t('clients.photoSaveUrlFailed'),
-          byCode: {
-            PHOTO_DATA_URL_NOT_ALLOWED: t('clients.photoDataUrlNotAllowed'),
-          },
-        })
-        return
-      }
-    }
-    patch('photoUrl', publicUrl)
-    if (cid) emit('photo-url-persisted')
-    notify({ color: 'success', message: t('clients.photoUploadDone'), duration: 2000 })
+    resetPendingPhotoFile()
+    patch('photoUrl', data.publicUrl)
+    return true
   } catch (e: unknown) {
     photoUploadError.value = resolveApiErrorMessage(e, {
       defaultMessage: t('clients.photoUploadFailed'),
@@ -281,10 +420,15 @@ async function onPhotoSelected(event: Event) {
         PHOTO_DATA_URL_NOT_ALLOWED: t('clients.photoDataUrlNotAllowed'),
       },
     })
+    return false
   } finally {
     photoUploading.value = false
-    if (input) input.value = ''
   }
+}
+
+function onPhotoPreviewImgError() {
+  if (pendingPhotoPreviewUrl.value) return
+  avatarLoadFailed.value = true
 }
 
 const activeTab = ref<'general' | 'payments' | 'history'>('general')
@@ -333,6 +477,7 @@ function formatRuDate(dateLike?: string | null) {
 function clearPhoto() {
   photoUploadError.value = null
   avatarLoadFailed.value = false
+  resetPendingPhotoFile()
   patch('photoUrl', '')
 }
 
@@ -764,7 +909,12 @@ function focusFirstInvalid() {
   }
 }
 
-defineExpose({ focusFirstInvalid, validateSubmitFields })
+defineExpose({
+  focusFirstInvalid,
+  validateSubmitFields,
+  flushPendingPhotoUpload,
+  resetPhotoDraft,
+})
 
 onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', onDocumentPointerDown, true)
@@ -774,6 +924,8 @@ onBeforeUnmount(() => {
   unmountBirthMask()
   unmountContractDateMasks()
   unmountPassportMask()
+  stopCameraStream()
+  resetPendingPhotoFile()
 })
 
 onMounted(async () => {
@@ -909,20 +1061,19 @@ watch(paymentTextValue, (value) => {
       <h4 class="form-col__title">{{ $t('clients.sectionPersonal') }}</h4>
       <div class="general-top">
         <aside class="photo-rail" :class="{ 'photo-rail--busy': photoUploading }">
-          <VaAlert v-if="photoUploadError" color="danger" outline class="photo-upload-alert">{{
-            photoUploadError
-          }}</VaAlert>
           <div
             class="photo-preview"
-            :class="{ 'photo-preview--deletable': Boolean(modelValue.photoUrl?.trim()) }"
+            :class="{
+              'photo-preview--deletable': Boolean(modelValue.photoUrl?.trim() || pendingPhotoFile),
+            }"
           >
             <img
-              v-if="safeAvatarSrc && !avatarLoadFailed"
-              :src="safeAvatarSrc"
+              v-if="showPhotoPreviewImg"
+              :src="photoPreviewSrc"
               alt=""
-              @error="avatarLoadFailed = true"
+              @error="onPhotoPreviewImgError"
             />
-            <div v-if="!safeAvatarSrc || avatarLoadFailed" class="photo-placeholder">
+            <div v-if="!showPhotoPreviewImg" class="photo-placeholder">
               {{
                 avatarLoadFailed && modelValue.photoUrl?.trim()
                   ? $t('clients.photoLoadFailed')
@@ -930,7 +1081,7 @@ watch(paymentTextValue, (value) => {
               }}
             </div>
             <button
-              v-if="modelValue.photoUrl?.trim()"
+              v-if="modelValue.photoUrl?.trim() || pendingPhotoFile"
               type="button"
               class="photo-preview__delete"
               :disabled="photoUploading"
@@ -941,10 +1092,29 @@ watch(paymentTextValue, (value) => {
               <VaIcon :name="TableActionIcon.delete" size="28px" />
             </button>
           </div>
-          <label class="photo-upload">
-            <span>{{ photoUploading ? $t('clients.photoUploading') : $t('clients.photoUpload') }}</span>
-            <input type="file" accept="image/jpeg,image/png,image/webp,image/gif" :disabled="photoUploading" @change="onPhotoSelected" />
-          </label>
+          <div class="photo-actions">
+            <label class="photo-upload">
+              <span>{{
+                photoUploading ? $t('clients.photoUploading') : $t('clients.photoUpload')
+              }}</span>
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/webp,image/gif"
+                :disabled="photoUploading"
+                @change="onPhotoSelected"
+              />
+            </label>
+            <VaButton
+              type="button"
+              preset="secondary"
+              class="photo-camera-btn"
+              :disabled="photoUploading"
+              @click="photoCameraOpen = true"
+            >
+              {{ $t('clients.photoTakePicture') }}
+            </VaButton>
+          </div>
+          <p v-if="pendingPhotoFile && !photoUploading" class="photo-draft-hint">{{ $t('clients.photoSaveToUpload') }}</p>
         </aside>
         <div class="control-grid">
           <VaInput
@@ -1045,6 +1215,7 @@ watch(paymentTextValue, (value) => {
 
       <div class="control-grid general-bottom">
         <VaSelect
+          class="client-status-select"
           :model-value="modelValue.status"
           :label="$t('clients.statusLabel')"
           :options="statusOptions"
@@ -1454,6 +1625,10 @@ watch(paymentTextValue, (value) => {
       </div>
     </div>
 
+    <div v-if="photoErrorBanner" class="client-form-footer-errors" role="alert">
+      <div class="app-form-error-banner">{{ photoErrorBanner }}</div>
+    </div>
+
     <VaModal v-model="cardScannerOpen" hide-default-actions fixed-layout max-width="min(92vw, 440px)">
       <div ref="cardScannerModalBodyRef" class="card-scanner-modal">
         <h3 class="card-scanner-modal__title">{{ $t('clients.cardScannerModalTitle') }}</h3>
@@ -1467,6 +1642,28 @@ watch(paymentTextValue, (value) => {
         <div class="card-scanner-modal__actions">
           <VaButton type="button" preset="secondary" @click="cancelCardScanner">{{ $t('common.cancel') }}</VaButton>
           <VaButton type="button" @click="confirmCardScanner">{{ $t('users.save') }}</VaButton>
+        </div>
+      </div>
+    </VaModal>
+
+    <VaModal v-model="photoCameraOpen" hide-default-actions fixed-layout max-width="min(92vw, 520px)">
+      <div class="photo-camera-modal">
+        <h3 class="photo-camera-modal__title">{{ $t('clients.photoCameraTitle') }}</h3>
+        <p class="photo-camera-modal__hint">{{ $t('clients.photoCameraHint') }}</p>
+        <div class="photo-camera-modal__video-wrap">
+          <video
+            ref="cameraVideoRef"
+            class="photo-camera-modal__video"
+            playsinline
+            muted
+            autoplay
+          />
+        </div>
+        <div class="photo-camera-modal__actions">
+          <VaButton type="button" preset="secondary" @click="cancelPhotoCamera">{{ $t('common.cancel') }}</VaButton>
+          <VaButton type="button" :disabled="photoUploading" @click="confirmPhotoCameraCapture">{{
+            $t('clients.photoCapture')
+          }}</VaButton>
         </div>
       </div>
     </VaModal>
@@ -1823,8 +2020,14 @@ watch(paymentTextValue, (value) => {
   opacity: 0.85;
 }
 
-.photo-upload-alert {
-  grid-column: 1 / -1;
+.client-form-footer-errors {
+  margin-top: 0.35rem;
+}
+
+.client-status-select :deep(.va-select-content__value),
+.client-status-select :deep(.va-select-content__placeholder) {
+  color: var(--app-text) !important;
+  opacity: 1 !important;
 }
 
 .photo-preview {
@@ -1887,6 +2090,74 @@ watch(paymentTextValue, (value) => {
   font-weight: 600;
 }
 .photo-upload input { display: none; }
+
+.photo-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: stretch;
+}
+
+.photo-actions .photo-upload {
+  flex: 1 1 8rem;
+}
+
+.photo-camera-btn {
+  flex: 1 1 8rem;
+}
+
+.photo-camera-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.25rem 0.15rem 0.5rem;
+  box-sizing: border-box;
+}
+
+.photo-camera-modal__title {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.photo-camera-modal__hint {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.45;
+  color: var(--app-muted, #6b7280);
+}
+
+.photo-camera-modal__video-wrap {
+  border-radius: 10px;
+  overflow: hidden;
+  background: #0f0f12;
+  border: 1px solid color-mix(in srgb, var(--app-border) 88%, transparent);
+}
+
+.photo-camera-modal__video {
+  display: block;
+  width: 100%;
+  max-height: min(52vh, 420px);
+  object-fit: contain;
+}
+
+.photo-camera-modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.15rem;
+}
+
+.photo-draft-hint {
+  margin: 0.35rem 0 0;
+  font-size: 0.72rem;
+  line-height: 1.25;
+  color: var(--app-muted);
+  text-align: center;
+  max-width: 9rem;
+}
 
 .history-tab {
   min-height: 10rem;

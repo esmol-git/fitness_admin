@@ -10,7 +10,7 @@ type SortOrder = TableSortOrder
 
 export type ClientsListFilters = {
   status?: ClientRow['status'] | ''
-  inGym?: 'IN_GYM' | 'OUT_GYM' | ''
+  inGym?: 'IN_GYM' | 'OUT_GYM' | 'VISIT_OVERDUE' | ''
   membershipType?: string
   lastVisitFrom?: string
   lastVisitTo?: string
@@ -22,7 +22,7 @@ export type ClientsListFilters = {
 export type ParsedClientsListQuery = {
   search: string
   status: ClientRow['status'] | ''
-  inGym: 'IN_GYM' | 'OUT_GYM' | ''
+  inGym: 'IN_GYM' | 'OUT_GYM' | 'VISIT_OVERDUE' | ''
   membershipType: string
   lastVisitFrom: string
   lastVisitTo: string
@@ -61,8 +61,8 @@ export function parseClientsListRouteQuery(q: LocationQuery): ParsedClientsListQ
   const search = raw.q ?? ''
 
   let status: ClientRow['status'] | '' = ''
-  let inGym: 'IN_GYM' | 'OUT_GYM' | '' = ''
-  if (raw.gym === 'IN_GYM' || raw.gym === 'OUT_GYM') {
+  let inGym: 'IN_GYM' | 'OUT_GYM' | 'VISIT_OVERDUE' | '' = ''
+  if (raw.gym === 'IN_GYM' || raw.gym === 'OUT_GYM' || raw.gym === 'VISIT_OVERDUE') {
     inGym = raw.gym
   }
 
@@ -124,7 +124,7 @@ export function parseClientsListRouteQuery(q: LocationQuery): ParsedClientsListQ
 export function buildClientsListRouteQuery(state: {
   search: string
   status: ClientRow['status'] | ''
-  inGym: 'IN_GYM' | 'OUT_GYM' | ''
+  inGym: 'IN_GYM' | 'OUT_GYM' | 'VISIT_OVERDUE' | ''
   membershipType: string
   lastVisitFrom: string
   lastVisitTo: string

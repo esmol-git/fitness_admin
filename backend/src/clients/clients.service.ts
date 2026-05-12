@@ -166,6 +166,8 @@ export class ClientsService {
       where.visitSessions = { some: { exitedAt: null, status: VisitSessionStatus.IN_GYM } };
     } else if (query.inGym === 'OUT_GYM') {
       where.visitSessions = { none: { exitedAt: null, status: VisitSessionStatus.IN_GYM } };
+    } else if (query.inGym === 'VISIT_OVERDUE') {
+      where.visitSessions = { some: { exitedAt: null, status: VisitSessionStatus.OVERDUE } };
     }
     if (query.lastVisitFrom || query.lastVisitTo) {
       const enteredAt: Prisma.DateTimeFilter = {};
@@ -237,6 +239,10 @@ export class ClientsService {
       parts.push(
         Prisma.sql`NOT EXISTS (SELECT 1 FROM "VisitSession" v WHERE v."clientId" = c.id AND v."exitedAt" IS NULL AND v.status = 'IN_GYM'::"VisitSessionStatus")`,
       );
+    } else if (query.inGym === 'VISIT_OVERDUE') {
+      parts.push(
+        Prisma.sql`EXISTS (SELECT 1 FROM "VisitSession" v WHERE v."clientId" = c.id AND v."exitedAt" IS NULL AND v.status = 'OVERDUE'::"VisitSessionStatus")`,
+      );
     }
     if (query.lastVisitFrom || query.lastVisitTo) {
       if (query.lastVisitFrom && query.lastVisitTo) {
@@ -288,6 +294,21 @@ export class ClientsService {
     }
 
     return parts.length ? Prisma.join(parts, ' AND ') : Prisma.sql`TRUE`;
+  }
+
+  /** Незакрытая сессия: приоритет IN_GYM, иначе любой другой открытый статус (например OVERDUE). */
+  private pickClientOpenVisitStatus(
+    rows: Array<{ clientId: string; status: VisitSessionStatus }>,
+  ): Map<string, VisitSessionStatus> {
+    const map = new Map<string, VisitSessionStatus>();
+    for (const r of rows) {
+      if (r.status === VisitSessionStatus.IN_GYM) {
+        map.set(r.clientId, VisitSessionStatus.IN_GYM);
+      } else if (!map.has(r.clientId)) {
+        map.set(r.clientId, r.status);
+      }
+    }
+    return map;
   }
 
   private resolveClientListOrderBy(
@@ -414,9 +435,8 @@ export class ClientsService {
           where: {
             clientId: { in: items.map((item) => item.id) },
             exitedAt: null,
-            status: VisitSessionStatus.IN_GYM,
           },
-          select: { clientId: true },
+          select: { clientId: true, status: true },
         }),
         this.prisma.visitSession.findMany({
           where: { clientId: { in: items.map((item) => item.id) } },
@@ -431,13 +451,19 @@ export class ClientsService {
         list.push(row);
         byClient.set(row.clientId, list);
       }
-      const inGymClientIds = new Set(openVisitRows.map((row) => row.clientId));
+      const openVisitByClient = this.pickClientOpenVisitStatus(openVisitRows);
       const latestVisitByClient = new Map(latestVisitRows.map((row) => [row.clientId, row.enteredAt]));
       const updates: Array<Promise<unknown>> = [];
       for (const item of items) {
-        (item as typeof item & { inGym?: boolean; lastVisitAt?: Date | null }).inGym = inGymClientIds.has(item.id);
-        (item as typeof item & { inGym?: boolean; lastVisitAt?: Date | null }).lastVisitAt =
-          latestVisitByClient.get(item.id) ?? null;
+        const openSt = openVisitByClient.get(item.id);
+        const row = item as typeof item & {
+          inGym?: boolean;
+          openVisitStatus?: VisitSessionStatus | null;
+          lastVisitAt?: Date | null;
+        };
+        row.inGym = openSt === VisitSessionStatus.IN_GYM;
+        row.openVisitStatus = openSt ?? null;
+        row.lastVisitAt = latestVisitByClient.get(item.id) ?? null;
         const next = this.deriveClientStatusFromContracts(byClient.get(item.id) ?? [], item.status);
         if (item.status !== next) {
           item.status = next;

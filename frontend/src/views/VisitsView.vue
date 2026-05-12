@@ -446,7 +446,7 @@ onBeforeUnmount(() => {
       </VaButton>
     </template>
     <template #filters>
-      <AppListFiltersToolbar :loading="loading">
+      <AppListFiltersToolbar>
         <div class="visits-filters-grid">
           <VaInput
             :model-value="filters.search"

@@ -75,6 +75,14 @@ describe('parseClientsListRouteQuery', () => {
     expect(p.editClientId).toBe('clxyz123')
     expect(buildClientsListRouteQuery({ ...minimalClientsQueryState(), editClientId: 'abc' }).edit).toBe('abc')
   })
+
+  it('parses gym visit overdue filter', () => {
+    const p = parseClientsListRouteQuery({ gym: 'VISIT_OVERDUE' })
+    expect(p.inGym).toBe('VISIT_OVERDUE')
+    expect(buildClientsListRouteQuery({ ...minimalClientsQueryState(), inGym: 'VISIT_OVERDUE' }).gym).toBe(
+      'VISIT_OVERDUE',
+    )
+  })
 })
 
 function minimalClientsQueryState() {

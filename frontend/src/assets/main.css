@@ -71,6 +71,20 @@
   --va-skeleton-wave-color: color-mix(in srgb, var(--app-text) 14%, var(--va-primary) 42%);
 }
 
+/*
+  VaAlert (danger + outline): у Vuestic цвет текста иногда остаётся от «светлой» палитры — на светлой
+  карточке/модалке текст не виден. Класс app-readable-danger-alert вешаем на алерт и оборачиваем текст в __body.
+*/
+#app .va-alert.app-readable-danger-alert {
+  color: var(--app-text);
+}
+
+#app .va-alert.app-readable-danger-alert .app-readable-danger-alert__body {
+  color: var(--app-text) !important;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
 /* VaSkeleton: скругления (у squared в Vuestic по умолчанию 0) */
 #app .va-skeleton:not(.va-skeleton--circle):not(.va-skeleton--hidden) {
   border-radius: var(--app-radius-md) !important;
@@ -282,6 +296,24 @@ a:hover {
 .app-modal-actions .va-button {
   min-height: var(--app-action-height);
   min-width: 8rem;
+}
+
+.app-modal-form-errors {
+  margin-top: 0.15rem;
+  padding: 0 0.45rem 0.5rem;
+}
+
+.app-form-error-banner {
+  box-sizing: border-box;
+  width: 100%;
+  border: 1px solid color-mix(in srgb, var(--va-danger) 72%, var(--app-border));
+  border-radius: var(--app-radius-md);
+  padding: 0.65rem 0.85rem;
+  color: var(--app-text);
+  background: color-mix(in srgb, var(--va-danger) 9%, var(--app-surface));
+  font-size: 0.94rem;
+  line-height: 1.45;
+  font-weight: 600;
 }
 
 .app-actions-cell {

@@ -1547,7 +1547,7 @@ void (async () => {
       </template>
 
       <template #filters>
-        <AppListFiltersToolbar :loading="loadingRegistry">
+        <AppListFiltersToolbar>
           <div class="contracts-registry-filters">
             <div class="address-autocomplete contracts-client-search" @keydown.stop>
               <VaInput

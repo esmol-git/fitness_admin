@@ -8,6 +8,7 @@ import { useUiStore } from '@/stores/ui'
 import { useToast } from 'vuestic-ui'
 import { resolveApiErrorMessage } from '@/composables/useApiErrorMap'
 import { api } from '@/utils/api'
+import { clientPhotoDisplayUrl } from '@/utils/clientPhotoUrl'
 import axios from 'axios'
 const props = withDefaults(
   defineProps<{
@@ -47,7 +48,24 @@ const scannerClientCard = ref<{
   phone: string
   cardNumber: string | null
   status: string
+  photoUrl?: string | null
 } | null>(null)
+const scannerPhotoLoadFailed = ref(false)
+const scannerClientPhotoSrc = computed(() => clientPhotoDisplayUrl(scannerClientCard.value?.photoUrl))
+const scannerPhotoShowImg = computed(
+  () => Boolean(scannerClientPhotoSrc.value) && !scannerPhotoLoadFailed.value,
+)
+
+function onScannerPhotoError() {
+  scannerPhotoLoadFailed.value = true
+}
+
+watch(
+  () => [scannerClientCard.value?.id, scannerClientCard.value?.photoUrl] as const,
+  () => {
+    scannerPhotoLoadFailed.value = false
+  },
+)
 const scannerVisitStatus = ref<'IN_GYM' | 'OVERDUE' | 'LEFT' | 'FORCE_CLOSED' | null>(null)
 const scannerCurrentLocker = ref<string | null>(null)
 let timer: ReturnType<typeof setInterval> | null = null
@@ -164,7 +182,14 @@ async function onScannerSubmit() {
   try {
     const { data } = await api.get('/visits/lookup', { params: { code } })
     const payload = data as {
-      client: { id: string; fullName: string; phone: string; cardNumber: string | null; status: string }
+      client: {
+        id: string
+        fullName: string
+        phone: string
+        cardNumber: string | null
+        status: string
+        photoUrl?: string | null
+      }
       inGym: boolean
       openSession?: { lockerNumber: string; status: 'IN_GYM' | 'OVERDUE' | 'LEFT' | 'FORCE_CLOSED' } | null
     }
@@ -397,13 +422,13 @@ const clockTime = computed(() =>
       hide-default-actions
       no-padding
       no-outside-dismiss
-      max-width="min(92vw, 560px)"
+      max-width="min(96vw, 540px)"
     >
       <div ref="scannerModalRef" class="scanner-modal scanner-modal--sheet">
         <header class="scanner-modal__header scanner-modal__header--hero">
           <div class="scanner-modal__hero">
             <div class="scanner-modal__hero-icon" aria-hidden="true">
-              <VaIcon name="qr_code_scanner" size="26px" />
+              <VaIcon name="qr_code_scanner" size="22px" />
             </div>
             <div class="scanner-modal__title-wrap">
               <h3 class="scanner-modal__title">{{ t('header.scannerTitle') }}</h3>
@@ -422,6 +447,7 @@ const clockTime = computed(() =>
         </header>
 
         <form class="scanner-modal__body" @submit.prevent="onScannerSubmit">
+          <div class="scanner-modal__column">
           <div
             class="scanner-modal__code-wrap"
             :class="{ 'scanner-modal__code-wrap--not-found': scannerHintTone === 'notFound' }"
@@ -459,100 +485,123 @@ const clockTime = computed(() =>
                   : t('header.scannerInactiveClientBanner')
               }}
             </div>
-            <div class="scanner-client-card__name-row">
-              <div class="scanner-client-card__name">{{ scannerClientCard.fullName }}</div>
+            <div class="scanner-client-card__stack">
+              <div class="scanner-client-card__avatar" aria-hidden="true">
+                <img
+                  v-if="scannerPhotoShowImg"
+                  class="scanner-client-card__avatar-img"
+                  :src="scannerClientPhotoSrc"
+                  alt=""
+                  @error="onScannerPhotoError"
+                />
+                <VaIcon
+                  v-else
+                  name="person"
+                  class="scanner-client-card__avatar-placeholder"
+                  size="56px"
+                />
+              </div>
+              <div class="scanner-client-card__body">
+                <div class="scanner-client-card__headline">
+                  <div class="scanner-client-card__name">{{ scannerClientCard.fullName }}</div>
+                  <VaButton
+                    type="button"
+                    preset="plain"
+                    color="primary"
+                    size="small"
+                    icon="open_in_new"
+                    class="scanner-client-card__profile-btn"
+                    :aria-label="t('header.openClientProfile')"
+                    :title="t('header.openClientProfile')"
+                    @click.stop="goToClientProfile"
+                  />
+                </div>
+                <div class="scanner-client-card__meta">
+                  <span>{{ scannerClientCard.phone }}</span>
+                  <span class="scanner-client-card__meta-sep">·</span>
+                  <span
+                    class="scanner-client-card__status"
+                    :class="{ 'scanner-client-card__status--danger': scannerClientEntryNotAllowed }"
+                    >{{ t(`clients.status.${scannerClientCard.status}`) }}</span
+                  >
+                </div>
+                <div
+                  class="scanner-client-card__state"
+                  :class="{
+                    'scanner-client-card__state--in': scannerVisitStatus === 'IN_GYM',
+                    'scanner-client-card__state--overdue': scannerVisitStatus === 'OVERDUE',
+                  }"
+                >
+                  <template v-if="scannerHasOpenVisit">
+                    {{
+                      scannerVisitStatus === 'OVERDUE'
+                        ? t('header.scannerOverdueWithLocker', { locker: scannerCurrentLocker || '—' })
+                        : t('header.scannerInGymWithLocker', { locker: scannerCurrentLocker || '—' })
+                    }}
+                  </template>
+                  <template v-else>{{ t('header.scannerNotInGymLabel') }}</template>
+                </div>
+              </div>
+            </div>
+            <div v-if="!scannerHasOpenVisit && !scannerClientEntryNotAllowed" class="scanner-client-card__locker">
+              <VaInput
+                v-model="scannerLockerNumber"
+                class="scanner-modal__locker-field"
+                :label="t('header.scannerLockerLabel')"
+                :disabled="scannerLoading"
+              />
+            </div>
+          </div>
+          <div class="scanner-modal__bottom">
+            <div
+              class="scanner-modal__hint"
+              :class="{
+                'scanner-modal__hint--not-found': scannerHintTone === 'notFound',
+                'scanner-modal__hint--error': scannerHintTone === 'error',
+                'scanner-modal__hint--callout': scannerHintTone === 'callout',
+              }"
+              role="status"
+            >
+              <VaIcon
+                v-if="scannerHintTone === 'notFound'"
+                name="person_off"
+                color="#b91c1c"
+                class="scanner-modal__hint-icon"
+                size="20px"
+              />
+              <VaIcon
+                v-else-if="scannerHintTone === 'error'"
+                name="error_outline"
+                color="#b91c1c"
+                class="scanner-modal__hint-icon"
+                size="20px"
+              />
+              <VaIcon
+                v-else-if="scannerHintTone === 'callout'"
+                name="pin_drop"
+                class="scanner-modal__hint-icon scanner-modal__hint-icon--callout"
+                size="20px"
+              />
+              <span class="scanner-modal__hint-text">{{ scannerHint ?? t('header.scannerHint') }}</span>
+            </div>
+            <div v-if="scannerClientCard" class="scanner-modal__another-wrap">
               <VaButton
                 type="button"
-                preset="secondary"
+                preset="plain"
                 size="small"
-                icon="open_in_new"
-                class="scanner-client-card__open-profile"
-                @click.stop="goToClientProfile"
+                color="primary"
+                icon="qr_code_scanner"
+                class="scanner-modal__another-btn"
+                @click="prepareAnotherScannerLookup"
               >
-                {{ t('header.openClientProfile') }}
+                {{ t('header.scannerAnotherCode') }}
               </VaButton>
             </div>
-            <div class="scanner-client-card__meta">
-              <span>{{ scannerClientCard.phone }}</span>
-              <span>•</span>
-              <span
-                class="scanner-client-card__status"
-                :class="{ 'scanner-client-card__status--danger': scannerClientEntryNotAllowed }"
-                >{{ t(`clients.status.${scannerClientCard.status}`) }}</span
-              >
-            </div>
-            <div
-              class="scanner-client-card__state"
-              :class="{
-                'scanner-client-card__state--in': scannerVisitStatus === 'IN_GYM',
-                'scanner-client-card__state--overdue': scannerVisitStatus === 'OVERDUE',
-              }"
-            >
-              <template v-if="scannerHasOpenVisit">
-                {{
-                  scannerVisitStatus === 'OVERDUE'
-                    ? t('header.scannerOverdueWithLocker', { locker: scannerCurrentLocker || '—' })
-                    : t('header.scannerInGymWithLocker', { locker: scannerCurrentLocker || '—' })
-                }}
-              </template>
-              <template v-else>{{ t('header.scannerNotInGymLabel') }}</template>
-            </div>
-            <VaInput
-              v-if="!scannerHasOpenVisit && !scannerClientEntryNotAllowed"
-              v-model="scannerLockerNumber"
-              class="scanner-modal__locker-field"
-              :label="t('header.scannerLockerLabel')"
-              :disabled="scannerLoading"
-            />
-          </div>
-          <div
-            class="scanner-modal__hint"
-            :class="{
-              'scanner-modal__hint--not-found': scannerHintTone === 'notFound',
-              'scanner-modal__hint--error': scannerHintTone === 'error',
-              'scanner-modal__hint--callout': scannerHintTone === 'callout',
-            }"
-            role="status"
-          >
-            <VaIcon
-              v-if="scannerHintTone === 'notFound'"
-              name="person_off"
-              color="#b91c1c"
-              class="scanner-modal__hint-icon"
-              size="22px"
-            />
-            <VaIcon
-              v-else-if="scannerHintTone === 'error'"
-              name="error_outline"
-              color="#b91c1c"
-              class="scanner-modal__hint-icon"
-              size="22px"
-            />
-            <VaIcon
-              v-else-if="scannerHintTone === 'callout'"
-              name="pin_drop"
-              class="scanner-modal__hint-icon scanner-modal__hint-icon--callout"
-              size="22px"
-            />
-            <span class="scanner-modal__hint-text">{{ scannerHint ?? t('header.scannerHint') }}</span>
-          </div>
-          <div v-if="scannerClientCard" class="scanner-modal__another">
-            <VaButton
-              type="button"
-              preset="plain"
-              size="small"
-              color="primary"
-              icon="qr_code_scanner"
-              class="scanner-modal__another-btn"
-              @click="prepareAnotherScannerLookup"
-            >
-              {{ t('header.scannerAnotherCode') }}
-            </VaButton>
-          </div>
-          <div class="scanner-modal__actions">
+            <div class="scanner-modal__actions">
             <VaButton
               v-if="!scannerClientCard"
               type="submit"
+              size="large"
               icon="search"
               color="primary"
               class="scanner-modal__action-span"
@@ -567,6 +616,7 @@ const clockTime = computed(() =>
                 canCreateClientFromScanner
               "
               type="button"
+              size="large"
               icon="person_add"
               preset="secondary"
               class="scanner-modal__action-span"
@@ -577,6 +627,7 @@ const clockTime = computed(() =>
             <VaButton
               v-if="scannerClientCard && !scannerHasOpenVisit && !scannerClientEntryNotAllowed"
               type="button"
+              size="large"
               icon="login"
               color="success"
               class="scanner-modal__action-span"
@@ -588,6 +639,7 @@ const clockTime = computed(() =>
             <template v-if="scannerClientCard && scannerHasOpenVisit">
               <VaButton
                 type="button"
+                size="large"
                 color="warning"
                 icon="logout"
                 class="scanner-modal__action-split"
@@ -598,6 +650,7 @@ const clockTime = computed(() =>
               </VaButton>
               <VaButton
                 type="button"
+                size="large"
                 color="danger"
                 icon="lock_reset"
                 class="scanner-modal__action-split"
@@ -607,6 +660,8 @@ const clockTime = computed(() =>
                 {{ t('header.scannerForceClose') }}
               </VaButton>
             </template>
+          </div>
+          </div>
           </div>
         </form>
       </div>
@@ -687,7 +742,7 @@ const clockTime = computed(() =>
 .scanner-modal {
   display: flex;
   flex-direction: column;
-  max-height: min(80vh, 600px);
+  overflow: visible;
 }
 
 .scanner-modal--sheet {
@@ -701,14 +756,14 @@ const clockTime = computed(() =>
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 0.5rem;
-  padding: 1rem 1rem 0.75rem;
+  gap: 0.45rem;
+  padding: 0.65rem 0.85rem 0.55rem;
   border-bottom: 1px solid var(--app-border);
 }
 
 .scanner-modal__header--hero {
   border-bottom: none;
-  padding: 1.1rem 1.15rem 1rem;
+  padding: 0.65rem 0.85rem 0.55rem;
   background: linear-gradient(
     125deg,
     color-mix(in srgb, var(--va-primary) 14%, transparent) 0%,
@@ -720,17 +775,17 @@ const clockTime = computed(() =>
 .scanner-modal__hero {
   display: flex;
   align-items: flex-start;
-  gap: 0.85rem;
+  gap: 0.6rem;
   min-width: 0;
   flex: 1;
-  padding-right: 0.25rem;
+  padding-right: 0.2rem;
 }
 
 .scanner-modal__hero-icon {
   flex-shrink: 0;
-  width: 3rem;
-  height: 3rem;
-  border-radius: 14px;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 12px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -750,31 +805,48 @@ const clockTime = computed(() =>
 
 .scanner-modal__title {
   margin: 0;
-  font-size: 1.05rem;
+  font-size: 1rem;
   font-weight: 700;
   color: var(--app-text);
+  line-height: 1.25;
 }
 
 .scanner-modal__subtitle {
-  margin: 0.25rem 0 0;
-  font-size: 0.85rem;
+  margin: 0.12rem 0 0;
+  font-size: 0.78rem;
   color: var(--app-muted);
+  line-height: 1.35;
 }
 
 .scanner-modal__body {
-  padding: 1rem 1.15rem 1.15rem;
+  padding: 0.4rem 0.65rem 0.5rem;
   display: flex;
   flex-direction: column;
-  gap: 0.85rem;
   align-items: stretch;
   width: 100%;
   box-sizing: border-box;
+  overflow: visible;
   background: linear-gradient(180deg, var(--app-surface) 0%, color-mix(in srgb, var(--app-surface) 96%, var(--app-muted) 4%) 100%);
+}
+
+.scanner-modal__column {
+  width: 100%;
+  max-width: 100%;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.38rem;
+  min-width: 0;
 }
 
 .scanner-modal__body :deep(.va-input-wrapper) {
   width: 100%;
   display: block;
+  margin-bottom: 0;
+}
+
+.scanner-modal__body :deep(.va-input-wrapper__field) {
+  min-height: 2.35rem;
 }
 
 .scanner-modal__code-wrap {
@@ -811,34 +883,42 @@ const clockTime = computed(() =>
   opacity: 0;
 }
 
+.scanner-modal__bottom {
+  display: flex;
+  flex-direction: column;
+  gap: 0.32rem;
+  flex-shrink: 0;
+  width: 100%;
+}
+
 .scanner-modal__hint {
   width: 100%;
   box-sizing: border-box;
-  font-size: 0.83rem;
+  font-size: 0.8rem;
   color: var(--app-muted);
-  min-height: 1.1rem;
+  min-height: 0;
   display: flex;
   align-items: flex-start;
-  gap: 0.5rem;
+  gap: 0.4rem;
 }
 
 .scanner-modal__hint-text {
   flex: 1;
   min-width: 0;
-  line-height: 1.45;
+  line-height: 1.38;
 }
 
 .scanner-modal__hint-icon {
   flex-shrink: 0;
-  margin-top: 0.05rem;
+  margin-top: 0.02rem;
 }
 
 .scanner-modal__hint--not-found {
   color: #991b1b;
   font-weight: 600;
-  font-size: 0.88rem;
-  padding: 0.55rem 0.65rem;
-  border-radius: 10px;
+  font-size: 0.82rem;
+  padding: 0.4rem 0.55rem;
+  border-radius: 9px;
   background: rgba(220, 38, 38, 0.12);
   border: 1px solid rgba(220, 38, 38, 0.45);
 }
@@ -846,27 +926,27 @@ const clockTime = computed(() =>
 .scanner-modal__hint--error {
   color: #991b1b;
   font-weight: 600;
-  font-size: 0.88rem;
-  padding: 0.55rem 0.65rem;
-  border-radius: 10px;
+  font-size: 0.82rem;
+  padding: 0.4rem 0.55rem;
+  border-radius: 9px;
   background: rgba(220, 38, 38, 0.1);
   border: 1px solid rgba(220, 38, 38, 0.38);
 }
 
-/* Светлый текст на более насыщенном фоне — читаемо на тёмной теме (раньше #9a3412 на жёлтой прозрачности почти сливался). */
+/* Светлый текст на более насыщенном фоне — читаемо на тёмной теме. */
 .scanner-modal__hint--callout {
   color: #fffbeb;
   font-weight: 700;
-  font-size: 0.94rem;
-  padding: 0.65rem 0.75rem;
-  border-radius: 10px;
+  font-size: 0.84rem;
+  padding: 0.42rem 0.55rem;
+  border-radius: 9px;
   background: linear-gradient(
     135deg,
     color-mix(in srgb, #c2410c 52%, var(--app-surface)) 0%,
     color-mix(in srgb, #9a3412 48%, var(--app-surface)) 100%
   );
   border: 1px solid rgba(251, 191, 36, 0.42);
-  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.28);
+  box-shadow: 0 1px 8px rgba(0, 0, 0, 0.2);
 }
 
 .scanner-modal__hint--callout .scanner-modal__hint-text {
@@ -883,10 +963,11 @@ const clockTime = computed(() =>
   width: 100%;
   box-sizing: border-box;
   border: 1px solid var(--app-border);
-  border-radius: 14px;
-  padding: 0.9rem 0.85rem;
-  display: grid;
-  gap: 0.5rem;
+  border-radius: 12px;
+  padding: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
   transition:
     border-color 0.15s ease,
     box-shadow 0.15s ease,
@@ -916,10 +997,10 @@ const clockTime = computed(() =>
 
 /* Светлый текст на насыщенном фоне — тёмно-красный (#991b1b) на rgba(..., 0.16) на тёмной карте не читался. */
 .scanner-client-card__alert {
-  margin: -0.15rem -0.35rem 0.15rem;
-  padding: 0.45rem 0.55rem;
-  border-radius: 8px;
-  font-size: 0.8rem;
+  margin: -0.05rem -0.2rem 0.1rem;
+  padding: 0.35rem 0.45rem;
+  border-radius: 7px;
+  font-size: 0.76rem;
   font-weight: 700;
   line-height: 1.35;
   color: #fff5f5;
@@ -932,32 +1013,97 @@ const clockTime = computed(() =>
   box-shadow: 0 1px 8px rgba(0, 0, 0, 0.22);
 }
 
-.scanner-client-card__name-row {
+.scanner-client-card__stack {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+/* Квадрат 300×300 без лишней серой рамки снаружи. */
+.scanner-client-card__avatar {
+  box-sizing: border-box;
+  width: min(300px, 100%);
+  aspect-ratio: 1;
+  max-width: 300px;
+  max-height: 300px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--app-surface);
+  border: 1px solid var(--app-border);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.06);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.scanner-client-card__avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.scanner-client-card__avatar-placeholder {
+  color: color-mix(in srgb, var(--app-muted) 50%, var(--app-text));
+  opacity: 0.75;
+}
+
+.scanner-client-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+  min-width: 0;
+  width: 100%;
+  align-self: stretch;
+  padding: 0 0.1rem 0.05rem;
+}
+
+.scanner-client-card__headline {
+  display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 0.45rem;
+  gap: 0.4rem;
+  min-width: 0;
 }
 
 .scanner-client-card__name {
   flex: 1;
   min-width: 0;
-  font-size: 1rem;
+  font-size: 1.02rem;
   font-weight: 700;
+  line-height: 1.28;
+  letter-spacing: -0.01em;
 }
 
-.scanner-client-card__open-profile {
+.scanner-client-card__profile-btn {
   flex-shrink: 0;
+  margin: -0.2rem -0.15rem 0 0;
+  opacity: 0.92;
+}
+
+.scanner-client-card__profile-btn:hover {
+  opacity: 1;
+}
+
+.scanner-client-card__locker {
+  width: 100%;
 }
 
 .scanner-client-card__meta {
-  font-size: 0.82rem;
+  font-size: 0.8125rem;
   color: var(--app-muted);
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0.3rem;
   flex-wrap: wrap;
+}
+
+.scanner-client-card__meta-sep {
+  opacity: 0.45;
+  user-select: none;
 }
 
 .scanner-client-card__status--danger {
@@ -966,28 +1112,37 @@ const clockTime = computed(() =>
 }
 
 .scanner-client-card__state {
-  font-size: 0.85rem;
+  font-size: 0.8125rem;
   font-weight: 600;
   color: #fb923c;
+  line-height: 1.35;
+  margin-top: 0.08rem;
+  padding: 0.28rem 0.4rem;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--app-muted) 12%, var(--app-surface));
 }
 
 .scanner-client-card__state--in {
   color: #166534;
+  background: color-mix(in srgb, var(--va-success) 12%, var(--app-surface));
 }
 
 .scanner-client-card__state--overdue {
   color: #c2410c;
+  background: color-mix(in srgb, #ea580c 10%, var(--app-surface));
 }
 
-.scanner-modal__another {
-  width: 100%;
+.scanner-modal__another-wrap {
   display: flex;
-  justify-content: flex-start;
-  padding-top: 0.1rem;
+  justify-content: center;
+  margin: 0;
 }
 
 .scanner-modal__another-btn {
   font-weight: 600;
+  min-height: 0 !important;
+  padding-top: 0.15rem !important;
+  padding-bottom: 0.15rem !important;
 }
 
 .scanner-modal__actions {
@@ -1010,6 +1165,17 @@ const clockTime = computed(() =>
 .scanner-modal__actions :deep(.va-button) {
   width: 100%;
   justify-content: center;
+  min-height: 3.35rem;
+  padding-top: 0.5rem !important;
+  padding-bottom: 0.5rem !important;
+  font-size: 0.97rem !important;
+  font-weight: 700 !important;
+  border-radius: 12px !important;
+  letter-spacing: 0.01em;
+}
+
+.scanner-modal__actions :deep(.va-button__content) {
+  gap: 0.5rem;
 }
 
 @media (max-width: 440px) {

@@ -28,7 +28,8 @@ import { CommonModule } from './common/common.module';
     ThrottlerModule.forRoot([
       {
         ttl: 60 * 1000,
-        limit: 10,
+        /** Список клиентов/договоров и фильтры дают много GET подряд; 10/мин ломало UI (429). */
+        limit: 120,
       },
     ]),
     PrismaModule,

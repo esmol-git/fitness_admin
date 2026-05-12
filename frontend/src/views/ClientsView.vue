@@ -32,6 +32,7 @@ import type { TableHeaderConfig, TableSortOrder } from '@/types/table'
 import { api } from '@/utils/api'
 import { clientPhotoDisplayUrl } from '@/utils/clientPhotoUrl'
 import { getClientContractDaysLeft } from '@/utils/clientContractRemaining'
+import { meaningfulAlertText } from '@/utils/meaningfulAlertText'
 
 const { t } = useI18n()
 const { init: notify } = useToast()
@@ -46,7 +47,7 @@ const table = useTableState<
   ClientRow,
   {
     status?: ClientStatus | ''
-    inGym?: 'IN_GYM' | 'OUT_GYM' | ''
+    inGym?: 'IN_GYM' | 'OUT_GYM' | 'VISIT_OVERDUE' | ''
     membershipType?: string
     lastVisitFrom?: string
     lastVisitTo?: string
@@ -110,6 +111,7 @@ const inGymFilterOptions = computed(() => [
   { value: ALL_GYM_VALUE, text: t('common.all') },
   { value: 'IN_GYM', text: t('clients.inGymYes') },
   { value: 'OUT_GYM', text: t('clients.inGymNo') },
+  { value: 'VISIT_OVERDUE', text: t('clients.inGymOverdueVisit') },
 ])
 const genderFilterOptions = computed(() => [
   { value: ALL_GENDER_VALUE, text: t('common.all') },
@@ -177,13 +179,22 @@ const editState = useCrudForm<ClientForm>(() => ({
   photoUrl: '',
 }))
 
+const createModalErrorText = computed(() => meaningfulAlertText(createState.error.value))
+const editModalErrorText = computed(() => meaningfulAlertText(editState.error.value))
+
 const createAttempted = ref(false)
 const editAttempted = ref(false)
 const editingId = ref<string | null>(null)
-const editHeaderSnapshot = ref<{ headline: string; status: ClientStatus; inGym: boolean | null }>({
+const editHeaderSnapshot = ref<{
+  headline: string
+  status: ClientStatus
+  inGym: boolean | null
+  openVisitStatus: ClientRow['openVisitStatus']
+}>({
   headline: '—',
   status: 'INACTIVE',
   inGym: null,
+  openVisitStatus: null,
 })
 const editPauseUntil = ref<string | null>(null)
 const createInitialSnapshot = ref('')
@@ -199,8 +210,17 @@ const unblockTarget = ref<ClientRow | null>(null)
 const discardOpen = ref(false)
 const discardTarget = ref<'create' | 'edit' | null>(null)
 const generateConfirmOpen = ref(false)
-const createFormRef = ref<{ focusFirstInvalid: () => void; validateSubmitFields: () => void } | null>(null)
-const editFormRef = ref<{ focusFirstInvalid: () => void; validateSubmitFields: () => void } | null>(null)
+type ClientEditorFormExpose = {
+  focusFirstInvalid: () => void
+  validateSubmitFields: () => void
+  flushPendingPhotoUpload: () => Promise<boolean>
+  resetPhotoDraft: () => void
+}
+
+const createFormRef = ref<ClientEditorFormExpose | null>(null)
+const editFormRef = ref<ClientEditorFormExpose | null>(null)
+const createPhotoDraftPending = ref(false)
+const editPhotoDraftPending = ref(false)
 const createCardChecking = ref(false)
 const editCardChecking = ref(false)
 const createCardTaken = ref(false)
@@ -302,6 +322,28 @@ function getPersonHeadline(form: ClientForm) {
   return age ? `${fio}, ${age}` : fio
 }
 
+function clientGymTableChip(row: Pick<ClientRow, 'inGym' | 'openVisitStatus'>) {
+  if (row.inGym === true) {
+    return {
+      label: t('clients.inGymYes'),
+      tone: 'success' as const,
+      title: t('clients.openScannerFromGymChip'),
+    }
+  }
+  if (row.openVisitStatus === 'OVERDUE') {
+    return {
+      label: t('clients.inGymOverdueVisit'),
+      tone: 'warning' as const,
+      title: t('clients.inGymOverdueVisitChipTitle'),
+    }
+  }
+  return {
+    label: t('clients.inGymNo'),
+    tone: 'neutral' as const,
+    title: t('clients.openScannerFromGymChip'),
+  }
+}
+
 const createPersonHeadline = computed(() => getPersonHeadline(createState.form.value))
 const createHeaderStatus = computed(() => createState.form.value.status)
 const hasCurrentContractForEdit = computed(() =>
@@ -323,7 +365,11 @@ const onStatusFilter = createStringFilterHandler('status', (value) =>
   parseClientStatusFilterValue(value === ALL_STATUS_VALUE ? '' : value),
 )
 const onInGymFilter = createStringFilterHandler('inGym', (value) =>
-  value === ALL_GYM_VALUE ? '' : value === 'IN_GYM' || value === 'OUT_GYM' || value === '' ? value : null,
+  value === ALL_GYM_VALUE
+    ? ''
+    : value === 'IN_GYM' || value === 'OUT_GYM' || value === 'VISIT_OVERDUE' || value === ''
+      ? value
+      : null,
 )
 const onMembershipFilter = createStringFilterHandler('membershipType', (value) =>
   value === ALL_MEMBERSHIP_VALUE ? '' : value,
@@ -364,7 +410,7 @@ const clientsSource = useTableDataSource<ClientRow, typeof query.value>({
     ) {
       safeParams.status = params.status
     }
-    if (params.inGym === 'IN_GYM' || params.inGym === 'OUT_GYM') {
+    if (params.inGym === 'IN_GYM' || params.inGym === 'OUT_GYM' || params.inGym === 'VISIT_OVERDUE') {
       safeParams.inGym = params.inGym
     }
     const membershipType = typeof params.membershipType === 'string' ? params.membershipType.trim() : ''
@@ -418,6 +464,7 @@ const tableItems = computed(() =>
       item.effectiveContractStartDate ?? item.contractStartDate,
       item.effectiveContractEndDate ?? item.contractEndDate,
     )
+    const gymChip = clientGymTableChip(item)
     return {
       ...item,
       avatarUrl: clientPhotoDisplayUrl(item.photoUrl),
@@ -431,6 +478,9 @@ const tableItems = computed(() =>
       contractDaysText:
         remaining.daysLeft == null ? '—' : t('clients.daysLeftShort', { n: Math.max(0, remaining.daysLeft) }),
       contractDaysTone: remaining.tone,
+      gymChipLabel: gymChip.label,
+      gymChipTone: gymChip.tone,
+      gymChipTitle: gymChip.title,
     }
   }),
 )
@@ -446,23 +496,27 @@ const currentManagerName = computed(() => {
 const editorStatusOptions = computed(
   () => statusFilterOptions.value.slice(1) as Array<{ value: ClientStatus; text: string }>,
 )
-const createDirty = computed(
-  () => JSON.stringify(createState.form.value) !== createInitialSnapshot.value,
-)
-const editDirty = computed(
-  () => JSON.stringify(editState.form.value) !== editInitialSnapshot.value,
-)
-
-/** После авто-сохранения photoUrl в БД синхронизируем снимок, чтобы форма не считалась «грязной». */
-function onEditPhotoUrlPersisted() {
-  try {
-    const s = JSON.parse(editInitialSnapshot.value) as ClientForm
-    s.photoUrl = editState.form.value.photoUrl
-    editInitialSnapshot.value = JSON.stringify(s)
-  } catch {
-    editInitialSnapshot.value = JSON.stringify(editState.form.value)
-  }
+async function flushClientFormPhoto(form: ClientEditorFormExpose | null): Promise<boolean> {
+  if (!form?.flushPendingPhotoUpload) return true
+  return await form.flushPendingPhotoUpload()
 }
+
+function onCreatePhotoDraftChanged(v: boolean) {
+  createPhotoDraftPending.value = v
+}
+
+function onEditPhotoDraftChanged(v: boolean) {
+  editPhotoDraftPending.value = v
+}
+
+const createDirty = computed(() => {
+  const pending = createPhotoDraftPending.value
+  return pending || JSON.stringify(createState.form.value) !== createInitialSnapshot.value
+})
+const editDirty = computed(() => {
+  const pending = editPhotoDraftPending.value
+  return pending || JSON.stringify(editState.form.value) !== editInitialSnapshot.value
+})
 
 function statusColor(status: ClientStatus) {
   if (status === 'ACTIVE') return 'success'
@@ -485,6 +539,17 @@ function formatRuDate(dateLike?: string | null) {
 const editPauseUntilCompactLabel = computed(() =>
   editPauseUntil.value ? `до ${formatRuDate(editPauseUntil.value)}` : '',
 )
+
+const editGymChip = computed(() => {
+  const s = editHeaderSnapshot.value
+  if (s.status !== 'ACTIVE') return null
+  if (s.inGym == null) return { label: '—', tone: 'neutral' as const }
+  if (s.openVisitStatus === 'OVERDUE' && !s.inGym) {
+    return { label: t('clients.inGymOverdueVisit'), tone: 'warning' as const }
+  }
+  if (s.inGym) return { label: t('clients.inGymYes'), tone: 'success' as const }
+  return { label: t('clients.inGymNo'), tone: 'neutral' as const }
+})
 
 function generateContractNumber(baseDate = new Date()) {
   const y = baseDate.getFullYear()
@@ -543,6 +608,7 @@ function requiredInvalid(form: ClientForm) {
 
 function openCreate() {
   createAttempted.value = false
+  createPhotoDraftPending.value = false
   createState.openForm()
   const now = new Date()
   const todayIso = formatDateIso(now)
@@ -552,6 +618,7 @@ function openCreate() {
   createInitialSnapshot.value = JSON.stringify(createState.form.value)
   createCardChecking.value = false
   createCardTaken.value = false
+  void nextTick(() => createFormRef.value?.resetPhotoDraft())
 }
 
 function openCreateWithPrefilledCard(cardNumber: string) {
@@ -584,6 +651,7 @@ function regenerateEditContractNumber() {
 
 function openEdit(row: ClientRow) {
   editAttempted.value = false
+  editPhotoDraftPending.value = false
   editingId.value = row.id
   editState.openForm({
     firstName: row.firstName || '',
@@ -609,12 +677,14 @@ function openEdit(row: ClientRow) {
     headline: getPersonHeadline(editState.form.value),
     status: row.status || 'ACTIVE',
     inGym: typeof row.inGym === 'boolean' ? row.inGym : null,
+    openVisitStatus: row.openVisitStatus ?? null,
   }
   editInitialSnapshot.value = JSON.stringify(editState.form.value)
   editCardChecking.value = false
   editCardTaken.value = false
   const requestId = ++editHistoryRequestId.value
   void Promise.all([loadEditContractsHistory(row.id, requestId), loadEditPaymentsHistory(row.id, requestId)])
+  void nextTick(() => editFormRef.value?.resetPhotoDraft())
 }
 
 function closeClientRowActionsMenu(ev: Event) {
@@ -625,6 +695,22 @@ function closeClientRowActionsMenu(ev: Event) {
 function runClientRowMenuAction(ev: Event, action: () => void) {
   closeClientRowActionsMenu(ev)
   action()
+}
+
+type ClientsTableRowClickPayload = {
+  event: Event
+  item: Record<string, unknown>
+  itemIndex: number
+}
+
+function handleClientsTableRowClick(payload: ClientsTableRowClickPayload) {
+  if (loading.value || editState.loading.value || createState.loading.value) return
+  const t = payload.event.target
+  if (!(t instanceof Element)) return
+  if (t.closest('.clients-row-menu')) return
+  if (t.closest('.clients-gym-chip-trigger')) return
+  if (t.closest('.clients-table-actions-cell')) return
+  openEdit(payload.item as unknown as ClientRow)
 }
 
 function onDocumentPointerDownCloseClientRowMenus(ev: Event) {
@@ -672,6 +758,7 @@ function requestCloseCreate() {
     return
   }
   createState.closeForm()
+  void nextTick(() => createFormRef.value?.resetPhotoDraft())
 }
 
 function requestCloseEdit() {
@@ -682,13 +769,16 @@ function requestCloseEdit() {
     return
   }
   editState.closeForm()
+  void nextTick(() => editFormRef.value?.resetPhotoDraft())
 }
 
 function discardChanges() {
   if (discardTarget.value === 'create') {
     createState.closeForm()
+    void nextTick(() => createFormRef.value?.resetPhotoDraft())
   } else if (discardTarget.value === 'edit') {
     editState.closeForm()
+    void nextTick(() => editFormRef.value?.resetPhotoDraft())
   }
   discardOpen.value = false
   discardTarget.value = null
@@ -739,6 +829,10 @@ async function createClient() {
   createState.loading.value = true
   createState.error.value = null
   try {
+    const photoOk = await flushClientFormPhoto(createFormRef.value)
+    if (!photoOk) {
+      return
+    }
     await api.post('/clients', toPayload(createState.form.value))
     createState.closeForm()
     createInitialSnapshot.value = ''
@@ -773,6 +867,10 @@ async function updateClient() {
   editState.loading.value = true
   editState.error.value = null
   try {
+    const photoOk = await flushClientFormPhoto(editFormRef.value)
+    if (!photoOk) {
+      return
+    }
     await api.patch(`/clients/${editingId.value}`, toPayload(editState.form.value, false))
     editState.closeForm()
     editInitialSnapshot.value = ''
@@ -889,6 +987,10 @@ async function saveAndGenerateContract() {
   editState.loading.value = true
   editState.error.value = null
   try {
+    const photoOk = await flushClientFormPhoto(editFormRef.value)
+    if (!photoOk) {
+      return
+    }
     await api.patch(`/clients/${editingId.value}`, toPayload(editState.form.value, false))
     editInitialSnapshot.value = JSON.stringify(editState.form.value)
     generateConfirmOpen.value = false
@@ -1626,7 +1728,7 @@ watch(
       </template>
       <template #filters>
         <div class="clients-filter-bar">
-          <AppListFiltersToolbar :loading="loading">
+          <AppListFiltersToolbar>
             <div class="clients-filters-grid">
               <VaInput
                 :model-value="search"
@@ -1781,6 +1883,8 @@ watch(
         <div class="clients-table-scroll">
           <VaDataTable
             class="clients-data-table app-table-actions-last-col"
+            clickable
+            hoverable
             :items="tableItems"
             :columns="columns"
             :sort-by="sortBy ?? undefined"
@@ -1788,6 +1892,7 @@ watch(
             disable-client-side-sorting
             @update:sort-by="handleSortByUpdate"
             @update:sorting-order="handleSortOrderUpdate"
+            @row:click="handleClientsTableRowClick"
           >
           <template #cell(photo)="{ rowData }">
             <div class="photo-cell">
@@ -1818,13 +1923,10 @@ watch(
             <button
               type="button"
               class="clients-gym-chip-trigger"
-              :title="t('clients.openScannerFromGymChip')"
+              :title="rowData.gymChipTitle"
               @click.stop="openScannerFromGymChip(rowData)"
             >
-              <StatusBadge
-                :label="rowData.inGym ? t('clients.inGymYes') : t('clients.inGymNo')"
-                :tone="rowData.inGym ? 'success' : 'neutral'"
-              />
+              <StatusBadge :label="rowData.gymChipLabel" :tone="rowData.gymChipTone" />
             </button>
           </template>
           <template #cell(age)="{ rowData }">
@@ -1959,12 +2061,19 @@ watch(
             :card-number-checking="createCardChecking"
             :card-number-taken="createCardTaken"
             @generate-contract-number="regenerateCreateContractNumber"
+            @photo-draft-changed="onCreatePhotoDraftChanged"
           />
         </AppSectionCard>
-        <VaAlert v-if="createState.error.value" color="danger" outline>{{ createState.error.value }}</VaAlert>
         <div class="app-modal-actions">
           <VaButton type="button" preset="secondary" :disabled="createState.loading.value" @click="requestCloseCreate">{{ t('common.cancel') }}</VaButton>
           <VaButton type="submit" :loading="createState.loading.value">{{ t('users.save') }}</VaButton>
+        </div>
+        <div
+          v-if="createModalErrorText"
+          class="app-modal-form-errors app-form-error-banner"
+          role="alert"
+        >
+          {{ createModalErrorText }}
         </div>
       </form>
     </VaModal>
@@ -1985,17 +2094,7 @@ watch(
             </div>
             <div class="person-status-wrap">
               <StatusBadge :label="statusLabel(editHeaderSnapshot.status)" :tone="statusColor(editHeaderSnapshot.status)" />
-              <StatusBadge
-                v-if="editHeaderSnapshot.status === 'ACTIVE'"
-                :label="
-                  editHeaderSnapshot.inGym == null
-                    ? '—'
-                    : editHeaderSnapshot.inGym
-                    ? t('clients.inGymYes')
-                    : t('clients.inGymNo')
-                "
-                :tone="editHeaderSnapshot.inGym ? 'success' : 'neutral'"
-              />
+              <StatusBadge v-if="editGymChip" :label="editGymChip.label" :tone="editGymChip.tone" />
               <span v-if="editPauseUntilCompactLabel" class="person-status-note">{{ editPauseUntilCompactLabel }}</span>
             </div>
           </div>
@@ -2019,10 +2118,9 @@ watch(
             @pause-contract-history-item="pauseContractFromHistory"
             @resume-contract-history-item="resumeContractFromHistory"
             @terminate-contract-history-item="terminateContractFromHistory"
-            @photo-url-persisted="onEditPhotoUrlPersisted"
+            @photo-draft-changed="onEditPhotoDraftChanged"
           />
         </AppSectionCard>
-        <VaAlert v-if="editState.error.value" color="danger" outline>{{ editState.error.value }}</VaAlert>
         <div class="app-modal-actions">
           <VaButton
             type="button"
@@ -2036,6 +2134,13 @@ watch(
           </VaButton>
           <VaButton type="button" preset="secondary" :disabled="editState.loading.value" @click="requestCloseEdit">{{ t('common.cancel') }}</VaButton>
           <VaButton type="submit" :loading="editState.loading.value">{{ t('users.save') }}</VaButton>
+        </div>
+        <div
+          v-if="editModalErrorText"
+          class="app-modal-form-errors app-form-error-banner"
+          role="alert"
+        >
+          {{ editModalErrorText }}
         </div>
       </form>
     </VaModal>

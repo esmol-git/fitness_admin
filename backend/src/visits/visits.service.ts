@@ -1,8 +1,10 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { ClientStatus, Prisma, VisitCloseReason, VisitSessionStatus } from '@prisma/client';
 import { RequestContextService } from '../common/request-context.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { StorageService } from '../storage/storage.service';
 import { type ListVisitsSortBy, ListVisitsQueryDto } from './dto/list-visits-query.dto';
 
 @Injectable()
@@ -10,6 +12,8 @@ export class VisitsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly requestContext: RequestContextService,
+    private readonly config: ConfigService,
+    private readonly storage: StorageService,
   ) {}
   private readonly logger = new Logger(VisitsService.name);
 
@@ -48,6 +52,18 @@ export class VisitsService {
 
   private normalizeLocker(value: string) {
     return value.trim().toUpperCase();
+  }
+
+  /** TTL подписанного GET для photoUrl (приватный MinIO). Совпадает с ClientsService. */
+  private photoReadTtlSec() {
+    const v = Number(this.config.get('S3_PHOTO_READ_TTL_SEC'));
+    return Number.isFinite(v) && v >= 60 ? Math.floor(v) : 604800;
+  }
+
+  private async withReadablePhotoUrl<T extends { photoUrl: string | null }>(row: T): Promise<T> {
+    if (!row.photoUrl?.trim()) return row;
+    const url = await this.storage.presignGetUrlForStoredPublicUrl(row.photoUrl, this.photoReadTtlSec());
+    return { ...row, photoUrl: url };
   }
 
   /**
@@ -90,6 +106,7 @@ export class VisitsService {
         phone: true,
         cardNumber: true,
         status: true,
+        photoUrl: true,
       },
     });
     if (!client) throw new NotFoundException(this.errors.clientNotFound);
@@ -99,6 +116,7 @@ export class VisitsService {
   async lookup(code: string) {
     await this.markOverdueSessions();
     const client = await this.findClientByCode(code);
+    const clientReadable = await this.withReadablePhotoUrl(client);
     const openSession = await this.prisma.visitSession.findFirst({
       where: { clientId: client.id, exitedAt: null },
       orderBy: { enteredAt: 'desc' },
@@ -106,7 +124,7 @@ export class VisitsService {
     });
     return {
       client: {
-        ...client,
+        ...clientReadable,
         fullName: [client.lastName, client.firstName, client.middleName].filter(Boolean).join(' '),
       },
       inGym: openSession?.status === VisitSessionStatus.IN_GYM,

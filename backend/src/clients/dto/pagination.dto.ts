@@ -35,9 +35,9 @@ export class PaginationDto {
   membershipType?: string;
 
   @IsOptional()
-  @IsIn(['IN_GYM', 'OUT_GYM', '__ALL_GYM__'])
+  @IsIn(['IN_GYM', 'OUT_GYM', 'VISIT_OVERDUE', '__ALL_GYM__'])
   @Transform(({ value }) => (value === '' ? undefined : value))
-  inGym?: 'IN_GYM' | 'OUT_GYM' | '__ALL_GYM__';
+  inGym?: 'IN_GYM' | 'OUT_GYM' | 'VISIT_OVERDUE' | '__ALL_GYM__';
 
   @IsOptional()
   @IsDateString()

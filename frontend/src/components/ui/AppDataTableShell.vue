@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import AppToolbarLoadingDot from '@/components/ui/AppToolbarLoadingDot.vue'
+
 const props = withDefaults(
   defineProps<{
     showPager?: boolean
@@ -46,7 +48,17 @@ const props = withDefaults(
       <div
         class="table-shell__data-wrap"
         :class="{ 'table-shell__data-wrap--busy': props.loading }"
+        :aria-busy="props.loading ? 'true' : 'false'"
       >
+        <div
+          v-if="props.loading"
+          class="table-shell__busy-overlay"
+          aria-live="polite"
+        >
+          <div class="table-shell__busy-dot-wrap">
+            <AppToolbarLoadingDot />
+          </div>
+        </div>
         <slot />
       </div>
     </div>
@@ -87,6 +99,21 @@ const props = withDefaults(
   pointer-events: none;
 }
 
+.table-shell__busy-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.table-shell__busy-dot-wrap {
+  transform: scale(1.85);
+  transform-origin: center center;
+}
+
 .table-shell__skeleton {
   border: 1px solid var(--app-border);
   border-radius: 14px;
@@ -106,5 +133,4 @@ const props = withDefaults(
   width: 100%;
   min-width: 0;
 }
-
 </style>

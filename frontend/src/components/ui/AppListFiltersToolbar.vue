@@ -1,23 +1,9 @@
-<script setup lang="ts">
-import AppToolbarLoadingDot from '@/components/ui/AppToolbarLoadingDot.vue'
-
-withDefaults(
-  defineProps<{
-    loading?: boolean
-  }>(),
-  {
-    loading: false,
-  },
-)
-</script>
-
 <template>
   <div class="app-list-filters-toolbar">
     <div class="app-list-filters-toolbar__filters">
       <slot />
     </div>
     <div class="app-list-filters-toolbar__actions">
-      <AppToolbarLoadingDot v-if="loading" />
       <slot name="actions" />
     </div>
   </div>

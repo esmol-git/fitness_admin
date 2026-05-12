@@ -71,6 +71,8 @@ server {
 
 Проверка: `sudo nginx -t && sudo systemctl reload nginx`.
 
+Редирект **HTTP → HTTPS** для **`5fit.work.gd`** / **`www`** сделан в образе **`web`** (`frontend/nginx/default.conf`): при прямом заходе на **:80** без **`X-Forwarded-Proto: https`** отдаётся **`301`**. Хостовый nginx на **443** обязан передавать **`proxy_set_header X-Forwarded-Proto $scheme`** (как в примере выше), иначе после деплоя будет цикл редиректов. Другой домен — поправьте **`map`** в том же файле.
+
 ### 4.2. Автообновление Let’s Encrypt при `authenticator = standalone`
 
 Пока проверка **HTTP-01** идёт через **standalone**, Certbot на время challenge должен занять **:80**. Если там контейнер **`web`**, перед **`certbot renew`** его нужно **остановить**, после — **запустить**.

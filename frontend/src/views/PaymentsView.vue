@@ -14,6 +14,7 @@ import { TableActionIcon } from '@/config/tableActionIcons'
 import { normalizeRouteQuery, routeQueryEquals } from '@/composables/tableListUrlQueryUtils'
 import { resolveApiErrorMessage } from '@/composables/useApiErrorMap'
 import { api } from '@/utils/api'
+import { copyTextToClipboard } from '@/utils/clipboard'
 import type { LocationQuery } from 'vue-router'
 
 const { t } = useI18n()
@@ -414,11 +415,11 @@ async function openContract(contractId?: string) {
 async function copyContractNumber(raw: string) {
   const num = raw.trim()
   if (!num) return
-  try {
-    await navigator.clipboard.writeText(num)
+  const copied = await copyTextToClipboard(num)
+  if (copied) {
     notify({ color: 'success', message: t('common.copied') })
-  } catch {
-    notify({ color: 'danger', message: t('common.networkError') })
+  } else {
+    notify({ color: 'danger', message: t('common.copyFailed') })
   }
 }
 

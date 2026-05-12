@@ -354,6 +354,42 @@ export class ClientsService {
         const orderMap = new Map(ids.map((id, index) => [id, index]));
         items = [...unordered].sort((a, b) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0));
       }
+    } else if (query.sortBy === 'lastVisitAt') {
+      const whereSql = this.buildFindAllWhereSql(query);
+      const dirDesc = (query.sortOrder ?? 'desc') === 'desc';
+      const [totalResult, idRows] = await this.prisma.$transaction([
+        this.prisma.client.count({ where }),
+        dirDesc
+          ? this.prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+              SELECT c.id FROM "Client" c
+              WHERE ${whereSql}
+              ORDER BY (
+                SELECT MAX(v."enteredAt") FROM "VisitSession" v WHERE v."clientId" = c.id
+              ) DESC NULLS LAST,
+              c."lastName" ASC,
+              c."firstName" ASC
+              LIMIT ${limit} OFFSET ${skip}
+            `)
+          : this.prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+              SELECT c.id FROM "Client" c
+              WHERE ${whereSql}
+              ORDER BY (
+                SELECT MAX(v."enteredAt") FROM "VisitSession" v WHERE v."clientId" = c.id
+              ) ASC NULLS LAST,
+              c."lastName" ASC,
+              c."firstName" ASC
+              LIMIT ${limit} OFFSET ${skip}
+            `),
+      ]);
+      total = totalResult;
+      const ids = idRows.map((r) => r.id);
+      if (ids.length === 0) {
+        items = [];
+      } else {
+        const unordered = await this.prisma.client.findMany({ where: { id: { in: ids } } });
+        const orderMap = new Map(ids.map((id, index) => [id, index]));
+        items = [...unordered].sort((a, b) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0));
+      }
     } else {
       const [rows, countResult] = await this.prisma.$transaction([
         this.prisma.client.findMany({

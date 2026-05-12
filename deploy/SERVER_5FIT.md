@@ -44,6 +44,62 @@ docker compose --env-file deploy/.env.production -f docker-compose.prod.yml exec
 
 Краткий порядок для **TLS перед Docker** (частый вариант): на хосте **Caddy** или **nginx** на **443** с сертификатами Certbot, прокси на **`127.0.0.1:80`** (куда проброшен контейнер `web`). Тогда в compose можно не трогать **443** у `web`. После выпуска сертификатов перезапустите стек и проверьте вход по **https://**.
 
+### 4.1. Пример nginx для админки (`5fit.work.gd`)
+
+Один процесс nginx может слушать **443** с разными **`server_name`** (SNI), например отдельно сайт и **`s3.…`**. Для SPA на корневом домене — прокси на Docker **`web`**:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name 5fit.work.gd www.5fit.work.gd;
+
+    ssl_certificate     /etc/letsencrypt/live/5fit.work.gd/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/5fit.work.gd/privkey.pem;
+
+    client_max_body_size 50m;
+
+    location / {
+        proxy_pass http://127.0.0.1:80;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Проверка: `sudo nginx -t && sudo systemctl reload nginx`.
+
+### 4.2. Автообновление Let’s Encrypt при `authenticator = standalone`
+
+Пока проверка **HTTP-01** идёт через **standalone**, Certbot на время challenge должен занять **:80**. Если там контейнер **`web`**, перед **`certbot renew`** его нужно **остановить**, после — **запустить**.
+
+В репозитории: **`deploy/scripts/certrenew-docker-web.sh`** — аргументы **`stop`** / **`start`** (те же **`docker compose`** и **`deploy/.env.production`**, что и у **`vps-pull-up.sh`**; при другом пути к env: **`ENV_FILE=/path/to/.env`** перед командой).
+
+На сервере после `git pull`:
+
+```bash
+chmod +x /opt/fitnessApp/deploy/scripts/certrenew-docker-web.sh
+```
+
+В **`/etc/letsencrypt/renewal/<имя>.conf`** в секции **`[renewalparams]`** задайте (путь к репозиторию подставьте свой):
+
+```ini
+pre_hook = /opt/fitnessApp/deploy/scripts/certrenew-docker-web.sh stop
+post_hook = /opt/fitnessApp/deploy/scripts/certrenew-docker-web.sh start
+```
+
+Если при первом **`certbot certonly`** вы уже передавали **`--pre-hook` / `--post-hook`**, Certbot мог записать их в этот файл — при желании замените на вызов скрипта, чтобы не дублировать команды.
+
+Для **нескольких** сертификатов с **standalone** на одном **:80** (например **`5fit.work.gd`** и **`s3.…`**) в каждом **`renewal/*.conf`** можно указать **те же** `pre_hook` / `post_hook`: перед каждым продлением **`web`** кратко остановится и после renew снова поднимется.
+
+Проверка без реального продления:
+
+```bash
+sudo certbot renew --dry-run
+```
+
 ## 5. Обновление приложения
 
 ```bash
@@ -228,7 +284,7 @@ docker compose --env-file deploy/.env.production -f docker-compose.prod.yml --pr
 1. **CI** — пуш в **`main`** по **`backend/`** (workflow **Docker API**) и/или по **`frontend/`** (**Docker Web**), либо вручную **Run workflow** для обоих. Пакеты в **Packages** / GHCR.
 2. **VPS** — в **`deploy/.env.production`** задайте **`API_IMAGE`** и при необходимости **`WEB_IMAGE`** (§11); при приватном репозитории — **`docker login ghcr.io`**.
 3. **Деплой** — **`./deploy/scripts/vps-pull-up.sh --minio`** (или вручную **`pull`** / **`up`** из §11); без **`WEB_IMAGE`** — **`build web`** на сервере.
-4. **HTTPS** — §4 и краткая подсказка выше; обновите **`CORS_ORIGIN`** / **`COOKIE_SECURE`**.
+4. **HTTPS** — §4–4.2 (nginx, **`certrenew-docker-web.sh`** для renew); обновите **`CORS_ORIGIN`** / **`COOKIE_SECURE`**.
 5. **Полная приёмка договоров + PDF** — на стенде с **≥4 GB RAM** или после апгрейда прод-сервера.
 
 ## 13. Логи успешного старта `api`

@@ -8,6 +8,7 @@ import type { ClientForm, ClientStatus } from '@/types/clients'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
 import { resolveApiErrorMessage } from '@/composables/useApiErrorMap'
 import { api } from '@/utils/api'
+import { copyTextToClipboard } from '@/utils/clipboard'
 import {
   buildMonthNames,
   buildWeekdayNames,
@@ -303,10 +304,10 @@ const displayContractNumber = computed(() => {
 async function copyToClipboard(text: string) {
   const v = text.trim()
   if (!v) return
-  try {
-    await navigator.clipboard.writeText(v)
+  const copied = await copyTextToClipboard(v)
+  if (copied) {
     notify({ color: 'success', message: t('common.copied'), duration: 2200 })
-  } catch {
+  } else {
     notify({ color: 'danger', message: t('common.copyFailed'), duration: 3200 })
   }
 }

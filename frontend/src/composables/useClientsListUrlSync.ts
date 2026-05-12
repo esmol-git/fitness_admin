@@ -33,10 +33,12 @@ export type ParsedClientsListQuery = {
   limit: number
   sortBy: string | null
   sortOrder: SortOrder
+  /** Открыть карточку клиента по id (query `edit`). */
+  editClientId: string
 }
 
-const DEFAULT_SORT_BY = 'fullName'
-const DEFAULT_SORT_ORDER: SortOrder = 'asc'
+const DEFAULT_SORT_BY = 'lastVisitAt'
+const DEFAULT_SORT_ORDER: SortOrder = 'desc'
 
 const VALID_CLIENTS_SORT_FIELDS = [
   'fullName',
@@ -45,6 +47,7 @@ const VALID_CLIENTS_SORT_FIELDS = [
   'inGym',
   'status',
   'age',
+  'lastVisitAt',
 ] as const
 
 function isValidClientsSort(field: string, order: string): order is 'asc' | 'desc' {
@@ -96,6 +99,10 @@ export function parseClientsListRouteQuery(q: LocationQuery): ParsedClientsListQ
     }
   }
 
+  const editRaw = (raw.edit ?? '').trim()
+  const editClientId =
+    editRaw && editRaw.length <= 64 && /^[a-zA-Z0-9_-]+$/.test(editRaw) ? editRaw : ''
+
   return {
     search,
     status,
@@ -110,6 +117,7 @@ export function parseClientsListRouteQuery(q: LocationQuery): ParsedClientsListQ
     limit,
     sortBy,
     sortOrder,
+    editClientId,
   }
 }
 
@@ -127,6 +135,7 @@ export function buildClientsListRouteQuery(state: {
   limit: number
   sortBy: string | null
   sortOrder: SortOrder
+  editClientId: string
 }): Record<string, string> {
   const out: Record<string, string> = {}
   const s = state.search.trim()
@@ -146,6 +155,7 @@ export function buildClientsListRouteQuery(state: {
   if (!defaultSort && state.sortBy && state.sortOrder) {
     out.sort = `${state.sortBy}:${state.sortOrder}`
   }
+  if (state.editClientId.trim()) out.edit = state.editClientId.trim()
   return out
 }
 
@@ -158,6 +168,7 @@ function stateMatchesParsed(
     limit: Ref<number>
     sortBy: Ref<string | null>
     sortOrder: Ref<SortOrder>
+    editClientId: Ref<string>
   },
 ): boolean {
   return (
@@ -173,7 +184,8 @@ function stateMatchesParsed(
     ctx.page.value === p.page &&
     ctx.limit.value === p.limit &&
     ctx.sortBy.value === p.sortBy &&
-    ctx.sortOrder.value === p.sortOrder
+    ctx.sortOrder.value === p.sortOrder &&
+    ctx.editClientId.value === p.editClientId
   )
 }
 
@@ -188,6 +200,7 @@ export function useClientsListUrlSync(
     sortBy: Ref<string | null>
     sortOrder: Ref<SortOrder>
     syncSearchImmediate: (v: string) => void
+    editClientId: Ref<string>
   },
 ) {
   const syncingFromRoute = ref(false)
@@ -196,6 +209,7 @@ export function useClientsListUrlSync(
     const p = parseClientsListRouteQuery(route.query)
     if (stateMatchesParsed(p, ctx)) return
     syncingFromRoute.value = true
+    ctx.editClientId.value = p.editClientId
     ctx.limit.value = p.limit
     ctx.syncSearchImmediate(p.search)
     ctx.filters.value = {
@@ -223,6 +237,7 @@ export function useClientsListUrlSync(
       if (syncingFromRoute.value) return
       applyRouteToState()
     },
+    { immediate: true },
   )
 
   watch(
@@ -240,6 +255,7 @@ export function useClientsListUrlSync(
       () => ctx.filters.value.ageTo,
       ctx.sortBy,
       ctx.sortOrder,
+      ctx.editClientId,
     ],
     () => {
       if (syncingFromRoute.value) return
@@ -257,6 +273,7 @@ export function useClientsListUrlSync(
         limit: ctx.limit.value,
         sortBy: ctx.sortBy.value,
         sortOrder: ctx.sortOrder.value,
+        editClientId: ctx.editClientId.value,
       })
       if (routeQueryEquals(next, route.query)) return
       syncingFromRoute.value = true

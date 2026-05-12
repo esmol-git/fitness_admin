@@ -64,8 +64,8 @@ export class PaginationDto {
   ageTo?: number;
 
   @IsOptional()
-  @IsIn(['fullName', 'phone', 'createdAt', 'inGym', 'status', 'age'])
-  sortBy?: 'fullName' | 'phone' | 'createdAt' | 'inGym' | 'status' | 'age';
+  @IsIn(['fullName', 'phone', 'createdAt', 'inGym', 'status', 'age', 'lastVisitAt'])
+  sortBy?: 'fullName' | 'phone' | 'createdAt' | 'inGym' | 'status' | 'age' | 'lastVisitAt';
 
   @IsOptional()
   @IsIn(['asc', 'desc'])

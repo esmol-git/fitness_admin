@@ -43,8 +43,9 @@ describe('parseClientsListRouteQuery', () => {
       status: '',
       page: 1,
       limit: DEFAULT_TABLE_PAGE_LIMIT,
-      sortBy: 'fullName',
-      sortOrder: 'asc',
+      sortBy: 'lastVisitAt',
+      sortOrder: 'desc',
+      editClientId: '',
     })
   })
 
@@ -65,11 +66,35 @@ describe('parseClientsListRouteQuery', () => {
   })
 
   it('ignores invalid sort', () => {
-    const p = parseClientsListRouteQuery({ sort: 'phone:asc' })
-    expect(p.sortBy).toBe('fullName')
-    expect(p.sortOrder).toBe('asc')
+    const p = parseClientsListRouteQuery({ sort: 'notAField:asc' })
+    expect(p.sortBy).toBe('lastVisitAt')
+    expect(p.sortOrder).toBe('desc')
+  })
+  it('parses edit client id', () => {
+    const p = parseClientsListRouteQuery({ edit: 'clxyz123' })
+    expect(p.editClientId).toBe('clxyz123')
+    expect(buildClientsListRouteQuery({ ...minimalClientsQueryState(), editClientId: 'abc' }).edit).toBe('abc')
   })
 })
+
+function minimalClientsQueryState() {
+  return {
+    search: '',
+    status: '' as const,
+    inGym: '' as const,
+    membershipType: '',
+    lastVisitFrom: '',
+    lastVisitTo: '',
+    gender: '' as const,
+    ageFrom: '',
+    ageTo: '',
+    page: 1,
+    limit: DEFAULT_TABLE_PAGE_LIMIT,
+    sortBy: 'lastVisitAt' as const,
+    sortOrder: 'desc' as const,
+    editClientId: '',
+  }
+}
 
 describe('buildClientsListRouteQuery', () => {
   it('omits default state', () => {
@@ -86,8 +111,9 @@ describe('buildClientsListRouteQuery', () => {
         ageTo: '',
         page: 1,
         limit: DEFAULT_TABLE_PAGE_LIMIT,
-        sortBy: 'fullName',
-        sortOrder: 'asc',
+        sortBy: 'lastVisitAt',
+        sortOrder: 'desc',
+        editClientId: '',
       }),
     ).toEqual({})
   })
@@ -107,6 +133,7 @@ describe('buildClientsListRouteQuery', () => {
       limit: DEFAULT_TABLE_PAGE_LIMIT,
       sortBy: 'createdAt',
       sortOrder: 'desc',
+      editClientId: '',
     })
     expect(q.status).toBe('ACTIVE')
     expect(q.sort).toBe('createdAt:desc')

@@ -4,6 +4,8 @@ import {
   Delete,
   Get,
   Header,
+  HttpCode,
+  HttpStatus,
   Param,
   Patch,
   Post,
@@ -100,7 +102,9 @@ export class ContractsController {
     });
   }
 
+  /** Сохраняет договор и PDF в хранилище; тело ответа — метаданные (без PDF в браузер). */
   @Post('client/:clientId/save')
+  @HttpCode(HttpStatus.CREATED)
   @Roles(Role.ADMIN, Role.MANAGER, Role.RECEPTIONIST)
   async saveClientContractFromForm(
     @CurrentUser() user: AuthUser,
@@ -108,10 +112,11 @@ export class ContractsController {
     @Body() dto: GenerateContractDto,
   ) {
     const result = await this.contracts.saveClientContractFromForm(clientId, dto, user.id);
-    return new StreamableFile(Buffer.from(result.pdfBytes), {
-      type: 'application/pdf',
-      disposition: `inline; filename="${result.contractNumber || 'contract'}.pdf"`,
-    });
+    return {
+      id: result.id,
+      contractNumber: result.contractNumber,
+      createdAt: result.createdAt.toISOString(),
+    };
   }
 
   @Patch(':contractId/status')

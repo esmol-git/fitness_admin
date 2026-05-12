@@ -14,8 +14,8 @@ export function createClientsTableColumns(t: Translate): TableHeaderConfig[] {
     { key: 'status', label: t('clients.statusLabel'), sortable: true },
     { key: 'age', label: t('clients.age'), sortable: true },
     { key: 'gender', label: t('clients.genderLabel') },
-    { key: 'lastVisitAt', label: t('clients.lastVisitDate') },
-    { key: 'actions', label: t('clients.actions') },
+    { key: 'lastVisitAt', label: t('clients.lastVisitDate'), sortable: true },
+    { key: 'actions', label: t('clients.actions'), thAlign: 'right', tdAlign: 'right' },
   ]
 }
 
@@ -31,6 +31,8 @@ export function createClientsStatusFilterOptions(t: Translate) {
 
 export function createClientsSortOptions(t: Translate) {
   return [
+    { text: t('clients.sortVisitDesc'), value: 'lastVisitAt:desc' },
+    { text: t('clients.sortVisitAsc'), value: 'lastVisitAt:asc' },
     { text: t('clients.sortNameAsc'), value: 'fullName:asc' },
     { text: t('clients.sortNameDesc'), value: 'fullName:desc' },
     { text: t('clients.sortCreatedDesc'), value: 'createdAt:desc' },

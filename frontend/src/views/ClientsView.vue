@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import { useToast } from 'vuestic-ui'
@@ -40,6 +40,7 @@ const router = useRouter()
 const ui = useUiStore()
 const auth = useAuthStore()
 const urlInit = parseClientsListRouteQuery(route.query)
+const editClientId = ref(urlInit.editClientId)
 
 const table = useTableState<
   ClientRow,
@@ -68,7 +69,7 @@ const table = useTableState<
     ageTo: urlInit.ageTo,
   },
   initialSortBy: urlInit.sortBy,
-  initialSortOrder: urlInit.sortOrder ?? 'asc',
+  initialSortOrder: urlInit.sortOrder ?? 'desc',
   searchDebounceMs: 450,
   initialLoading: true,
 })
@@ -250,7 +251,7 @@ const { onTableSortBy, onTableSortOrder, resetSort } = useTableSortingSync({
   sortBy,
   sortOrder,
   setSort,
-  defaultSort: 'fullName:asc',
+  defaultSort: 'lastVisitAt:desc',
 })
 
 const { createStringFilterHandler, resetAllFilters: resetTableFilters } = useTableFilteringSync({
@@ -259,7 +260,7 @@ const { createStringFilterHandler, resetAllFilters: resetTableFilters } = useTab
   onAfterReset: resetSort,
 })
 
-const sortDeviates = computed(() => sortBy.value !== 'fullName' || sortOrder.value !== 'asc')
+const sortDeviates = computed(() => sortBy.value !== 'lastVisitAt' || sortOrder.value !== 'desc')
 const hasToolbarReset = computed(
   () => hasActiveFilters.value || search.value.trim().length > 0 || sortDeviates.value,
 )
@@ -315,6 +316,7 @@ useClientsListUrlSync(route, router, {
   sortBy,
   sortOrder,
   syncSearchImmediate,
+  editClientId,
 })
 
 const onStatusFilter = createStringFilterHandler('status', (value) =>
@@ -392,7 +394,8 @@ const clientsSource = useTableDataSource<ClientRow, typeof query.value>({
       params.sortBy === 'createdAt' ||
       params.sortBy === 'inGym' ||
       params.sortBy === 'status' ||
-      params.sortBy === 'age'
+      params.sortBy === 'age' ||
+      params.sortBy === 'lastVisitAt'
     ) {
       safeParams.sortBy = params.sortBy
     }
@@ -613,6 +616,53 @@ function openEdit(row: ClientRow) {
   const requestId = ++editHistoryRequestId.value
   void Promise.all([loadEditContractsHistory(row.id, requestId), loadEditPaymentsHistory(row.id, requestId)])
 }
+
+function closeClientRowActionsMenu(ev: Event) {
+  const det = (ev.target as HTMLElement | null)?.closest('details')
+  if (det) det.open = false
+}
+
+function runClientRowMenuAction(ev: Event, action: () => void) {
+  closeClientRowActionsMenu(ev)
+  action()
+}
+
+function onDocumentPointerDownCloseClientRowMenus(ev: Event) {
+  const t = ev.target
+  if (!(t instanceof Node)) return
+  if (t instanceof Element && t.closest('.clients-row-menu')) return
+  for (const el of document.querySelectorAll('details.clients-row-menu[open]')) {
+    ;(el as HTMLDetailsElement).open = false
+  }
+}
+
+onMounted(() => {
+  document.addEventListener('pointerdown', onDocumentPointerDownCloseClientRowMenus, true)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', onDocumentPointerDownCloseClientRowMenus, true)
+})
+
+let consumingEditClientFromUrl = false
+watch(
+  editClientId,
+  async (id) => {
+    const trimmed = typeof id === 'string' ? id.trim() : ''
+    if (!trimmed || consumingEditClientFromUrl) return
+    consumingEditClientFromUrl = true
+    try {
+      const { data } = await api.get<ClientRow>(`/clients/${trimmed}`)
+      openEdit(data as ClientRow)
+    } catch {
+      notify({ color: 'danger', message: t('clients.loadFailed') })
+    } finally {
+      editClientId.value = ''
+      consumingEditClientFromUrl = false
+    }
+  },
+  { flush: 'post', immediate: true },
+)
 
 function requestCloseCreate() {
   if (createState.loading.value) return
@@ -1728,15 +1778,17 @@ watch(
       </div>
 
       <AppDataTableShell :loading="loading" :has-items="hasClients" :show-pager="hasClients && pages > 1">
-        <VaDataTable
-          class="app-table-actions-last-col"
-          :items="tableItems"
-          :columns="columns"
-          :sort-by="sortBy ?? undefined"
-          :sorting-order="sortOrder ?? undefined"
-          @update:sort-by="handleSortByUpdate"
-          @update:sorting-order="handleSortOrderUpdate"
-        >
+        <div class="clients-table-scroll">
+          <VaDataTable
+            class="clients-data-table app-table-actions-last-col"
+            :items="tableItems"
+            :columns="columns"
+            :sort-by="sortBy ?? undefined"
+            :sorting-order="sortOrder ?? undefined"
+            disable-client-side-sorting
+            @update:sort-by="handleSortByUpdate"
+            @update:sorting-order="handleSortOrderUpdate"
+          >
           <template #cell(photo)="{ rowData }">
             <div class="photo-cell">
               <img v-if="rowData.avatarUrl" :src="rowData.avatarUrl" alt="" class="photo-cell__img" />
@@ -1785,59 +1837,84 @@ watch(
             {{ rowData.lastVisitAt ? new Date(rowData.lastVisitAt).toLocaleString('ru-RU') : '—' }}
           </template>
           <template #cell(actions)="{ rowData }">
-            <div class="app-actions-cell">
-              <VaButton
-                size="large"
-                preset="plain"
-                :icon="TableActionIcon.edit"
-                :title="t('clients.edit')"
-                @click="openEdit(rowData)"
-              />
-              <VaButton
-                v-if="rowData.status !== 'BLOCKED'"
-                size="large"
-                preset="plain"
-                color="primary"
-                :icon="TableActionIcon.generateContract"
-                :loading="contractGenerateLoadingId === rowData.id"
-                :disabled="contractGenerateLoadingId === rowData.id || statusActionLoadingId === rowData.id"
-                :title="t('clients.generateContract')"
-                @click="generateContractFromTableRow(rowData)"
-              />
-              <VaButton
-                v-if="canBlockOrDeleteClient && rowData.status !== 'BLOCKED'"
-                size="large"
-                preset="plain"
-                color="warning"
-                :icon="TableActionIcon.blockClient"
-                :loading="statusActionLoadingId === rowData.id"
-                :disabled="statusActionLoadingId === rowData.id"
-                :title="t('clients.block')"
-                @click="blockClient(rowData)"
-              />
-              <VaButton
-                v-else-if="canBlockOrDeleteClient && rowData.status === 'BLOCKED'"
-                size="large"
-                preset="plain"
-                color="info"
-                :icon="TableActionIcon.unblockClient"
-                :loading="statusActionLoadingId === rowData.id"
-                :disabled="statusActionLoadingId === rowData.id"
-                :title="t('clients.unblock')"
-                @click="unblockClient(rowData)"
-              />
-              <VaButton
-                v-if="canBlockOrDeleteClient"
-                size="large"
-                preset="plain"
-                color="danger"
-                :icon="TableActionIcon.delete"
-                :title="t('clients.delete')"
-                @click="askDelete(rowData)"
-              />
+            <div class="clients-table-actions-cell">
+              <details class="clients-row-menu" @click.stop>
+                <summary class="clients-row-menu__trigger" :aria-label="t('clients.actionsMenu')">
+                  <VaIcon name="more_vert" size="22px" />
+                </summary>
+                <ul class="clients-row-menu__list" role="menu" @click.stop>
+                  <li role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="clients-row-menu__item"
+                      @click="runClientRowMenuAction($event, () => openEdit(rowData))"
+                    >
+                      <VaIcon :name="TableActionIcon.edit" size="18px" />
+                      {{ t('clients.edit') }}
+                    </button>
+                  </li>
+                  <li v-if="rowData.status !== 'BLOCKED'" role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="clients-row-menu__item"
+                      :disabled="
+                        contractGenerateLoadingId === rowData.id || statusActionLoadingId === rowData.id
+                      "
+                      @click="
+                        runClientRowMenuAction($event, () => void generateContractFromTableRow(rowData))
+                      "
+                    >
+                      <VaIcon
+                        :name="TableActionIcon.generateContract"
+                        size="18px"
+                        :class="{ 'clients-row-menu__icon--spin': contractGenerateLoadingId === rowData.id }"
+                      />
+                      {{ t('clients.generateContract') }}
+                    </button>
+                  </li>
+                  <li v-if="canBlockOrDeleteClient && rowData.status !== 'BLOCKED'" role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="clients-row-menu__item clients-row-menu__item--warning"
+                      :disabled="statusActionLoadingId === rowData.id"
+                      @click="runClientRowMenuAction($event, () => blockClient(rowData))"
+                    >
+                      <VaIcon :name="TableActionIcon.blockClient" size="18px" />
+                      {{ t('clients.block') }}
+                    </button>
+                  </li>
+                  <li v-else-if="canBlockOrDeleteClient && rowData.status === 'BLOCKED'" role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="clients-row-menu__item"
+                      :disabled="statusActionLoadingId === rowData.id"
+                      @click="runClientRowMenuAction($event, () => unblockClient(rowData))"
+                    >
+                      <VaIcon :name="TableActionIcon.unblockClient" size="18px" />
+                      {{ t('clients.unblock') }}
+                    </button>
+                  </li>
+                  <li v-if="canBlockOrDeleteClient" role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="clients-row-menu__item clients-row-menu__item--danger"
+                      @click="runClientRowMenuAction($event, () => askDelete(rowData))"
+                    >
+                      <VaIcon :name="TableActionIcon.delete" size="18px" />
+                      {{ t('clients.delete') }}
+                    </button>
+                  </li>
+                </ul>
+              </details>
             </div>
           </template>
         </VaDataTable>
+        </div>
         <template #empty>
           <AppEmptyState
             icon="person_search"
@@ -2409,6 +2486,111 @@ watch(
 
 .clients-contract-days--red {
   color: #f87171;
+}
+
+.clients-table-scroll {
+  width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.clients-data-table {
+  min-width: 72rem;
+}
+
+.clients-data-table.app-table-actions-last-col :deep(thead th:last-child),
+.clients-data-table.app-table-actions-last-col :deep(tbody td:last-child) {
+  text-align: right;
+}
+
+.clients-table-actions-cell {
+  display: flex;
+  justify-content: flex-end;
+  width: 100%;
+}
+
+.clients-row-menu {
+  position: relative;
+  display: inline-flex;
+  justify-content: flex-end;
+}
+
+.clients-row-menu__trigger {
+  list-style: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 10px;
+  color: var(--va-primary);
+}
+
+.clients-row-menu__trigger:hover {
+  background: color-mix(in srgb, var(--app-surface) 86%, var(--va-primary) 14%);
+}
+
+.clients-row-menu__trigger::-webkit-details-marker {
+  display: none;
+}
+
+.clients-row-menu__list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.2rem);
+  margin: 0;
+  padding: 0.3rem;
+  min-width: 12.5rem;
+  list-style: none;
+  border: 1px solid color-mix(in srgb, var(--app-border) 88%, transparent);
+  border-radius: 10px;
+  background: var(--app-surface);
+  box-shadow: var(--app-shadow-soft);
+  z-index: 50;
+}
+
+.clients-row-menu__item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.45rem 0.55rem;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: var(--app-text);
+}
+
+.clients-row-menu__item:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--app-surface) 82%, var(--app-border) 18%);
+}
+
+.clients-row-menu__item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.clients-row-menu__item--warning {
+  color: var(--va-warning);
+}
+
+.clients-row-menu__item--danger {
+  color: var(--va-danger);
+}
+
+.clients-row-menu__icon--spin {
+  animation: clients-menu-spin 0.85s linear infinite;
+}
+
+@keyframes clients-menu-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @media (max-width: 1200px) {

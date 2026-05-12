@@ -11,7 +11,7 @@ import {
   type ComponentPublicInstance,
 } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { useToast } from 'vuestic-ui'
 import AppDataTableShell from '@/components/ui/AppDataTableShell.vue'
 import AppEmptyState from '@/components/ui/AppEmptyState.vue'
@@ -49,13 +49,12 @@ const selectedMembershipId = ref('')
 
 const form = reactive({
   contractNumber: '',
-  city: '',
-  firstName: '',
   lastName: '',
+  firstName: '',
   middleName: '',
+  email: '',
   birthDate: '',
   phone: '',
-  email: '',
   address: '',
   clubAddress: '',
   passportNumber: '',
@@ -102,19 +101,35 @@ const clientOptionsTotal = ref(0)
 const clientOptionsHasMore = computed(
   () => clientOptionsTotal.value > 0 && clientOptions.value.length < clientOptionsTotal.value,
 )
+type ContractRegistryRow = {
+  id: string
+  clientId: string
+  contractNumber: string
+  status: string
+  contractDate?: string | Date | null
+  serviceStartDate?: string | Date | null
+  serviceEndDate?: string | Date | null
+  servicePrice?: string | number | null
+  s3Url?: string | null
+  createdAt: string
+  client: { firstName?: string; lastName?: string; middleName?: string } | null
+}
+
+/** Поля @db.Date в API приходят как ISO с полуночью UTC — сортируем по календарным Y-M-D. */
+function registryDbDateSortTs(raw: string | Date | null | undefined): number | null {
+  if (raw == null || raw === '') return null
+  const s = raw instanceof Date ? raw.toISOString() : String(raw)
+  const ymd = s.slice(0, 10)
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd)
+  if (!m) return null
+  const y = Number(m[1])
+  const mo = Number(m[2])
+  const d = Number(m[3])
+  return new Date(y, mo - 1, d).getTime()
+}
+
 const membershipOptions = ref<MembershipOption[]>([])
-const contractsRegistry = ref<
-  Array<{
-    id: string
-    clientId: string
-    contractNumber: string
-    status: string
-    servicePrice?: string | number | null
-    s3Url?: string | null
-    createdAt: string
-    client: { firstName?: string; lastName?: string; middleName?: string } | null
-  }>
->([])
+const contractsRegistry = ref<ContractRegistryRow[]>([])
 const registryFilters = reactive({
   clientId: '',
   status: '',
@@ -127,13 +142,27 @@ let applyingRegistryFromRoute = false
 const registryPage = ref(1)
 const registryLimit = ref(10)
 const registryPageCount = computed(() =>
-  Math.max(1, Math.ceil(contractsRegistry.value.length / registryLimit.value)),
+  Math.max(1, Math.ceil(sortedContractsRegistry.value.length / registryLimit.value)),
 )
+
+function registryContractSortKey(row: ContractRegistryRow): number {
+  const fromContract = registryDbDateSortTs(row.contractDate)
+  if (fromContract != null) return fromContract
+  const n = new Date(row.createdAt).getTime()
+  return Number.isFinite(n) ? n : 0
+}
+
+const sortedContractsRegistry = computed(() => {
+  const list = [...contractsRegistry.value]
+  list.sort((a, b) => registryContractSortKey(b) - registryContractSortKey(a))
+  return list
+})
+
 const pagedContractsRegistry = computed(() => {
   const start = (registryPage.value - 1) * registryLimit.value
-  return contractsRegistry.value.slice(start, start + registryLimit.value)
+  return sortedContractsRegistry.value.slice(start, start + registryLimit.value)
 })
-const hasRegistryItems = computed(() => contractsRegistry.value.length > 0)
+const hasRegistryItems = computed(() => sortedContractsRegistry.value.length > 0)
 
 watch([registryPageCount, registryLimit], () => {
   if (registryPage.value > registryPageCount.value) registryPage.value = registryPageCount.value
@@ -465,9 +494,8 @@ function applyPrefillFromQuery() {
     return typeof value === 'string' ? value : ''
   }
   form.contractNumber = get('contractNumber')
-  form.city = get('city')
-  form.firstName = get('firstName')
   form.lastName = get('lastName')
+  form.firstName = get('firstName')
   form.middleName = get('middleName')
   form.birthDate = get('birthDate')
   form.phone = get('phone')
@@ -505,7 +533,6 @@ const CONTRACT_DRAFT_QUERY_KEYS = [
   'contractDate',
   'serviceStartDate',
   'serviceEndDate',
-  'city',
   'clubAddress',
   'passportIssuedBy',
   'passportIssuedAt',
@@ -531,9 +558,8 @@ async function hydrateDraftFromClientApi(cid: string, contractNumberFromQuery?: 
     clientId.value = cid
     const trimmed = contractNumberFromQuery?.trim()
     form.contractNumber = trimmed && trimmed.length > 0 ? trimmed : generateContractNumber(new Date())
-    form.city = ''
-    form.firstName = typeof row.firstName === 'string' ? row.firstName : ''
     form.lastName = typeof row.lastName === 'string' ? row.lastName : ''
+    form.firstName = typeof row.firstName === 'string' ? row.firstName : ''
     form.middleName = typeof row.middleName === 'string' ? row.middleName : ''
     if (row.birthDate instanceof Date) {
       form.birthDate = row.birthDate.toISOString().slice(0, 10)
@@ -1040,7 +1066,6 @@ function payload() {
   }
   return {
     contractNumber: optional(form.contractNumber),
-    city: optional(form.city),
     firstName: form.firstName.trim(),
     lastName: form.lastName.trim(),
     middleName: optional(form.middleName),
@@ -1064,31 +1089,6 @@ function payload() {
   }
 }
 
-function normalizeTemplateKey(value: string) {
-  return value.toLowerCase().replace(/\s+/g, '').replace(/[_-]/g, '')
-}
-
-function escapeHtml(value: string) {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;')
-}
-
-function fillHtmlTemplateLocally(html: string) {
-  const data = payload() as Record<string, unknown>
-  const normalized = new Map<string, string>()
-  for (const [key, value] of Object.entries(data)) {
-    if (key === 'extraFields') continue
-    normalized.set(normalizeTemplateKey(key), typeof value === 'string' ? value : String(value ?? ''))
-  }
-  return html.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_m, rawKey: string) => {
-    return escapeHtml(normalized.get(normalizeTemplateKey(rawKey)) ?? '')
-  })
-}
-
 async function requestPdfBlob(): Promise<Blob> {
   const { data } = await api.post('/contracts/generate', payload(), {
     responseType: 'blob',
@@ -1098,14 +1098,6 @@ async function requestPdfBlob(): Promise<Blob> {
     throw new Error('PDF response expected')
   }
   return blob
-}
-
-async function requestHtml(): Promise<string> {
-  const { data } = await api.post('/contracts/render-html', payload(), {
-    responseType: 'text',
-    headers: { Accept: 'text/html' },
-  })
-  return String(data)
 }
 
 async function generateDownload() {
@@ -1149,30 +1141,6 @@ async function generatePrint() {
   }
 }
 
-async function printFromHtml() {
-  loadingGenerate.value = true
-  formError.value = null
-  try {
-    const html = fillHtmlTemplateLocally(await requestHtml())
-    const printWindow = window.open('', '_blank')
-    if (!printWindow) {
-      formError.value = t('contracts.popupBlocked')
-      return
-    }
-    printWindow.document.open()
-    printWindow.document.write(html)
-    printWindow.document.close()
-    printWindow.addEventListener('load', () => {
-      printWindow.focus()
-      printWindow.print()
-    })
-  } catch {
-    formError.value = t('contracts.generateFailed')
-  } finally {
-    loadingGenerate.value = false
-  }
-}
-
 async function saveContract() {
   if (!clientId.value.trim()) {
     formError.value = t('contracts.clientRequiredForSave')
@@ -1189,19 +1157,7 @@ async function saveContract() {
   loadingGenerate.value = true
   formError.value = null
   try {
-    const { data } = await api.post(`/contracts/client/${clientId.value.trim()}/save`, payload(), {
-      responseType: 'blob',
-    })
-    const blob = data instanceof Blob ? data : new Blob([data])
-    if (!blob.type.includes('pdf')) {
-      throw new Error('PDF response expected')
-    }
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `contract-${form.contractNumber || 'saved'}.pdf`
-    a.click()
-    URL.revokeObjectURL(url)
+    await api.post(`/contracts/client/${clientId.value.trim()}/save`, payload())
     notify({ color: 'success', message: t('contracts.saved') })
     clearContractAddressSuggestUi()
     createContractModalOpen.value = false
@@ -1228,7 +1184,7 @@ async function loadContractsRegistry() {
   loadingRegistry.value = true
   try {
     const { data } = await api.get('/contracts', { params: registryFilters })
-    contractsRegistry.value = Array.isArray(data) ? data : []
+    contractsRegistry.value = (Array.isArray(data) ? data : []) as ContractRegistryRow[]
   } finally {
     loadingRegistry.value = false
   }
@@ -1254,6 +1210,50 @@ function contractStatusTone(value: string): 'success' | 'warning' | 'danger' | '
   if (value === 'CANCELLED') return 'danger'
   if (value === 'EXPIRED') return 'neutral'
   return 'info'
+}
+
+function formatRegistryDbDateRu(raw: string | Date | null | undefined): string | null {
+  if (raw == null || raw === '') return null
+  const s = raw instanceof Date ? raw.toISOString() : String(raw)
+  const ymd = s.slice(0, 10)
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd)
+  if (!m) return null
+  const y = Number(m[1])
+  const mo = Number(m[2])
+  const d = Number(m[3])
+  if (!y || mo < 1 || mo > 12 || d < 1 || d > 31) return null
+  return new Date(y, mo - 1, d).toLocaleDateString('ru-RU')
+}
+
+function formatRegistryContractSignedAt(row: ContractRegistryRow) {
+  const dateOnly = formatRegistryDbDateRu(row.contractDate)
+  if (dateOnly) return dateOnly
+  const d = new Date(row.createdAt)
+  if (Number.isNaN(d.getTime())) return '—'
+  return d.toLocaleString('ru-RU')
+}
+
+function formatRegistryServiceEnd(row: ContractRegistryRow) {
+  return formatRegistryDbDateRu(row.serviceEndDate) ?? '—'
+}
+
+function registryClientFullName(client: ContractRegistryRow['client']): string {
+  if (!client) return '—'
+  return [client.lastName, client.firstName, client.middleName].filter(Boolean).join(' ').trim() || '—'
+}
+
+function goToClientPage(clientId: string) {
+  void router.push({ name: 'clients', query: { edit: clientId } })
+}
+
+function closeContractRowActionsMenu(ev: Event) {
+  const det = (ev.target as HTMLElement | null)?.closest('details')
+  if (det) det.open = false
+}
+
+function runContractRowMenuAction(ev: Event, action: () => void) {
+  closeContractRowActionsMenu(ev)
+  action()
 }
 
 function askFreezeContract(contractId: string) {
@@ -1499,12 +1499,23 @@ async function deleteContract() {
   }
 }
 
+function onDocumentPointerDownCloseContractRowMenus(ev: Event) {
+  const t = ev.target
+  if (!(t instanceof Node)) return
+  if (t instanceof Element && t.closest('.contracts-row-menu')) return
+  for (const el of document.querySelectorAll('details.contracts-row-menu[open]')) {
+    ;(el as HTMLDetailsElement).open = false
+  }
+}
+
 onMounted(() => {
   document.addEventListener('pointerdown', onContractBirthPickerPointerDown, true)
+  document.addEventListener('pointerdown', onDocumentPointerDownCloseContractRowMenus, true)
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', onContractBirthPickerPointerDown, true)
+  document.removeEventListener('pointerdown', onDocumentPointerDownCloseContractRowMenus, true)
   unmountContractPhoneMask()
   unmountContractPassportMask()
   if (registryClientSearchDebounce) clearTimeout(registryClientSearchDebounce)
@@ -1631,7 +1642,7 @@ void (async () => {
         :show-pager="hasRegistryItems && registryPageCount > 1"
       >
         <VaDataTable
-          class="app-table-actions-last-col"
+          class="contracts-registry-table app-table-actions-last-col"
           :items="pagedContractsRegistry"
           :loading="loadingRegistry"
           :columns="[
@@ -1639,18 +1650,31 @@ void (async () => {
             { key: 'client', label: t('clients.title') },
             { key: 'status', label: t('clients.statusLabel') },
             { key: 'servicePrice', label: t('contracts.servicePrice') },
-            { key: 'createdAt', label: t('contracts.contractDate') },
+            { key: 'contractDate', label: t('contracts.contractDate') },
+            { key: 'serviceEndDate', label: t('contracts.registryContractEndColumn') },
             { key: 'actions', label: t('clients.actions') },
           ]"
         >
           <template #cell(client)="{ rowData }">
-            {{ [rowData.client?.lastName, rowData.client?.firstName, rowData.client?.middleName].filter(Boolean).join(' ') || '—' }}
+            <span v-if="!rowData.clientId" class="contracts-registry-client-cell">{{ registryClientFullName(rowData.client) }}</span>
+            <RouterLink
+              v-else
+              class="contracts-registry-client-link"
+              :to="{ name: 'clients', query: { edit: rowData.clientId } }"
+              :title="t('contracts.goToClientHint')"
+            >
+              <span>{{ registryClientFullName(rowData.client) }}</span>
+              <VaIcon name="open_in_new" size="14px" class="contracts-registry-client-link__icon" aria-hidden="true" />
+            </RouterLink>
           </template>
           <template #cell(servicePrice)="{ rowData }">
             {{ rowData.servicePrice == null ? '—' : Number(rowData.servicePrice).toFixed(2) }}
           </template>
-          <template #cell(createdAt)="{ rowData }">
-            {{ new Date(rowData.createdAt).toLocaleString('ru-RU') }}
+          <template #cell(contractDate)="{ rowData }">
+            {{ formatRegistryContractSignedAt(rowData) }}
+          </template>
+          <template #cell(serviceEndDate)="{ rowData }">
+            {{ formatRegistryServiceEnd(rowData) }}
           </template>
           <template #cell(status)="{ rowData }">
             <StatusBadge
@@ -1659,54 +1683,84 @@ void (async () => {
             />
           </template>
           <template #cell(actions)="{ rowData }">
-            <div class="app-actions-cell">
-              <VaButton
-                v-if="!isManagerReadOnly && rowData.status === 'ACTIVE'"
-                size="large"
-                preset="plain"
-                :icon="TableActionIcon.contractPause"
-                :aria-label="t('contracts.pause')"
-                :title="t('contracts.pause')"
-                @click="askFreezeContract(rowData.id)"
-              />
-              <VaButton
-                v-if="!isManagerReadOnly && rowData.status === 'PAUSED'"
-                size="large"
-                preset="plain"
-                :icon="TableActionIcon.contractResume"
-                :aria-label="t('contracts.resume')"
-                :title="t('contracts.resume')"
-                @click="resumeContract(rowData.id)"
-              />
-              <VaButton
-                v-if="!isManagerReadOnly && rowData.status !== 'CANCELLED' && rowData.status !== 'EXPIRED'"
-                size="large"
-                color="warning"
-                preset="plain"
-                :icon="TableActionIcon.contractTerminate"
-                :aria-label="t('contracts.terminate')"
-                :title="t('contracts.terminate')"
-                @click="askCancelContract(rowData)"
-              />
-              <VaButton
-                size="large"
-                preset="plain"
-                :icon="TableActionIcon.openExternal"
-                :aria-label="t('contracts.openSaved')"
-                :disabled="!rowData.s3Url"
-                :title="t('contracts.openSaved')"
-                @click="openSavedContract(rowData.id)"
-              />
-              <VaButton
-                v-if="!isManagerReadOnly"
-                size="large"
-                color="danger"
-                preset="plain"
-                :icon="TableActionIcon.delete"
-                :aria-label="t('contracts.delete')"
-                :title="t('contracts.delete')"
-                @click="askDeleteContract(rowData)"
-              />
+            <div class="contracts-registry-actions-cell">
+              <details class="contracts-row-menu" @click.stop>
+                <summary class="contracts-row-menu__trigger" :aria-label="t('contracts.actionsMenu')">
+                  <VaIcon name="more_vert" size="22px" />
+                </summary>
+                <ul class="contracts-row-menu__list" role="menu" @click.stop>
+                  <li v-if="rowData.clientId" role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="contracts-row-menu__item"
+                      @click="runContractRowMenuAction($event, () => goToClientPage(rowData.clientId))"
+                    >
+                      <VaIcon name="person" size="18px" />
+                      {{ t('contracts.goToClient') }}
+                    </button>
+                  </li>
+                  <li v-if="!isManagerReadOnly && rowData.status === 'ACTIVE'" role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="contracts-row-menu__item"
+                      @click="runContractRowMenuAction($event, () => askFreezeContract(rowData.id))"
+                    >
+                      <VaIcon :name="TableActionIcon.contractPause" size="18px" />
+                      {{ t('contracts.pause') }}
+                    </button>
+                  </li>
+                  <li v-if="!isManagerReadOnly && rowData.status === 'PAUSED'" role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="contracts-row-menu__item"
+                      @click="runContractRowMenuAction($event, () => resumeContract(rowData.id))"
+                    >
+                      <VaIcon :name="TableActionIcon.contractResume" size="18px" />
+                      {{ t('contracts.resume') }}
+                    </button>
+                  </li>
+                  <li
+                    v-if="!isManagerReadOnly && rowData.status !== 'CANCELLED' && rowData.status !== 'EXPIRED'"
+                    role="none"
+                  >
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="contracts-row-menu__item contracts-row-menu__item--warning"
+                      @click="runContractRowMenuAction($event, () => askCancelContract(rowData))"
+                    >
+                      <VaIcon :name="TableActionIcon.contractTerminate" size="18px" />
+                      {{ t('contracts.terminate') }}
+                    </button>
+                  </li>
+                  <li role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="contracts-row-menu__item"
+                      :disabled="!rowData.s3Url"
+                      @click="runContractRowMenuAction($event, () => openSavedContract(rowData.id))"
+                    >
+                      <VaIcon :name="TableActionIcon.openExternal" size="18px" />
+                      {{ t('contracts.openSaved') }}
+                    </button>
+                  </li>
+                  <li v-if="!isManagerReadOnly" role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="contracts-row-menu__item contracts-row-menu__item--danger"
+                      @click="runContractRowMenuAction($event, () => askDeleteContract(rowData))"
+                    >
+                      <VaIcon :name="TableActionIcon.delete" size="18px" />
+                      {{ t('contracts.delete') }}
+                    </button>
+                  </li>
+                </ul>
+              </details>
             </div>
           </template>
         </VaDataTable>
@@ -1739,7 +1793,39 @@ void (async () => {
       @update:model-value="onCreateContractModalUpdate"
     >
       <template #header />
-      <div class="contract-create-modal app-modal-form" @keydown="onFormTabKeydown">
+      <VaInnerLoading
+        :loading="loadingGenerate"
+        size="large"
+        class="contract-create-modal-loading"
+        :aria-busy="loadingGenerate"
+      >
+        <div class="contract-create-modal app-modal-form" @keydown="onFormTabKeydown">
+          <div class="contract-modal-doc-actions">
+            <VaButton
+              type="button"
+              preset="plain"
+              color="primary"
+              icon="download"
+              size="medium"
+              class="contract-modal-doc-actions__btn"
+              :title="t('contracts.download')"
+              :aria-label="t('contracts.download')"
+              :disabled="loadingGenerate"
+              @click="generateDownload"
+            />
+            <VaButton
+              type="button"
+              preset="plain"
+              color="primary"
+              icon="print"
+              size="medium"
+              class="contract-modal-doc-actions__btn"
+              :title="t('contracts.print')"
+              :aria-label="t('contracts.print')"
+              :disabled="loadingGenerate"
+              @click="generatePrint"
+            />
+          </div>
         <AppSectionCard :title="t('contracts.formTitle')" :subtitle="t('contracts.formHint')">
           <div class="contracts-form-grid">
             <VaSelect
@@ -1748,6 +1834,7 @@ void (async () => {
               :label="t('contracts.clientSelect')"
               :options="clientOptions"
               :loading="loadingClients"
+              :disabled="loadingClients"
               text-by="text"
               value-by="value"
               searchable
@@ -1762,14 +1849,15 @@ void (async () => {
                   preset="plain"
                   icon="autorenew"
                   size="small"
+                  :disabled="loadingGenerate"
                   @click.stop="regenerateContractNumber"
                 />
               </template>
             </VaInput>
-            <VaInput v-model="form.city" :label="t('contracts.city')" />
             <VaInput v-model="form.lastName" :label="t('contracts.lastName')" />
             <VaInput v-model="form.firstName" :label="t('contracts.firstName')" />
             <VaInput v-model="form.middleName" :label="t('contracts.middleName')" />
+            <VaInput v-model="form.email" :label="t('contracts.email')" />
             <div ref="contractBirthFieldWrapRef" class="custom-date-field">
               <VaInput
                 ref="contractBirthTextFieldRef"
@@ -1815,7 +1903,6 @@ void (async () => {
               </div>
             </div>
             <VaInput ref="contractPhoneFieldRef" v-model="form.phone" :label="t('contracts.phone')" />
-            <VaInput v-model="form.email" :label="t('contracts.email')" />
             <div class="contracts-form-grid__full address-autocomplete">
               <VaInput
                 :model-value="form.address"
@@ -1892,6 +1979,7 @@ void (async () => {
               :label="t('contracts.serviceName')"
               :options="membershipOptions"
               :loading="loadingMemberships"
+              :disabled="loadingMemberships"
               text-by="text"
               value-by="value"
               searchable
@@ -1928,27 +2016,22 @@ void (async () => {
           {{ formError }}
         </VaAlert>
 
-        <div class="contracts-modal-toolbar">
-          <VaButton :loading="loadingGenerate" icon="download" @click="generateDownload">
-            {{ t('contracts.download') }}
-          </VaButton>
-          <VaButton preset="secondary" :loading="loadingGenerate" icon="print" @click="generatePrint">
-            {{ t('contracts.print') }}
-          </VaButton>
-          <VaButton preset="secondary" :loading="loadingGenerate" icon="article" @click="printFromHtml">
-            {{ t('contracts.printHtml') }}
-          </VaButton>
-        </div>
-
         <div class="app-modal-actions">
           <VaButton type="button" preset="secondary" :disabled="loadingGenerate" @click="closeCreateContractModal">
             {{ t('common.cancel') }}
           </VaButton>
-          <VaButton type="button" color="primary" :loading="loadingGenerate" icon="save" @click="saveContract">
+          <VaButton
+            type="button"
+            color="primary"
+            :disabled="loadingGenerate"
+            icon="save"
+            @click="saveContract"
+          >
             {{ t('contracts.save') }}
           </VaButton>
         </div>
-      </div>
+        </div>
+      </VaInnerLoading>
     </VaModal>
 
     <VaModal v-model="freezeOpen" hide-default-actions fixed-layout max-width="520px">
@@ -2065,10 +2148,120 @@ void (async () => {
   margin-top: 0.05rem;
 }
 
+.contracts-registry-table.app-table-actions-last-col :deep(thead th:last-child),
+.contracts-registry-table.app-table-actions-last-col :deep(tbody td:last-child) {
+  text-align: right;
+}
+
+.contracts-registry-actions-cell {
+  display: flex;
+  justify-content: flex-end;
+  width: 100%;
+}
+
+.contracts-registry-client-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--va-primary);
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.contracts-registry-client-link:hover {
+  text-decoration: underline;
+}
+
+.contracts-registry-client-link__icon {
+  flex-shrink: 0;
+  opacity: 0.78;
+}
+
+.contracts-row-menu {
+  position: relative;
+  display: inline-flex;
+  justify-content: flex-end;
+}
+
+.contracts-row-menu__trigger {
+  list-style: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 10px;
+  color: var(--va-primary);
+}
+
+.contracts-row-menu__trigger:hover {
+  background: color-mix(in srgb, var(--app-surface) 86%, var(--va-primary) 14%);
+}
+
+.contracts-row-menu__trigger::-webkit-details-marker {
+  display: none;
+}
+
+.contracts-row-menu__list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.2rem);
+  margin: 0;
+  padding: 0.3rem;
+  min-width: 12.5rem;
+  list-style: none;
+  border: 1px solid color-mix(in srgb, var(--app-border) 88%, transparent);
+  border-radius: 10px;
+  background: var(--app-surface);
+  box-shadow: var(--app-shadow-soft);
+  z-index: 50;
+}
+
+.contracts-row-menu__item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.45rem 0.55rem;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: var(--app-text);
+}
+
+.contracts-row-menu__item:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--app-surface) 82%, var(--app-border) 18%);
+}
+
+.contracts-row-menu__item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.contracts-row-menu__item--warning {
+  color: var(--va-warning);
+}
+
+.contracts-row-menu__item--danger {
+  color: var(--va-danger);
+}
+
 @media (max-width: 960px) {
   .contracts-registry-filters {
     grid-template-columns: 1fr;
   }
+}
+
+/* Один общий оверлей при генерации/сохранении PDF вместо спиннеров на каждой кнопке */
+.contract-create-modal-loading {
+  position: relative;
+  display: block;
+  min-width: 0;
+  min-height: 12rem;
 }
 
 .contract-create-modal {
@@ -2078,11 +2271,16 @@ void (async () => {
   min-width: 0;
 }
 
-.contracts-modal-toolbar {
+.contract-modal-doc-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
-  align-items: center;
+  justify-content: flex-end;
+  gap: 0.15rem;
+}
+
+.contract-modal-doc-actions__btn {
+  min-width: 2.5rem;
+  min-height: 2.5rem;
 }
 
 .contracts-form-grid {

@@ -48,7 +48,6 @@ const scannerClientCard = ref<{
   cardNumber: string | null
   status: string
 } | null>(null)
-const scannerClientInGym = ref(false)
 const scannerVisitStatus = ref<'IN_GYM' | 'OVERDUE' | 'LEFT' | 'FORCE_CLOSED' | null>(null)
 const scannerCurrentLocker = ref<string | null>(null)
 let timer: ReturnType<typeof setInterval> | null = null
@@ -80,6 +79,11 @@ function onScannerCodeInput() {
 /** Only ACTIVE clients may enter per club rules — highlight others (no valid membership / paused / blocked). */
 const scannerClientEntryNotAllowed = computed(
   () => Boolean(scannerClientCard.value && scannerClientCard.value.status !== 'ACTIVE'),
+)
+
+/** Незакрытая сессия визита (в зале или просрочена) — с check-in нельзя, нужен выход/force-close. */
+const scannerHasOpenVisit = computed(
+  () => scannerVisitStatus.value === 'IN_GYM' || scannerVisitStatus.value === 'OVERDUE',
 )
 
 function focusScannerInput() {
@@ -132,7 +136,6 @@ async function goToClientProfile() {
 
 function clearScannerResolvedState() {
   scannerClientCard.value = null
-  scannerClientInGym.value = false
   scannerVisitStatus.value = null
   scannerCurrentLocker.value = null
   scannerLockerNumber.value = ''
@@ -166,13 +169,15 @@ async function onScannerSubmit() {
       openSession?: { lockerNumber: string; status: 'IN_GYM' | 'OVERDUE' | 'LEFT' | 'FORCE_CLOSED' } | null
     }
     scannerClientCard.value = payload.client
-    scannerClientInGym.value = Boolean(payload.inGym)
     scannerVisitStatus.value = payload.openSession?.status ?? null
     scannerCurrentLocker.value = payload.openSession?.lockerNumber ?? null
     scannerLockerNumber.value = payload.openSession?.lockerNumber ?? ''
     scannerHintTone.value = 'default'
     if (payload.inGym) {
       scannerHint.value = t('header.scannerClientInGym')
+    } else if (payload.openSession?.status === 'OVERDUE') {
+      scannerHintTone.value = 'callout'
+      scannerHint.value = t('header.scannerOverdueCloseFirstHint')
     } else if (payload.client.status === 'BLOCKED') {
       scannerHint.value = t('header.scannerClientBlockedHint')
     } else if (payload.client.status !== 'ACTIVE') {
@@ -181,7 +186,7 @@ async function onScannerSubmit() {
       scannerHintTone.value = 'callout'
       scannerHint.value = t('header.scannerClientNotInGym')
     }
-    focusLockerAfterLookup = !payload.inGym && payload.client.status === 'ACTIVE'
+    focusLockerAfterLookup = !payload.openSession && payload.client.status === 'ACTIVE'
   } catch (error: unknown) {
     clearScannerResolvedState()
     scannerHintTone.value = isLookupNotFoundError(error) ? 'notFound' : 'error'
@@ -224,6 +229,7 @@ async function scannerCheckIn() {
       defaultMessage: t('header.scannerCheckInFailed'),
       byCode: {
         ONLY_ACTIVE_ALLOWED: t('header.scannerOnlyActiveAllowed'),
+        OPEN_VISIT_EXISTS: t('header.scannerOpenVisitExists'),
         ALREADY_IN_GYM: t('header.scannerAlreadyInGym'),
         LOCKER_BUSY: t('header.scannerLockerBusy'),
         LOCKER_REQUIRED: t('header.scannerLockerRequired'),
@@ -427,7 +433,9 @@ const clockTime = computed(() =>
             :class="{
               'scanner-client-card--entry-blocked': scannerClientEntryNotAllowed,
               'scanner-client-card--in-gym':
-                scannerClientInGym && !scannerClientEntryNotAllowed,
+                scannerVisitStatus === 'IN_GYM' && !scannerClientEntryNotAllowed,
+              'scanner-client-card--overdue-visit':
+                scannerVisitStatus === 'OVERDUE' && !scannerClientEntryNotAllowed,
             }"
             role="group"
           >
@@ -464,17 +472,24 @@ const clockTime = computed(() =>
                 >{{ t(`clients.status.${scannerClientCard.status}`) }}</span
               >
             </div>
-            <div class="scanner-client-card__state" :class="{ 'scanner-client-card__state--in': scannerClientInGym }">
-              {{
-                scannerClientInGym
-                  ? scannerVisitStatus === 'OVERDUE'
+            <div
+              class="scanner-client-card__state"
+              :class="{
+                'scanner-client-card__state--in': scannerVisitStatus === 'IN_GYM',
+                'scanner-client-card__state--overdue': scannerVisitStatus === 'OVERDUE',
+              }"
+            >
+              <template v-if="scannerHasOpenVisit">
+                {{
+                  scannerVisitStatus === 'OVERDUE'
                     ? t('header.scannerOverdueWithLocker', { locker: scannerCurrentLocker || '—' })
                     : t('header.scannerInGymWithLocker', { locker: scannerCurrentLocker || '—' })
-                  : t('header.scannerNotInGymLabel')
-              }}
+                }}
+              </template>
+              <template v-else>{{ t('header.scannerNotInGymLabel') }}</template>
             </div>
             <VaInput
-              v-if="!scannerClientInGym && !scannerClientEntryNotAllowed"
+              v-if="!scannerHasOpenVisit && !scannerClientEntryNotAllowed"
               v-model="scannerLockerNumber"
               class="scanner-modal__locker-field"
               :label="t('header.scannerLockerLabel')"
@@ -551,7 +566,7 @@ const clockTime = computed(() =>
               {{ t('header.scannerCreateClientButton') }}
             </VaButton>
             <VaButton
-              v-if="scannerClientCard && !scannerClientInGym && !scannerClientEntryNotAllowed"
+              v-if="scannerClientCard && !scannerHasOpenVisit && !scannerClientEntryNotAllowed"
               type="button"
               icon="login"
               color="success"
@@ -561,7 +576,7 @@ const clockTime = computed(() =>
             >
               {{ t('header.scannerCheckIn') }}
             </VaButton>
-            <template v-if="scannerClientCard && scannerClientInGym">
+            <template v-if="scannerClientCard && scannerHasOpenVisit">
               <VaButton
                 type="button"
                 color="warning"
@@ -875,6 +890,13 @@ const clockTime = computed(() =>
   box-shadow: 0 6px 22px rgba(22, 101, 52, 0.1);
 }
 
+.scanner-client-card--overdue-visit {
+  border-color: color-mix(in srgb, #ea580c 38%, var(--app-border));
+  border-left-width: 4px;
+  border-left-color: #ea580c;
+  box-shadow: 0 6px 22px rgba(234, 88, 12, 0.12);
+}
+
 .scanner-client-card--entry-blocked {
   border: 2px solid #dc2626;
   background: rgba(220, 38, 38, 0.07);
@@ -940,6 +962,10 @@ const clockTime = computed(() =>
 
 .scanner-client-card__state--in {
   color: #166534;
+}
+
+.scanner-client-card__state--overdue {
+  color: #c2410c;
 }
 
 .scanner-modal__another {

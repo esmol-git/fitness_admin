@@ -100,6 +100,40 @@ post_hook = /opt/fitnessApp/deploy/scripts/certrenew-docker-web.sh start
 sudo certbot renew --dry-run
 ```
 
+### 4.3. Автоматическое продление по расписанию
+
+После установки **Certbot** из пакета на **Ubuntu/Debian** обычно уже включён таймер **`certbot.timer`**: раз в ~12 часов запускается проверка, и за **30 дней** до истечения сертификата выполняется **`certbot renew`** (с вашими **`pre_hook` / `post_hook`** из §4.2).
+
+Проверка и включение:
+
+```bash
+sudo systemctl enable --now certbot.timer
+sudo systemctl status certbot.timer
+sudo systemctl list-timers | grep -i certbot
+```
+
+Логи последнего запуска:
+
+```bash
+sudo journalctl -u certbot.service -n 50 --no-pager
+```
+
+Если таймера нет (редкий образ без пакета), можно добавить **cron** от root: **`0 3 * * * certbot renew --quiet`** — но лучше поставить пакет **`certbot`** с unit-файлами.
+
+После **успешного** renew nginx продолжит отдавать старые файлы из памяти, пока его не **перезагрузить**. Добавьте **`deploy_hook`** (выполняется только при реальном обновлении PEM, не при **`--dry-run`**). В репозитории: **`deploy/scripts/certrenew-reload-nginx.sh`** (`nginx -t` и **`systemctl reload nginx`**).
+
+```bash
+chmod +x /opt/fitnessApp/deploy/scripts/certrenew-reload-nginx.sh
+```
+
+В **`/etc/letsencrypt/renewal/5fit.work.gd.conf`** и **`…/s3.5fit.work.gd.conf`** в **`[renewalparams]`** (одна строка на каждый сертификат, путь к репо свой):
+
+```ini
+deploy_hook = /opt/fitnessApp/deploy/scripts/certrenew-reload-nginx.sh
+```
+
+Убедиться, что **`deploy_hook`** не падает, можно вручную от root: **`sudo /opt/fitnessApp/deploy/scripts/certrenew-reload-nginx.sh`**. При **`certbot renew --dry-run`** хук **не** выполняется — это ожидаемо.
+
 ## 5. Обновление приложения
 
 ```bash
@@ -284,7 +318,7 @@ docker compose --env-file deploy/.env.production -f docker-compose.prod.yml --pr
 1. **CI** — пуш в **`main`** по **`backend/`** (workflow **Docker API**) и/или по **`frontend/`** (**Docker Web**), либо вручную **Run workflow** для обоих. Пакеты в **Packages** / GHCR.
 2. **VPS** — в **`deploy/.env.production`** задайте **`API_IMAGE`** и при необходимости **`WEB_IMAGE`** (§11); при приватном репозитории — **`docker login ghcr.io`**.
 3. **Деплой** — **`./deploy/scripts/vps-pull-up.sh --minio`** (или вручную **`pull`** / **`up`** из §11); без **`WEB_IMAGE`** — **`build web`** на сервере.
-4. **HTTPS** — §4–4.2 (nginx, **`certrenew-docker-web.sh`** для renew); обновите **`CORS_ORIGIN`** / **`COOKIE_SECURE`**.
+4. **HTTPS** — §4–4.3 (nginx, хуки **`certrenew-docker-web.sh`**, таймер **`certbot.timer`**, **`certrenew-reload-nginx.sh`**); обновите **`CORS_ORIGIN`** / **`COOKIE_SECURE`**.
 5. **Полная приёмка договоров + PDF** — на стенде с **≥4 GB RAM** или после апгрейда прод-сервера.
 
 ## 13. Логи успешного старта `api`

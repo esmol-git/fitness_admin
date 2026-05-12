@@ -58,6 +58,9 @@ server {
 
     client_max_body_size 50m;
 
+    # После первого захода по HTTPS браузер реже будет открывать http:// (закладки, автодополнение).
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
     location / {
         proxy_pass http://127.0.0.1:80;
         proxy_http_version 1.1;
@@ -72,6 +75,8 @@ server {
 Проверка: `sudo nginx -t && sudo systemctl reload nginx`.
 
 Редирект **HTTP → HTTPS** для **`5fit.work.gd`** / **`www`** сделан в образе **`web`** (`frontend/nginx/default.conf`): при прямом заходе на **:80** без **`X-Forwarded-Proto: https`** отдаётся **`301`**. Хостовый nginx на **443** обязан передавать **`proxy_set_header X-Forwarded-Proto $scheme`** (как в примере выше), иначе после деплоя будет цикл редиректов. Другой домен — поправьте **`map`** в том же файле.
+
+Надпись **«Не защищено»** в Chrome означает, что **текущее соединение не по TLS** (часто в адресной строке всё ещё **`http://`**, схему иногда скрывают). Проверка с сервера: **`curl -I http://5fit.work.gd/contracts`** — ожидаются **`301`** и **`Location: https://5fit.work.gd/contracts`**. Если **`200`** и HTML — на VPS ещё **старый образ `web`** без редиректа; обновите **`web`** (см. §11). После одного успешного захода по **`https://`** заголовок **HSTS** (строка выше на хостовом nginx) помогает браузеру дальше предпочитать HTTPS. Если в адресной строке уже **`https://`**, а предупреждение остаётся — откройте **DevTools → Security** (часто **mixed content** или сторонние скрипты по **http://**).
 
 ### 4.2. Автообновление Let’s Encrypt при `authenticator = standalone`
 

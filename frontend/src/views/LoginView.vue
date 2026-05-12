@@ -116,6 +116,16 @@ async function onSubmit() {
 <template>
   <div class="login-page">
     <VaCard class="login-card rounded-2xl" :gradient="false">
+      <div class="login-brand">
+        <img
+          class="login-brand__logo"
+          src="/images/logo.png"
+          :alt="t('header.logoAlt')"
+          width="112"
+          height="112"
+          decoding="async"
+        />
+      </div>
       <VaCardTitle class="login-title">{{ t('auth.title') }}</VaCardTitle>
 
       <VaCardContent>
@@ -191,6 +201,19 @@ async function onSubmit() {
   border: none !important;
   border-radius: var(--app-card-radius);
   box-shadow: var(--app-shadow-card);
+}
+
+.login-brand {
+  display: flex;
+  justify-content: center;
+  padding: 1.25rem 1rem 0.35rem;
+}
+
+.login-brand__logo {
+  width: 7rem;
+  height: 7rem;
+  object-fit: contain;
+  border-radius: 50%;
 }
 
 .login-title {

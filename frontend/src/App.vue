@@ -183,7 +183,7 @@ watch(
   display: flex;
   flex-direction: column;
   background: linear-gradient(180deg, var(--app-bg-start) 0%, var(--app-bg-end) 100%);
-  padding: 0.75rem;
+  padding: 0.35rem 0.75rem 0.75rem;
   gap: 0.75rem;
   overflow: hidden;
 }

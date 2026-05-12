@@ -359,7 +359,16 @@ const clockTime = computed(() =>
     <VaNavbar class="app-header rounded-2xl">
       <template #left>
         <div class="nav-left">
-          <RouterLink to="/" class="brand-title">{{ t('header.logoPlaceholder') }}</RouterLink>
+          <RouterLink to="/" class="brand-link" :aria-label="t('header.logoAlt')">
+            <img
+              class="brand-logo"
+              src="/images/logo.png"
+              alt=""
+              width="56"
+              height="56"
+              decoding="async"
+            />
+          </RouterLink>
         </div>
       </template>
 
@@ -616,6 +625,8 @@ const clockTime = computed(() =>
   color: var(--app-text);
   box-shadow: var(--app-shadow-soft);
   border-radius: 16px;
+  --va-navbar-padding-y: 0.4rem;
+  --va-navbar-height: auto;
 }
 
 .nav-left {
@@ -625,24 +636,24 @@ const clockTime = computed(() =>
   min-width: 0;
 }
 
-.logo-placeholder {
+.brand-link {
+  display: flex;
+  align-items: center;
   flex-shrink: 0;
-  font-size: 0.875rem;
-  font-weight: 600;
-  color: var(--app-muted);
-}
-
-.brand-title {
-  color: var(--app-text);
   text-decoration: none;
-  font-size: 1rem;
-  font-weight: 700;
-  letter-spacing: -0.02em;
+  outline-offset: 2px;
 }
 
-.brand-title:hover {
-  text-decoration: underline;
-  text-decoration-color: var(--app-accent);
+.brand-link:hover .brand-logo {
+  opacity: 0.88;
+}
+
+.brand-logo {
+  width: 3.5rem;
+  height: 3.5rem;
+  object-fit: contain;
+  border-radius: 50%;
+  display: block;
 }
 
 .header-tools {

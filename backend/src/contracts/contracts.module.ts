@@ -7,5 +7,6 @@ import { StorageModule } from '../storage/storage.module';
   imports: [StorageModule],
   controllers: [ContractsController],
   providers: [ContractsService],
+  exports: [ContractsService],
 })
 export class ContractsModule {}

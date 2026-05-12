@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Prisma, VisitSessionStatus, type Client, type ClientStatus } from '@prisma/client';
+import { ContractsService } from '../contracts/contracts.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { CreateClientDto } from './dto/create-client.dto';
@@ -15,6 +16,7 @@ export class ClientsService {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly storage: StorageService,
+    private readonly contracts: ContractsService,
   ) {}
   private readonly errors = {
     clientNotFound: { code: 'CLIENT_NOT_FOUND', message: 'Client not found' },
@@ -125,11 +127,19 @@ export class ClientsService {
   }
 
   /**
-   * Для списка клиентов: даты обслуживания из активного договора (или паузы, если активных нет),
-   * чтобы «дней до окончания» не зависели только от полей Client.*, которые могут быть пустыми.
+   * Для списка клиентов: окно обслуживания из активного договора (или паузы, если активных нет).
+   * Если активных несколько (аномалия или переходный период), берём **последний созданный** договор —
+   * иначе выбор по максимальному `serviceEndDate` подтягивал бы старый «длинный» договор вместо актуального
+   * (например разового), и «дней до окончания» раздувалось бы на сотни дней.
    */
   private pickListContractServiceWindow(
-    contracts: Array<{ status: string; serviceStartDate: Date | null; serviceEndDate: Date | null }>,
+    contracts: Array<{
+      id: string;
+      status: string;
+      serviceStartDate: Date | null;
+      serviceEndDate: Date | null;
+      createdAt: Date;
+    }>,
   ): { start: Date | null; end: Date | null } | null {
     const byPhase = (phase: 'ACTIVE' | 'PAUSED') =>
       contracts.filter(
@@ -138,12 +148,14 @@ export class ClientsService {
     const pool = byPhase('ACTIVE').length > 0 ? byPhase('ACTIVE') : byPhase('PAUSED');
     if (pool.length === 0) return null;
     let best = pool[0]!;
-    let bestEnd = best.serviceEndDate ? best.serviceEndDate.getTime() : -Infinity;
+    let bestCreated = best.createdAt.getTime();
+    let bestId = best.id;
     for (const c of pool) {
-      const t = c.serviceEndDate ? c.serviceEndDate.getTime() : -Infinity;
-      if (t > bestEnd) {
+      const ct = c.createdAt.getTime();
+      if (ct > bestCreated || (ct === bestCreated && c.id > bestId)) {
         best = c;
-        bestEnd = t;
+        bestCreated = ct;
+        bestId = c.id;
       }
     }
     if (!best.serviceEndDate) return null;
@@ -428,7 +440,14 @@ export class ClientsService {
     if (items.length > 0) {
       const contractRows = await this.prisma.contractDocument.findMany({
         where: { clientId: { in: items.map((item) => item.id) } },
-        select: { clientId: true, status: true, serviceStartDate: true, serviceEndDate: true },
+        select: {
+          id: true,
+          clientId: true,
+          status: true,
+          serviceStartDate: true,
+          serviceEndDate: true,
+          createdAt: true,
+        },
       });
       const [openVisitRows, latestVisitRows] = await this.prisma.$transaction([
         this.prisma.visitSession.findMany({
@@ -445,7 +464,17 @@ export class ClientsService {
           select: { clientId: true, enteredAt: true },
         }),
       ]);
-      const byClient = new Map<string, Array<{ status: string; serviceStartDate: Date | null; serviceEndDate: Date | null }>>();
+      const byClient = new Map<
+        string,
+        Array<{
+          id: string;
+          clientId: string;
+          status: string;
+          serviceStartDate: Date | null;
+          serviceEndDate: Date | null;
+          createdAt: Date;
+        }>
+      >();
       for (const row of contractRows) {
         const list = byClient.get(row.clientId) ?? [];
         list.push(row);
@@ -513,20 +542,9 @@ export class ClientsService {
   }
 
   async findOne(id: string) {
+    await this.contracts.syncClientSnapshotFromContracts(id);
     const item = await this.prisma.client.findUnique({ where: { id } });
     if (!item) throw new NotFoundException(this.errors.clientNotFound);
-    const contracts = await this.prisma.contractDocument.findMany({
-      where: { clientId: id },
-      select: { status: true, serviceStartDate: true, serviceEndDate: true },
-    });
-    const nextStatus = this.deriveClientStatusFromContracts(contracts, item.status);
-    if (item.status !== nextStatus) {
-      const updated = await this.prisma.client.update({
-        where: { id },
-        data: { status: nextStatus },
-      });
-      return this.withReadablePhotoUrl(updated);
-    }
     return this.withReadablePhotoUrl(item);
   }
 
@@ -539,7 +557,10 @@ export class ClientsService {
       },
     });
     if (!row) return null;
-    return this.withReadablePhotoUrl(row);
+    await this.contracts.syncClientSnapshotFromContracts(row.id);
+    const fresh = await this.prisma.client.findUnique({ where: { id: row.id } });
+    if (!fresh) return null;
+    return this.withReadablePhotoUrl(fresh);
   }
 
   async isCardNumberAvailable(cardNumber: string, excludeId?: string) {
@@ -565,7 +586,9 @@ export class ClientsService {
     const data = this.mapUpdateData(dto, existing, actorId);
     try {
       const updated = await this.prisma.client.update({ where: { id }, data });
-      return this.withReadablePhotoUrl(updated);
+      await this.contracts.syncClientSnapshotFromContracts(id);
+      const synced = await this.prisma.client.findUnique({ where: { id } });
+      return this.withReadablePhotoUrl(synced ?? updated);
     } catch (error: unknown) {
       this.rethrowKnownConflict(error);
       throw error;

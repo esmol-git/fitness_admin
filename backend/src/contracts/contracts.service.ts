@@ -70,6 +70,18 @@ export class ContractsService {
     onlyActiveCanFreeze: { code: 'ONLY_ACTIVE_CAN_FREEZE', message: 'Only active contract can be frozen' },
     refundExceedsPaid: { code: 'REFUND_LIMIT_EXCEEDED', message: 'Refund exceeds paid amount' },
     refundMethodRequired: { code: 'REFUND_METHOD_REQUIRED', message: 'Refund method is required for positive refund' },
+    installmentInitialRequired: {
+      code: 'INSTALLMENT_INITIAL_REQUIRED',
+      message: 'Initial payment amount is required for installment plan',
+    },
+    installmentInitialInvalid: {
+      code: 'INSTALLMENT_INITIAL_INVALID',
+      message: 'Initial payment must be greater than zero and not exceed contract price',
+    },
+    installmentCountInvalid: {
+      code: 'INSTALLMENT_COUNT_INVALID',
+      message: 'Installment count must be an integer from 2 to 120',
+    },
   } as const;
 
   constructor(
@@ -93,6 +105,81 @@ export class ContractsService {
     const num = Number(normalized);
     if (!Number.isFinite(num)) return null;
     return new Prisma.Decimal(num.toFixed(2));
+  }
+
+  private async aggregateNetPaidByContractIds(contractIds: string[]): Promise<Map<string, Prisma.Decimal>> {
+    const map = new Map<string, Prisma.Decimal>();
+    if (contractIds.length === 0) return map;
+    for (const id of contractIds) {
+      map.set(id, new Prisma.Decimal(0));
+    }
+    const [sales, refunds] = await Promise.all([
+      this.prisma.payment.groupBy({
+        by: ['contractDocumentId'],
+        where: {
+          contractDocumentId: { in: contractIds },
+          operationType: PaymentOperationType.SALE,
+          status: PaymentStatus.PAID,
+        },
+        _sum: { amount: true },
+      }),
+      this.prisma.payment.groupBy({
+        by: ['contractDocumentId'],
+        where: {
+          contractDocumentId: { in: contractIds },
+          operationType: PaymentOperationType.REFUND,
+          status: PaymentStatus.REFUNDED,
+        },
+        _sum: { amount: true },
+      }),
+    ]);
+    for (const s of sales) {
+      if (!s.contractDocumentId) continue;
+      const cur = map.get(s.contractDocumentId) ?? new Prisma.Decimal(0);
+      map.set(s.contractDocumentId, cur.plus(s._sum.amount ?? 0));
+    }
+    for (const r of refunds) {
+      if (!r.contractDocumentId) continue;
+      const cur = map.get(r.contractDocumentId) ?? new Prisma.Decimal(0);
+      map.set(r.contractDocumentId, cur.minus(r._sum.amount ?? 0));
+    }
+    return map;
+  }
+
+  private resolveFirstContractPayment(
+    dto: GenerateContractDto,
+    servicePrice: Prisma.Decimal,
+  ): {
+    paymentAmount: Prisma.Decimal;
+    paymentPlan: 'FULL' | 'INSTALLMENT_FLEXIBLE' | 'INSTALLMENT_EQUAL';
+    installmentCount: number | undefined;
+  } {
+    const raw = dto.paymentPlan;
+    const isInstallment = raw === 'INSTALLMENT_FLEXIBLE' || raw === 'INSTALLMENT_EQUAL';
+    if (!isInstallment) {
+      return { paymentAmount: servicePrice, paymentPlan: 'FULL', installmentCount: undefined };
+    }
+    if (raw === 'INSTALLMENT_EQUAL') {
+      const c = dto.installmentCount;
+      if (c == null || !Number.isInteger(c) || c < 2 || c > 120) {
+        throw new BadRequestException(this.errors.installmentCountInvalid);
+      }
+    }
+    const initialParsed = this.toPrice(dto.initialPaymentAmount);
+    if (!initialParsed) {
+      throw new BadRequestException(this.errors.installmentInitialRequired);
+    }
+    if (initialParsed.lte(0) || initialParsed.gt(servicePrice)) {
+      throw new BadRequestException(this.errors.installmentInitialInvalid);
+    }
+    if (initialParsed.equals(servicePrice)) {
+      return { paymentAmount: servicePrice, paymentPlan: 'FULL', installmentCount: undefined };
+    }
+    return {
+      paymentAmount: initialParsed,
+      paymentPlan: raw,
+      installmentCount: raw === 'INSTALLMENT_EQUAL' ? dto.installmentCount : undefined,
+    };
   }
 
   private getTodayStart(): Date {
@@ -232,22 +319,73 @@ export class ContractsService {
       select: { status: true },
     });
     if (!client) return;
-    if (client.status === 'BLOCKED') return;
+    if (client.status === 'BLOCKED') {
+      await db.client.update({
+        where: { id: clientId },
+        data: {
+          contractNumber: null,
+          contractStartDate: null,
+          contractEndDate: null,
+        },
+      });
+      return;
+    }
     const contracts = await db.contractDocument.findMany({
       where: { clientId },
-      select: { status: true, serviceStartDate: true, serviceEndDate: true },
+      select: {
+        id: true,
+        contractNumber: true,
+        status: true,
+        serviceStartDate: true,
+        serviceEndDate: true,
+        createdAt: true,
+      },
     });
-    const hasActive = contracts.some((contract) => {
-      return this.deriveContractStatus(contract.status, contract.serviceStartDate, contract.serviceEndDate) === 'ACTIVE';
-    });
-    const hasPaused = contracts.some((contract) => {
-      return this.deriveContractStatus(contract.status, contract.serviceStartDate, contract.serviceEndDate) === 'PAUSED';
-    });
+    const derived = (c: (typeof contracts)[number]) =>
+      this.deriveContractStatus(c.status, c.serviceStartDate, c.serviceEndDate);
+    const hasActive = contracts.some((c) => derived(c) === 'ACTIVE');
+    const hasPaused = contracts.some((c) => derived(c) === 'PAUSED');
     const status: ClientStatus = hasActive ? 'ACTIVE' : hasPaused ? 'PAUSED' : 'INACTIVE';
+
+    const pool = contracts.filter((c) => derived(c) === 'ACTIVE');
+    const phasePool = pool.length > 0 ? pool : contracts.filter((c) => derived(c) === 'PAUSED');
+    let contractNumber: string | null = null;
+    let contractStartDate: Date | null = null;
+    let contractEndDate: Date | null = null;
+    if (phasePool.length > 0) {
+      let best = phasePool[0]!;
+      let bestCreated = best.createdAt.getTime();
+      let bestId = best.id;
+      for (const c of phasePool) {
+        const ct = c.createdAt.getTime();
+        if (ct > bestCreated || (ct === bestCreated && c.id > bestId)) {
+          best = c;
+          bestCreated = ct;
+          bestId = c.id;
+        }
+      }
+      contractNumber = best.contractNumber?.trim() || null;
+      contractStartDate = best.serviceStartDate ?? null;
+      contractEndDate = best.serviceEndDate ?? null;
+    }
+
     await db.client.update({
       where: { id: clientId },
-      data: { status },
+      data: {
+        status,
+        contractNumber,
+        contractStartDate,
+        contractEndDate,
+      },
     });
+  }
+
+  /**
+   * Идемпотентно: `Client.status` и поля «текущего» договора (номер, даты) по `ContractDocument`.
+   * У заблокированных — только обнуляет поля договора на клиенте.
+   */
+  async syncClientSnapshotFromContracts(clientId: string, tx?: Prisma.TransactionClient) {
+    await this.refreshClientStatus(clientId, tx);
   }
 
   private getTemplatePath(): string {
@@ -461,6 +599,7 @@ export class ContractsService {
         servicePrice: true,
         s3Url: true,
         createdAt: true,
+        payload: true,
         freezes: {
           select: { endDate: true },
           orderBy: { endDate: 'desc' },
@@ -468,11 +607,107 @@ export class ContractsService {
         },
       },
     });
-    return rows.map((row) => ({
-      ...row,
-      status: this.deriveContractStatus(row.status, row.serviceStartDate, row.serviceEndDate),
-      pauseUntil: row.freezes[0]?.endDate ?? null,
-    }));
+    const paidMap = await this.aggregateNetPaidByContractIds(rows.map((r) => r.id));
+    return rows.map((row) => {
+      const net = paidMap.get(row.id) ?? new Prisma.Decimal(0);
+      const priceDec = row.servicePrice == null ? null : new Prisma.Decimal(row.servicePrice);
+      const balanceNum = priceDec ? priceDec.minus(net) : new Prisma.Decimal(0);
+      const fullyPaid = priceDec == null ? true : balanceNum.lte(new Prisma.Decimal('0.005'));
+      const paidTotal = net.toFixed(2);
+      const balanceDue = priceDec ? (fullyPaid ? '0.00' : balanceNum.toFixed(2)) : null;
+      const payloadObj = row.payload as Record<string, unknown> | null;
+      const rawPlan = payloadObj?.paymentPlan;
+      const paymentPlan =
+        rawPlan === 'INSTALLMENT_FLEXIBLE' || rawPlan === 'INSTALLMENT_EQUAL' || rawPlan === 'FULL'
+          ? rawPlan
+          : 'FULL';
+      const icRaw = payloadObj?.installmentCount;
+      const installmentCount =
+        typeof icRaw === 'number' && Number.isInteger(icRaw)
+          ? icRaw
+          : typeof icRaw === 'string' && /^\s*\d+\s*$/.test(icRaw)
+            ? Number.parseInt(icRaw.trim(), 10)
+            : null;
+      let suggestedEqualPayment: string | null = null;
+      if (
+        paymentPlan === 'INSTALLMENT_EQUAL' &&
+        installmentCount != null &&
+        installmentCount >= 2 &&
+        row.servicePrice != null
+      ) {
+        suggestedEqualPayment = new Prisma.Decimal(row.servicePrice)
+          .dividedBy(installmentCount)
+          .toFixed(2);
+      }
+      const { payload: _p, ...rest } = row;
+      return {
+        ...rest,
+        status: this.deriveContractStatus(row.status, row.serviceStartDate, row.serviceEndDate),
+        pauseUntil: row.freezes[0]?.endDate ?? null,
+        paidTotal,
+        balanceDue,
+        fullyPaid,
+        paymentPlan,
+        installmentCount,
+        suggestedEqualPayment,
+      };
+    });
+  }
+
+  /**
+   * Для сканера прохода: среди ACTIVE (если есть — только они, иначе PAUSED) берём договоры с остатком к оплате
+   * и показываем самый новый по createdAt. Раньше сначала выбирался «любой» новейший ACTIVE и только потом
+   * проверялся долг — если новейший уже закрыт по оплате, остаток по другому активному договору терялся.
+   */
+  async getPrimaryContractUnpaidSummaryForVisitLookup(clientId: string): Promise<{
+    contractNumber: string;
+    balanceDue: string;
+  } | null> {
+    const list = await this.listClientContracts(clientId);
+    const actives = list.filter((c) => c.status === 'ACTIVE');
+    const paused = list.filter((c) => c.status === 'PAUSED');
+    const phasePool = actives.length > 0 ? actives : paused;
+    if (phasePool.length === 0) return null;
+
+    const hasUnpaidBalance = (c: (typeof list)[number]) => {
+      if (c.fullyPaid === true) return false;
+      const bal = Number(String(c.balanceDue ?? '0').replace(',', '.'));
+      return Number.isFinite(bal) && bal > 0.005;
+    };
+
+    const withDebt = phasePool.filter(hasUnpaidBalance);
+    if (withDebt.length === 0) {
+      if (actives.length > 0) {
+        const pausedWithDebt = paused.filter(hasUnpaidBalance);
+        if (pausedWithDebt.length === 0) return null;
+        return this.pickNewestContractUnpaidSummary(pausedWithDebt);
+      }
+      return null;
+    }
+
+    return this.pickNewestContractUnpaidSummary(withDebt);
+  }
+
+  private pickNewestContractUnpaidSummary(
+    pool: Array<{ id: string; contractNumber: string; createdAt: Date | string; balanceDue?: string | null }>,
+  ): { contractNumber: string; balanceDue: string } {
+    let best = pool[0]!;
+    let bestCreated = new Date(best.createdAt).getTime();
+    let bestId = best.id;
+    for (const c of pool) {
+      const ct = new Date(c.createdAt).getTime();
+      if (ct > bestCreated || (ct === bestCreated && c.id > bestId)) {
+        best = c;
+        bestCreated = ct;
+        bestId = c.id;
+      }
+    }
+    const bal = Number(String(best.balanceDue ?? '0').replace(',', '.'));
+    const num = (best.contractNumber ?? '').trim();
+    return {
+      contractNumber: num.length > 0 ? num : '—',
+      balanceDue: bal.toFixed(2),
+    };
   }
 
   async listContracts(filters?: {
@@ -514,7 +749,7 @@ export class ContractsService {
         servicePrice: true,
         s3Url: true,
         createdAt: true,
-        client: { select: { firstName: true, lastName: true, middleName: true } },
+        client: { select: { id: true, firstName: true, lastName: true, middleName: true, phone: true } },
       },
     });
     const normalized = rows.map((row) => ({
@@ -847,6 +1082,13 @@ export class ContractsService {
       throw new BadRequestException(this.errors.servicePriceRequired);
     }
 
+    const { paymentAmount, paymentPlan, installmentCount } = this.resolveFirstContractPayment(dto, servicePrice);
+    const persistDto: GenerateContractDto = {
+      ...dto,
+      paymentPlan,
+      installmentCount,
+    };
+
     const serviceStartDate = this.toDate(dto.serviceStartDate);
     const serviceEndDate = this.toDate(dto.serviceEndDate);
     if (serviceStartDate && serviceEndDate && serviceEndDate < serviceStartDate) {
@@ -866,21 +1108,25 @@ export class ContractsService {
             serviceStartDate,
             serviceEndDate,
             servicePrice,
-            payload: dto as unknown as object,
+            payload: persistDto as unknown as object,
           },
           select: { id: true, contractNumber: true, createdAt: true },
         });
 
+        const paymentComment =
+          paymentPlan === 'FULL'
+            ? 'Auto payment on contract save'
+            : `Installment first payment (${paymentPlan})`;
         await tx.payment.create({
           data: {
             clientId,
             contractDocumentId: contract.id,
-            amount: servicePrice,
+            amount: paymentAmount,
             status: PaymentStatus.PAID,
             operationType: PaymentOperationType.SALE,
             paidAt: new Date(),
             processedById: actorId,
-            comment: 'Auto payment on contract save',
+            comment: paymentComment,
           },
         });
 

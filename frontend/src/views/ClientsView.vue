@@ -33,6 +33,7 @@ import { api } from '@/utils/api'
 import { clientPhotoDisplayUrl } from '@/utils/clientPhotoUrl'
 import { getClientContractDaysLeft } from '@/utils/clientContractRemaining'
 import { meaningfulAlertText } from '@/utils/meaningfulAlertText'
+import { isoCalendarDateAtNowLocalTimeToUtcIso } from '@/utils/ruDateInput'
 
 const { t } = useI18n()
 const { init: notify } = useToast()
@@ -233,9 +234,16 @@ const editContractsHistory = ref<
     servicePrice?: string | number | null
     serviceStartDate?: string | null
     serviceEndDate?: string | null
+    contractDate?: string | null
     pauseUntil?: string | null
     s3Url?: string | null
     createdAt: string
+    paidTotal?: string
+    balanceDue?: string | null
+    fullyPaid?: boolean
+    paymentPlan?: string
+    installmentCount?: number | null
+    suggestedEqualPayment?: string | null
   }>
 >([])
 const editContractsLoading = ref(false)
@@ -247,10 +255,16 @@ const editPaymentsHistory = ref<
     status: string
     comment?: string | null
     contractDocumentId?: string | null
+    operationType?: string
+    contract?: { id: string; contractNumber: string; s3Url?: string | null } | null
   }>
 >([])
 const editPaymentsLoading = ref(false)
+const addContractPaymentLoading = ref(false)
 const editHistoryRequestId = ref(0)
+const clientsRowMenuOpenId = ref<string | null>(null)
+const clientsRowMenuRow = ref<ClientRow | null>(null)
+const clientsRowMenuAnchorRect = ref<DOMRect | null>(null)
 const freezeOpen = ref(false)
 const freezeLoading = ref(false)
 const freezeTargetId = ref<string | null>(null)
@@ -687,13 +701,66 @@ function openEdit(row: ClientRow) {
   void nextTick(() => editFormRef.value?.resetPhotoDraft())
 }
 
-function closeClientRowActionsMenu(ev: Event) {
-  const det = (ev.target as HTMLElement | null)?.closest('details')
-  if (det) det.open = false
+function closeClientRowActionsMenu() {
+  clientsRowMenuOpenId.value = null
+  clientsRowMenuRow.value = null
+  clientsRowMenuAnchorRect.value = null
 }
 
-function runClientRowMenuAction(ev: Event, action: () => void) {
-  closeClientRowActionsMenu(ev)
+const clientsRowMenuLayerStyle = computed(() => {
+  const r = clientsRowMenuAnchorRect.value
+  if (!r || typeof window === 'undefined') return {}
+  const gap = 6
+  const reserve = 10
+  const winW = window.innerWidth
+  const winH = window.innerHeight
+  /** Оценка высоты меню (пункты + отступы); при нехватке места включается скролл. */
+  const estMenuPx = 260
+  const spaceBelow = winH - r.bottom - gap - reserve
+  const spaceAbove = r.top - gap - reserve
+  const openAbove =
+    spaceBelow < Math.min(estMenuPx, 200) && spaceAbove > spaceBelow && spaceAbove > 80
+
+  const maxH = Math.max(100, Math.min(openAbove ? spaceAbove : spaceBelow, winH - reserve * 2))
+
+  const base: Record<string, string> = {
+    position: 'fixed',
+    right: `${winW - r.right}px`,
+    zIndex: '4000',
+    maxHeight: `${maxH}px`,
+    overflowY: 'auto',
+    overflowX: 'hidden',
+    overscrollBehavior: 'contain',
+  }
+
+  if (openAbove) {
+    return {
+      ...base,
+      bottom: `${winH - r.top + gap}px`,
+      top: 'auto',
+    }
+  }
+  return {
+    ...base,
+    top: `${r.bottom + gap}px`,
+    bottom: 'auto',
+  }
+})
+
+function onRowMenuTriggerClick(row: ClientRow, ev: MouseEvent) {
+  const el = ev.currentTarget
+  if (!(el instanceof HTMLElement)) return
+  if (clientsRowMenuOpenId.value === row.id) {
+    closeClientRowActionsMenu()
+    return
+  }
+  clientsRowMenuOpenId.value = row.id
+  clientsRowMenuRow.value = row
+  clientsRowMenuAnchorRect.value = el.getBoundingClientRect()
+}
+
+function runClientRowMenuAction(action: () => void) {
+  closeClientRowActionsMenu()
   action()
 }
 
@@ -707,27 +774,30 @@ function handleClientsTableRowClick(payload: ClientsTableRowClickPayload) {
   if (loading.value || editState.loading.value || createState.loading.value) return
   const t = payload.event.target
   if (!(t instanceof Element)) return
-  if (t.closest('.clients-row-menu')) return
+  if (t.closest('.clients-row-menu-layer')) return
+  if (t.closest('.clients-row-menu__trigger')) return
   if (t.closest('.clients-gym-chip-trigger')) return
   if (t.closest('.clients-table-actions-cell')) return
+  closeClientRowActionsMenu()
   openEdit(payload.item as unknown as ClientRow)
 }
 
-function onDocumentPointerDownCloseClientRowMenus(ev: Event) {
+function onDocumentPointerDownCloseRowMenu(ev: Event) {
   const t = ev.target
-  if (!(t instanceof Node)) return
-  if (t instanceof Element && t.closest('.clients-row-menu')) return
-  for (const el of document.querySelectorAll('details.clients-row-menu[open]')) {
-    ;(el as HTMLDetailsElement).open = false
-  }
+  if (!(t instanceof Element)) return
+  if (t.closest('.clients-row-menu-layer')) return
+  if (t.closest('.clients-row-menu__trigger')) return
+  closeClientRowActionsMenu()
 }
 
 onMounted(() => {
-  document.addEventListener('pointerdown', onDocumentPointerDownCloseClientRowMenus, true)
+  document.addEventListener('pointerdown', onDocumentPointerDownCloseRowMenu, true)
+  window.addEventListener('resize', closeClientRowActionsMenu, { passive: true })
 })
 
 onBeforeUnmount(() => {
-  document.removeEventListener('pointerdown', onDocumentPointerDownCloseClientRowMenus, true)
+  document.removeEventListener('pointerdown', onDocumentPointerDownCloseRowMenu, true)
+  window.removeEventListener('resize', closeClientRowActionsMenu)
 })
 
 let consumingEditClientFromUrl = false
@@ -892,6 +962,26 @@ async function updateClient() {
   }
 }
 
+function pickPrimaryContractDocForEdit<
+  T extends { id: string; status?: string; createdAt: string },
+>(items: T[]): T | undefined {
+  const active = items.filter((i) => i.status === 'ACTIVE')
+  const pool = active.length > 0 ? active : items.filter((i) => i.status === 'PAUSED')
+  if (pool.length === 0) return undefined
+  let best = pool[0]!
+  let bestCreated = new Date(best.createdAt).getTime()
+  let bestId = best.id
+  for (const c of pool) {
+    const ct = new Date(c.createdAt).getTime()
+    if (ct > bestCreated || (ct === bestCreated && c.id > bestId)) {
+      best = c
+      bestCreated = ct
+      bestId = c.id
+    }
+  }
+  return best
+}
+
 async function loadEditContractsHistory(clientId: string, requestId = editHistoryRequestId.value) {
   editContractsLoading.value = true
   try {
@@ -900,25 +990,28 @@ async function loadEditContractsHistory(clientId: string, requestId = editHistor
     editContractsHistory.value = Array.isArray(data) ? data : []
     const paused = editContractsHistory.value.find((item) => item.status === 'PAUSED' && item.pauseUntil)
     editPauseUntil.value = paused?.pauseUntil ?? null
-    const activeOrPaused = editContractsHistory.value.find(
-      (item) => item.status === 'ACTIVE' || item.status === 'PAUSED',
-    )
-    if (editingId.value === clientId && requestId === editHistoryRequestId.value && activeOrPaused) {
-      const docNumber = activeOrPaused.contractNumber?.trim()
-      const startFromDoc = apiDateToFormIso(activeOrPaused.serviceStartDate ?? undefined)
-      const endFromDoc = apiDateToFormIso(activeOrPaused.serviceEndDate ?? undefined)
+    const primaryDoc = pickPrimaryContractDocForEdit(editContractsHistory.value)
+    if (editingId.value === clientId && requestId === editHistoryRequestId.value && primaryDoc) {
+      const docNumber = primaryDoc.contractNumber?.trim()
+      const startFromDoc = apiDateToFormIso(primaryDoc.serviceStartDate ?? undefined)
+      const endFromDoc = apiDateToFormIso(primaryDoc.serviceEndDate ?? undefined)
+      const payFromDoc = apiDateToFormIso(primaryDoc.contractDate ?? undefined)
       const next = { ...editState.form.value }
       let changed = false
-      if (docNumber && !next.contractNumber.trim()) {
+      if (docNumber && next.contractNumber.trim() !== docNumber) {
         next.contractNumber = docNumber
         changed = true
       }
-      if (startFromDoc && !next.contractStartDate.trim()) {
+      if (startFromDoc && next.contractStartDate !== startFromDoc) {
         next.contractStartDate = startFromDoc
         changed = true
       }
-      if (endFromDoc && !next.contractEndDate.trim()) {
+      if (endFromDoc && next.contractEndDate !== endFromDoc) {
         next.contractEndDate = endFromDoc
+        changed = true
+      }
+      if (payFromDoc && next.paymentDate !== payFromDoc) {
+        next.paymentDate = payFromDoc
         changed = true
       }
       if (changed) {
@@ -948,6 +1041,42 @@ async function loadEditPaymentsHistory(clientId: string, requestId = editHistory
   } finally {
     if (requestId !== editHistoryRequestId.value) return
     editPaymentsLoading.value = false
+  }
+}
+
+async function onAddContractPayment(payload: { contractDocumentId: string; amount: number; paidAt: string }) {
+  const clientId = editingId.value
+  if (!clientId) return
+  addContractPaymentLoading.value = true
+  const paidAtRaw = payload.paidAt.trim()
+  const paidAtForApi =
+    paidAtRaw.length === 10 && /^\d{4}-\d{2}-\d{2}$/.test(paidAtRaw)
+      ? isoCalendarDateAtNowLocalTimeToUtcIso(paidAtRaw)
+      : paidAtRaw || new Date().toISOString()
+  try {
+    await api.post('/payments', {
+      clientId,
+      contractDocumentId: payload.contractDocumentId,
+      amount: payload.amount,
+      paidAt: paidAtForApi,
+      status: 'PAID',
+      comment: 'Contract installment payment',
+    })
+    notify({ color: 'success', message: t('clients.paymentCreated') })
+    ui.bumpPaymentsTableRefresh()
+    await Promise.all([loadEditPaymentsHistory(clientId), loadEditContractsHistory(clientId)])
+  } catch (e: unknown) {
+    notify({
+      color: 'danger',
+      message: resolveApiErrorMessage(e, {
+        defaultMessage: t('clients.paymentCreateFailed'),
+        byCode: {
+          PAYMENT_EXCEEDS_CONTRACT_BALANCE: t('clients.paymentExceedsContractBalance'),
+        },
+      }),
+    })
+  } finally {
+    addContractPaymentLoading.value = false
   }
 }
 
@@ -1880,7 +2009,7 @@ watch(
       </div>
 
       <AppDataTableShell :loading="loading" :has-items="hasClients" :show-pager="hasClients && pages > 1">
-        <div class="clients-table-scroll">
+        <div class="clients-table-scroll" @scroll.passive="closeClientRowActionsMenu">
           <VaDataTable
             class="clients-data-table app-table-actions-last-col"
             clickable
@@ -1940,79 +2069,17 @@ watch(
           </template>
           <template #cell(actions)="{ rowData }">
             <div class="clients-table-actions-cell">
-              <details class="clients-row-menu" @click.stop>
-                <summary class="clients-row-menu__trigger" :aria-label="t('clients.actionsMenu')">
+              <div class="clients-row-menu">
+                <button
+                  type="button"
+                  class="clients-row-menu__trigger"
+                  :aria-label="t('clients.actionsMenu')"
+                  :aria-expanded="clientsRowMenuOpenId === rowData.id ? 'true' : 'false'"
+                  @click.stop="onRowMenuTriggerClick(rowData, $event)"
+                >
                   <VaIcon name="more_vert" size="22px" />
-                </summary>
-                <ul class="clients-row-menu__list" role="menu" @click.stop>
-                  <li role="none">
-                    <button
-                      type="button"
-                      role="menuitem"
-                      class="clients-row-menu__item"
-                      @click="runClientRowMenuAction($event, () => openEdit(rowData))"
-                    >
-                      <VaIcon :name="TableActionIcon.edit" size="18px" />
-                      {{ t('clients.edit') }}
-                    </button>
-                  </li>
-                  <li v-if="rowData.status !== 'BLOCKED'" role="none">
-                    <button
-                      type="button"
-                      role="menuitem"
-                      class="clients-row-menu__item"
-                      :disabled="
-                        contractGenerateLoadingId === rowData.id || statusActionLoadingId === rowData.id
-                      "
-                      @click="
-                        runClientRowMenuAction($event, () => void generateContractFromTableRow(rowData))
-                      "
-                    >
-                      <VaIcon
-                        :name="TableActionIcon.generateContract"
-                        size="18px"
-                        :class="{ 'clients-row-menu__icon--spin': contractGenerateLoadingId === rowData.id }"
-                      />
-                      {{ t('clients.generateContract') }}
-                    </button>
-                  </li>
-                  <li v-if="canBlockOrDeleteClient && rowData.status !== 'BLOCKED'" role="none">
-                    <button
-                      type="button"
-                      role="menuitem"
-                      class="clients-row-menu__item clients-row-menu__item--warning"
-                      :disabled="statusActionLoadingId === rowData.id"
-                      @click="runClientRowMenuAction($event, () => blockClient(rowData))"
-                    >
-                      <VaIcon :name="TableActionIcon.blockClient" size="18px" />
-                      {{ t('clients.block') }}
-                    </button>
-                  </li>
-                  <li v-else-if="canBlockOrDeleteClient && rowData.status === 'BLOCKED'" role="none">
-                    <button
-                      type="button"
-                      role="menuitem"
-                      class="clients-row-menu__item"
-                      :disabled="statusActionLoadingId === rowData.id"
-                      @click="runClientRowMenuAction($event, () => unblockClient(rowData))"
-                    >
-                      <VaIcon :name="TableActionIcon.unblockClient" size="18px" />
-                      {{ t('clients.unblock') }}
-                    </button>
-                  </li>
-                  <li v-if="canBlockOrDeleteClient" role="none">
-                    <button
-                      type="button"
-                      role="menuitem"
-                      class="clients-row-menu__item clients-row-menu__item--danger"
-                      @click="runClientRowMenuAction($event, () => askDelete(rowData))"
-                    >
-                      <VaIcon :name="TableActionIcon.delete" size="18px" />
-                      {{ t('clients.delete') }}
-                    </button>
-                  </li>
-                </ul>
-              </details>
+                </button>
+              </div>
             </div>
           </template>
         </VaDataTable>
@@ -2039,6 +2106,87 @@ watch(
         </template>
       </AppDataTableShell>
     </AppPageCard>
+
+    <Teleport to="body">
+      <div
+        v-if="clientsRowMenuRow"
+        class="clients-row-menu-layer"
+        :style="clientsRowMenuLayerStyle"
+        @click.stop
+      >
+        <div class="clients-row-menu__panel">
+          <ul class="clients-row-menu__list" role="menu">
+            <li role="none">
+              <button
+                type="button"
+                role="menuitem"
+                class="clients-row-menu__item"
+                @click="runClientRowMenuAction(() => openEdit(clientsRowMenuRow!))"
+              >
+                <VaIcon :name="TableActionIcon.edit" size="18px" />
+                {{ t('clients.edit') }}
+              </button>
+            </li>
+            <li v-if="clientsRowMenuRow!.status !== 'BLOCKED'" role="none">
+              <button
+                type="button"
+                role="menuitem"
+                class="clients-row-menu__item"
+                :disabled="
+                  contractGenerateLoadingId === clientsRowMenuRow!.id ||
+                  statusActionLoadingId === clientsRowMenuRow!.id
+                "
+                @click="
+                  runClientRowMenuAction(() => void generateContractFromTableRow(clientsRowMenuRow!))
+                "
+              >
+                <VaIcon
+                  :name="TableActionIcon.generateContract"
+                  size="18px"
+                  :class="{ 'clients-row-menu__icon--spin': contractGenerateLoadingId === clientsRowMenuRow!.id }"
+                />
+                {{ t('clients.generateContract') }}
+              </button>
+            </li>
+            <li v-if="canBlockOrDeleteClient && clientsRowMenuRow!.status !== 'BLOCKED'" role="none">
+              <button
+                type="button"
+                role="menuitem"
+                class="clients-row-menu__item clients-row-menu__item--warning"
+                :disabled="statusActionLoadingId === clientsRowMenuRow!.id"
+                @click="runClientRowMenuAction(() => blockClient(clientsRowMenuRow!))"
+              >
+                <VaIcon :name="TableActionIcon.blockClient" size="18px" />
+                {{ t('clients.block') }}
+              </button>
+            </li>
+            <li v-else-if="canBlockOrDeleteClient && clientsRowMenuRow!.status === 'BLOCKED'" role="none">
+              <button
+                type="button"
+                role="menuitem"
+                class="clients-row-menu__item"
+                :disabled="statusActionLoadingId === clientsRowMenuRow!.id"
+                @click="runClientRowMenuAction(() => unblockClient(clientsRowMenuRow!))"
+              >
+                <VaIcon :name="TableActionIcon.unblockClient" size="18px" />
+                {{ t('clients.unblock') }}
+              </button>
+            </li>
+            <li v-if="canBlockOrDeleteClient" role="none">
+              <button
+                type="button"
+                role="menuitem"
+                class="clients-row-menu__item clients-row-menu__item--danger"
+                @click="runClientRowMenuAction(() => askDelete(clientsRowMenuRow!))"
+              >
+                <VaIcon :name="TableActionIcon.delete" size="18px" />
+                {{ t('clients.delete') }}
+              </button>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </Teleport>
 
     <VaModal
       :model-value="createState.open.value"
@@ -2086,8 +2234,12 @@ watch(
       @update:model-value="(v) => (v ? (editState.open.value = true) : requestCloseEdit())"
     >
       <template #header />
-      <form class="app-modal-form" @submit.prevent="updateClient" @keydown="handleEditHotkeys">
-        <AppSectionCard class="client-editor-card" :title="t('clients.sectionPersonal')">
+      <form
+        class="app-modal-form app-modal-form--client-edit-scroll"
+        @submit.prevent="updateClient"
+        @keydown="handleEditHotkeys"
+      >
+        <AppSectionCard class="client-editor-card">
           <div class="person-header">
             <div class="person-headline-wrap">
               <div class="person-headline">{{ editHeaderSnapshot.headline }}</div>
@@ -2098,6 +2250,7 @@ watch(
               <span v-if="editPauseUntilCompactLabel" class="person-status-note">{{ editPauseUntilCompactLabel }}</span>
             </div>
           </div>
+          <div class="client-editor-form-body">
           <ClientFormFields
             ref="editFormRef"
             v-model="editState.form.value"
@@ -2113,13 +2266,16 @@ watch(
             :contract-history-loading="editContractsLoading"
             :payments-history="editPaymentsHistory"
             :payments-loading="editPaymentsLoading"
+            :adding-contract-payment="addContractPaymentLoading"
             @generate-contract-number="regenerateEditContractNumber"
             @open-contract-history-item="openContractFromHistory"
             @pause-contract-history-item="pauseContractFromHistory"
             @resume-contract-history-item="resumeContractFromHistory"
             @terminate-contract-history-item="terminateContractFromHistory"
+            @add-contract-payment="onAddContractPayment"
             @photo-draft-changed="onEditPhotoDraftChanged"
           />
+          </div>
         </AppSectionCard>
         <div class="app-modal-actions">
           <VaButton
@@ -2487,6 +2643,49 @@ watch(
   color: var(--app-muted);
   background: color-mix(in srgb, var(--app-surface) 85%, var(--app-border));
 }
+/** Редактирование клиента: фиксированная высота модалки, скролл только у тела вкладок. */
+.app-modal-form--client-edit-scroll {
+  --client-edit-modal-height: min(88vh, 960px);
+  --client-edit-modal-height: min(88dvh, 960px);
+  height: var(--client-edit-modal-height);
+  max-height: var(--client-edit-modal-height);
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.app-modal-form--client-edit-scroll > :deep(.section-card) {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-modal-form--client-edit-scroll :deep(.section-card__header) {
+  flex-shrink: 0;
+}
+
+.app-modal-form--client-edit-scroll :deep(.section-card__content) {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-modal-form--client-edit-scroll :deep(.section-card__content > .person-header) {
+  flex-shrink: 0;
+}
+
+.app-modal-form--client-edit-scroll :deep(.client-editor-form-body) {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .person-header {
   display: flex;
   align-items: flex-start;
@@ -2622,14 +2821,17 @@ watch(
 }
 
 .clients-row-menu__trigger {
-  list-style: none;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 2.25rem;
   height: 2.25rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
   border-radius: 10px;
+  background: transparent;
   color: var(--va-primary);
 }
 
@@ -2637,23 +2839,23 @@ watch(
   background: color-mix(in srgb, var(--app-surface) 86%, var(--va-primary) 14%);
 }
 
-.clients-row-menu__trigger::-webkit-details-marker {
-  display: none;
+.clients-row-menu-layer {
+  box-sizing: border-box;
+  min-width: 12.5rem;
 }
 
-.clients-row-menu__list {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 0.2rem);
-  margin: 0;
-  padding: 0.3rem;
-  min-width: 12.5rem;
-  list-style: none;
+.clients-row-menu-layer .clients-row-menu__panel {
   border: 1px solid color-mix(in srgb, var(--app-border) 88%, transparent);
   border-radius: 10px;
   background: var(--app-surface);
   box-shadow: var(--app-shadow-soft);
-  z-index: 50;
+}
+
+.clients-row-menu__list {
+  margin: 0;
+  padding: 0.3rem;
+  min-width: 12.5rem;
+  list-style: none;
 }
 
 .clients-row-menu__item {

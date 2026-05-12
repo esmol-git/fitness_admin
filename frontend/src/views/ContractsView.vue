@@ -37,12 +37,14 @@ import {
 import { useFormTabNavigation } from '@/composables/useFormTabNavigation'
 import { normalizeRouteQuery, routeQueryEquals } from '@/composables/tableListUrlQueryUtils'
 import { useManagerScope } from '@/composables/useManagerScope'
+import { useUiStore } from '@/stores/ui'
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const { init: notify } = useToast()
 const route = useRoute()
 const router = useRouter()
 const { isManagerReadOnly } = useManagerScope()
+const ui = useUiStore()
 const clientId = ref('')
 const createContractModalOpen = ref(false)
 const selectedMembershipId = ref('')
@@ -62,6 +64,8 @@ const form = reactive({
   passportIssuedAt: '',
   serviceName: '',
   servicePrice: '',
+  paymentPlan: 'FULL' as 'FULL' | 'INSTALLMENT_FLEXIBLE',
+  initialPaymentAmount: '',
   contractDate: '',
   serviceStartDate: '',
   serviceEndDate: '',
@@ -146,6 +150,8 @@ const registryPageCount = computed(() =>
 )
 
 function registryContractSortKey(row: ContractRegistryRow): number {
+  const fromServiceStart = registryDbDateSortTs(row.serviceStartDate)
+  if (fromServiceStart != null) return fromServiceStart
   const fromContract = registryDbDateSortTs(row.contractDate)
   if (fromContract != null) return fromContract
   const n = new Date(row.createdAt).getTime()
@@ -163,6 +169,11 @@ const pagedContractsRegistry = computed(() => {
   return sortedContractsRegistry.value.slice(start, start + registryLimit.value)
 })
 const hasRegistryItems = computed(() => sortedContractsRegistry.value.length > 0)
+
+const paymentPlanSelectOptions = computed(() => [
+  { value: 'FULL' as const, text: t('contracts.paymentPlanFull') },
+  { value: 'INSTALLMENT_FLEXIBLE' as const, text: t('contracts.paymentPlanInstallment') },
+])
 
 watch([registryPageCount, registryLimit], () => {
   if (registryPage.value > registryPageCount.value) registryPage.value = registryPageCount.value
@@ -638,6 +649,8 @@ function syncMembershipFields(selectedId: string) {
   }
   form.serviceName = selected.text
   form.servicePrice = selected.price == null ? '' : String(selected.price)
+    form.paymentPlan = 'FULL'
+  form.initialPaymentAmount = ''
   syncServiceEndDateByMembership()
 }
 
@@ -1084,6 +1097,10 @@ function payload() {
     serviceEndDate: optional(form.serviceEndDate),
     executorName: optional(form.executorName),
     executorRepresentative: optional(form.executorRepresentative),
+    paymentPlan: form.paymentPlan,
+    installmentCount: undefined,
+    initialPaymentAmount:
+      form.paymentPlan !== 'FULL' ? optional(form.initialPaymentAmount) : undefined,
     flatten: true,
     extraFields: {},
   }
@@ -1154,11 +1171,25 @@ async function saveContract() {
     formError.value = t('contracts.servicePriceRequired')
     return
   }
+  const totalNum = Number(String(form.servicePrice).replace(',', '.'))
+  if (form.paymentPlan !== 'FULL') {
+    const iniRaw = form.initialPaymentAmount.trim()
+    if (!iniRaw) {
+      formError.value = t('contracts.installmentInitialRequired')
+      return
+    }
+    const ini = Number(iniRaw.replace(',', '.'))
+    if (!Number.isFinite(ini) || ini <= 0 || ini > totalNum) {
+      formError.value = t('contracts.installmentInitialInvalid')
+      return
+    }
+  }
   loadingGenerate.value = true
   formError.value = null
   try {
     await api.post(`/contracts/client/${clientId.value.trim()}/save`, payload())
     notify({ color: 'success', message: t('contracts.saved') })
+    ui.bumpPaymentsTableRefresh()
     clearContractAddressSuggestUi()
     createContractModalOpen.value = false
     stripContractDraftQueryParams()
@@ -1172,6 +1203,9 @@ async function saveContract() {
         CONTRACT_NUMBER_REQUIRED: t('clients.contractNumberRequired'),
         SERVICE_PRICE_REQUIRED: t('contracts.servicePriceRequired'),
         SERVICE_DATE_RANGE_INVALID: t('contracts.saveFailed'),
+        INSTALLMENT_INITIAL_REQUIRED: t('contracts.installmentInitialRequired'),
+        INSTALLMENT_INITIAL_INVALID: t('contracts.installmentInitialInvalid'),
+        INSTALLMENT_COUNT_INVALID: t('contracts.installmentCountInvalid'),
       },
     })
   } finally {
@@ -1222,15 +1256,19 @@ function formatRegistryDbDateRu(raw: string | Date | null | undefined): string |
   const mo = Number(m[2])
   const d = Number(m[3])
   if (!y || mo < 1 || mo > 12 || d < 1 || d > 31) return null
-  return new Date(y, mo - 1, d).toLocaleDateString('ru-RU')
+  const tag = locale.value === 'en' ? 'en-US' : 'ru-RU'
+  return new Date(y, mo - 1, d).toLocaleDateString(tag)
 }
 
-function formatRegistryContractSignedAt(row: ContractRegistryRow) {
-  const dateOnly = formatRegistryDbDateRu(row.contractDate)
-  if (dateOnly) return dateOnly
+/** Начало периода оказания услуги (как в карточке клиента): serviceStart → дата договора → дата записи в журнале. */
+function formatRegistryServicePeriodStart(row: ContractRegistryRow): string {
+  const fromService = formatRegistryDbDateRu(row.serviceStartDate)
+  if (fromService) return fromService
+  const fromContract = formatRegistryDbDateRu(row.contractDate)
+  if (fromContract) return fromContract
   const d = new Date(row.createdAt)
   if (Number.isNaN(d.getTime())) return '—'
-  return d.toLocaleString('ru-RU')
+  return d.toLocaleDateString(locale.value === 'en' ? 'en-US' : 'ru-RU')
 }
 
 function formatRegistryServiceEnd(row: ContractRegistryRow) {
@@ -1650,8 +1688,8 @@ void (async () => {
             { key: 'client', label: t('clients.title') },
             { key: 'status', label: t('clients.statusLabel') },
             { key: 'servicePrice', label: t('contracts.servicePrice') },
-            { key: 'contractDate', label: t('contracts.contractDate') },
-            { key: 'serviceEndDate', label: t('contracts.registryContractEndColumn') },
+            { key: 'serviceStartDate', label: t('contracts.registryPeriodStartColumn') },
+            { key: 'serviceEndDate', label: t('contracts.registryPeriodEndColumn') },
             { key: 'actions', label: t('clients.actions') },
           ]"
         >
@@ -1670,8 +1708,8 @@ void (async () => {
           <template #cell(servicePrice)="{ rowData }">
             {{ rowData.servicePrice == null ? '—' : Number(rowData.servicePrice).toFixed(2) }}
           </template>
-          <template #cell(contractDate)="{ rowData }">
-            {{ formatRegistryContractSignedAt(rowData) }}
+          <template #cell(serviceStartDate)="{ rowData }">
+            {{ formatRegistryServicePeriodStart(rowData) }}
           </template>
           <template #cell(serviceEndDate)="{ rowData }">
             {{ formatRegistryServiceEnd(rowData) }}
@@ -1992,6 +2030,19 @@ void (async () => {
               readonly
               :error="!form.servicePrice.trim() && Boolean(formError)"
             />
+            <VaSelect
+              v-model="form.paymentPlan"
+              class="contracts-form-grid__full"
+              :label="t('contracts.paymentPlan')"
+              :options="paymentPlanSelectOptions"
+              text-by="text"
+              value-by="value"
+            />
+            <VaInput
+              v-if="form.paymentPlan !== 'FULL'"
+              v-model="form.initialPaymentAmount"
+              :label="`${t('contracts.initialPaymentAmount')} *`"
+            />
             <VaDateInput
               :model-value="form.contractDate || undefined"
               :label="t('contracts.contractDate')"
@@ -2306,6 +2357,11 @@ void (async () => {
 
 .contracts-form-grid__full {
   grid-column: 1 / -1;
+}
+
+.contracts-form-grid :deep(.va-date-input input),
+.contracts-form-grid :deep(.va-input-wrapper input:not([type='hidden'])) {
+  color: var(--app-text, inherit);
 }
 
 .address-autocomplete {

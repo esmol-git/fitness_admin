@@ -6,6 +6,7 @@ import { useToast } from 'vuestic-ui'
 import { TableActionIcon } from '@/config/tableActionIcons'
 import type { ClientForm, ClientStatus } from '@/types/clients'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
+import AppEmptyState from '@/components/ui/AppEmptyState.vue'
 import { resolveApiErrorMessage } from '@/composables/useApiErrorMap'
 import { api } from '@/utils/api'
 import { copyTextToClipboard } from '@/utils/clipboard'
@@ -36,9 +37,18 @@ const props = defineProps<{
     contractNumber: string
     status?: string
     servicePrice?: string | number | null
+    serviceStartDate?: string | null
+    serviceEndDate?: string | null
+    contractDate?: string | null
     pauseUntil?: string | null
     s3Url?: string | null
     createdAt: string
+    paidTotal?: string
+    balanceDue?: string | null
+    fullyPaid?: boolean
+    paymentPlan?: string
+    installmentCount?: number | null
+    suggestedEqualPayment?: string | null
   }>
   contractHistoryLoading?: boolean
   paymentsHistory?: Array<{
@@ -48,8 +58,12 @@ const props = defineProps<{
     status: string
     comment?: string | null
     contractDocumentId?: string | null
+    operationType?: string
+    contract?: { id: string; contractNumber: string; s3Url?: string | null } | null
   }>
   paymentsLoading?: boolean
+  /** При сохранении платежа по договору с родителя — блокировка кнопки. */
+  addingContractPayment?: boolean
   /** Если задан — загрузка фото идёт в `clients/:id/…`; иначе в `clients/pending/…` (создание клиента). */
   photoUploadClientId?: string | null
 }>()
@@ -61,9 +75,10 @@ const emit = defineEmits<{
   (e: 'pause-contract-history-item', id: string): void
   (e: 'resume-contract-history-item', id: string): void
   (e: 'terminate-contract-history-item', id: string): void
+  (e: 'add-contract-payment', value: { contractDocumentId: string; amount: number; paidAt: string }): void
   (e: 'photo-draft-changed', pending: boolean): void
 }>()
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const { init: notify } = useToast()
 const rootRef = ref<HTMLElement | null>(null)
 const phoneFieldRef = ref<ComponentPublicInstance | HTMLElement | null>(null)
@@ -209,6 +224,93 @@ function contractStatusTone(status?: string): 'success' | 'warning' | 'danger' |
   return 'info'
 }
 
+function paymentHistoryStatusLabel(status?: string): string {
+  const s = (status || '').trim().toUpperCase()
+  if (s === 'REFUND') return t('contracts.paymentStatuses.REFUNDED')
+  const key = s === 'PENDING' || s === 'PAID' || s === 'REFUNDED' ? s : null
+  return key ? t(`contracts.paymentStatuses.${key}`) : (status?.trim() || '—')
+}
+
+function paymentHistoryStatusTone(status?: string): 'success' | 'warning' | 'danger' | 'info' | 'neutral' {
+  const s = (status || '').trim().toUpperCase()
+  if (s === 'PAID') return 'success'
+  if (s === 'REFUNDED' || s === 'REFUND') return 'warning'
+  if (s === 'PENDING') return 'info'
+  return 'neutral'
+}
+
+const contractsWithOutstandingBalance = computed(() => {
+  const list = props.contractHistory ?? []
+  return list.filter((c) => {
+    if (c.status !== 'ACTIVE' && c.status !== 'PAUSED') return false
+    if (c.fullyPaid === true) return false
+    const bal = Number(String(c.balanceDue ?? '0').replace(',', '.'))
+    return Number.isFinite(bal) && bal > 0.001
+  })
+})
+
+const addPaymentContractOptions = computed(() =>
+  contractsWithOutstandingBalance.value.map((c) => ({
+    value: c.id,
+    text: `${c.contractNumber || '—'} · ${Number(String(c.balanceDue).replace(',', '.')).toFixed(2)}`,
+  })),
+)
+
+const addPaymentContractId = ref('')
+const addPaymentAmount = ref('')
+const addPaymentPaidAt = ref(formatIsoDate(new Date()))
+
+watch(
+  contractsWithOutstandingBalance,
+  (list) => {
+    if (!list.length) {
+      addPaymentContractId.value = ''
+      return
+    }
+    if (!list.some((c) => c.id === addPaymentContractId.value)) {
+      addPaymentContractId.value = list[0]?.id ?? ''
+    }
+  },
+  { immediate: true },
+)
+
+function paymentPlanShortLabel(plan?: string): string {
+  if (plan === 'INSTALLMENT_FLEXIBLE' || plan === 'INSTALLMENT_EQUAL') {
+    return t('clients.paymentPlanShortINSTALLMENT')
+  }
+  if (plan === 'FULL') return t('clients.paymentPlanShortFULL')
+  return plan ?? ''
+}
+
+function contractShowsUnderpaidNote(item: {
+  status?: string
+  fullyPaid?: boolean
+  balanceDue?: string | null
+}): boolean {
+  if (item.status !== 'ACTIVE' && item.status !== 'PAUSED') return false
+  if (item.fullyPaid === true) return false
+  const bal = Number(String(item.balanceDue ?? '0').replace(',', '.'))
+  return Number.isFinite(bal) && bal > 0.001
+}
+
+function submitAddContractPayment() {
+  if (props.addingContractPayment) return
+  const cid = addPaymentContractId.value
+  if (!cid) return
+  const amount = Number(addPaymentAmount.value.replace(',', '.'))
+  if (!Number.isFinite(amount) || amount < 0.01) {
+    notify({ color: 'warning', message: t('clients.invalidPaymentAmount') })
+    return
+  }
+  const paidAt = addPaymentPaidAt.value.trim()
+  if (!paidAt) {
+    notify({ color: 'warning', message: t('clients.invalidPaymentDate') })
+    return
+  }
+  emit('add-contract-payment', { contractDocumentId: cid, amount, paidAt })
+  addPaymentAmount.value = ''
+}
+
 const MAX_PHOTO_MB = 8
 const photoUploading = ref(false)
 const photoUploadError = ref<string | null>(null)
@@ -216,6 +318,7 @@ const photoUploadError = ref<string | null>(null)
 const pendingPhotoFile = ref<File | null>(null)
 const pendingPhotoPreviewUrl = ref<string | null>(null)
 const photoCameraOpen = ref(false)
+const photoFileInputRef = ref<HTMLInputElement | null>(null)
 const cameraVideoRef = ref<HTMLVideoElement | null>(null)
 const cameraStream = ref<MediaStream | null>(null)
 /** Ссылка в БД есть, но <img> не смог загрузить (404/403/CORS к объекту и т.д.). */
@@ -432,9 +535,41 @@ function onPhotoPreviewImgError() {
 }
 
 const activeTab = ref<'general' | 'payments' | 'history'>('general')
-const currentContract = computed(() =>
-  (props.contractHistory ?? []).find((item) => item.status === 'ACTIVE' || item.status === 'PAUSED') ?? null,
-)
+
+function pickPrimaryListContract<
+  T extends { id: string; status?: string; createdAt: string },
+>(contracts: T[]): T | null {
+  const activePool = contracts.filter((c) => c.status === 'ACTIVE')
+  const pool = activePool.length > 0 ? activePool : contracts.filter((c) => c.status === 'PAUSED')
+  if (pool.length === 0) return null
+  return pool.reduce((best, c) => {
+    const ct = new Date(c.createdAt).getTime()
+    const bt = new Date(best.createdAt).getTime()
+    return ct > bt || (ct === bt && c.id > best.id) ? c : best
+  })
+}
+
+function formatContractHistoryUiDate(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const tag = locale.value === 'en' ? 'en-US' : 'ru-RU'
+  return d.toLocaleDateString(tag)
+}
+
+function contractHistoryServicePeriodLine(item: {
+  serviceStartDate?: string | null
+  serviceEndDate?: string | null
+}): string {
+  const s = formatContractHistoryUiDate(item.serviceStartDate ?? undefined)
+  const e = formatContractHistoryUiDate(item.serviceEndDate ?? undefined)
+  if (!s && !e) return ''
+  if (s && e && s === e) return s
+  if (s && e) return `${s} — ${e}`
+  return s || e
+}
+
+const currentContract = computed(() => pickPrimaryListContract(props.contractHistory ?? []))
 const hasCurrentContract = computed(() => Boolean(currentContract.value))
 const canEditContractData = computed(() => false)
 
@@ -1044,7 +1179,11 @@ watch(paymentTextValue, (value) => {
 </script>
 
 <template>
-  <div ref="rootRef" class="client-form-layout">
+  <div
+    ref="rootRef"
+    class="client-form-layout"
+    :class="{ 'client-form-layout--tabbed': !isCreateMode }"
+  >
     <div v-if="!isCreateMode" class="tabs-row" role="tablist" aria-label="Client form tabs">
       <VaButton type="button" size="small" :preset="activeTab === 'general' ? 'primary' : 'secondary'" @click="activeTab = 'general'">
         {{ $t('clients.tabGeneral') }}
@@ -1057,6 +1196,7 @@ watch(paymentTextValue, (value) => {
       </VaButton>
     </div>
 
+    <div class="client-form-tab-body">
     <div v-if="activeTab === 'general'" class="general-layout">
       <h4 class="form-col__title">{{ $t('clients.sectionPersonal') }}</h4>
       <div class="general-top">
@@ -1093,25 +1233,40 @@ watch(paymentTextValue, (value) => {
             </button>
           </div>
           <div class="photo-actions">
-            <label class="photo-upload">
-              <span>{{
-                photoUploading ? $t('clients.photoUploading') : $t('clients.photoUpload')
-              }}</span>
-              <input
-                type="file"
-                accept="image/jpeg,image/png,image/webp,image/gif"
-                :disabled="photoUploading"
-                @change="onPhotoSelected"
-              />
-            </label>
+            <input
+              ref="photoFileInputRef"
+              type="file"
+              class="photo-file-input-hidden"
+              accept="image/jpeg,image/png,image/webp,image/gif"
+              :disabled="photoUploading"
+              @change="onPhotoSelected"
+            />
             <VaButton
               type="button"
               preset="secondary"
-              class="photo-camera-btn"
+              class="photo-action-half"
               :disabled="photoUploading"
+              :aria-label="photoUploading ? $t('clients.photoUploading') : $t('clients.photoUpload')"
+              :title="photoUploading ? $t('clients.photoUploading') : $t('clients.photoUpload')"
+              @click="photoFileInputRef?.click()"
+            >
+              <VaIcon
+                :name="photoUploading ? 'sync' : 'add_photo_alternate'"
+                size="24px"
+                class="photo-action-half__icon"
+                :class="{ 'photo-action-half__icon--spin': photoUploading }"
+              />
+            </VaButton>
+            <VaButton
+              type="button"
+              preset="secondary"
+              class="photo-action-half"
+              :disabled="photoUploading"
+              :aria-label="$t('clients.photoTakePicture')"
+              :title="$t('clients.photoTakePicture')"
               @click="photoCameraOpen = true"
             >
-              {{ $t('clients.photoTakePicture') }}
+              <VaIcon name="photo_camera" size="24px" class="photo-action-half__icon" />
             </VaButton>
           </div>
           <p v-if="pendingPhotoFile && !photoUploading" class="photo-draft-hint">{{ $t('clients.photoSaveToUpload') }}</p>
@@ -1364,9 +1519,14 @@ watch(paymentTextValue, (value) => {
               {{ $t('clients.pauseUntilLabel', { date: formatRuDate(currentContract.pauseUntil) }) }}
             </span>
           </div>
-          <div v-else class="contract-empty-state">
-            <VaIcon name="description" size="18px" color="secondary" />
-            <span>{{ $t('clients.noActiveContractInCard') }}</span>
+          <div v-else class="contract-empty-state" role="status">
+            <div class="contract-empty-state__icon-wrap" aria-hidden="true">
+              <VaIcon name="description" size="22px" class="contract-empty-state__icon" />
+            </div>
+            <div class="contract-empty-state__body">
+              <div class="contract-empty-state__title">{{ $t('clients.noActiveContractInCard') }}</div>
+              <p class="contract-empty-state__desc">{{ $t('clients.noActiveContractHint') }}</p>
+            </div>
           </div>
           <div v-if="hasCurrentContract" class="control-grid control-grid--contract control-grid--contract-readonly">
             <VaInput
@@ -1542,44 +1702,123 @@ watch(paymentTextValue, (value) => {
     </div>
 
     <div v-else-if="!isCreateMode && activeTab === 'payments'" class="history-tab">
-      <VaAlert v-if="paymentsLoading" color="info" outline>
-        {{ $t('clients.paymentsLoading') }}
-      </VaAlert>
-      <VaAlert v-else-if="!props.paymentsHistory?.length" color="secondary" outline>
-        {{ $t('clients.paymentsPlaceholder') }}
-      </VaAlert>
-      <div v-else class="contract-history-list">
-        <div v-for="item in props.paymentsHistory" :key="item.id" class="contract-history-row">
-          <div>
-            <div class="contract-history-number">
-              {{ $t('clients.paymentAmount', { amount: Number(item.amount).toFixed(2) }) }}
-            </div>
-            <div class="contract-history-date">
-              {{ new Date(item.paidAt).toLocaleString('ru-RU') }} · {{ item.status }}
+      <div v-if="paymentsLoading" class="client-tab-state client-tab-state--loading" role="status" aria-live="polite">
+        <VaIcon name="sync" size="32px" class="client-tab-state__spinner" aria-hidden="true" />
+        <p class="client-tab-state__text">{{ $t('clients.paymentsLoading') }}</p>
+      </div>
+      <template v-else>
+        <div v-if="contractsWithOutstandingBalance.length" class="add-contract-payment-panel">
+          <div class="add-contract-payment-panel__title">{{ $t('clients.addContractPaymentTitle') }}</div>
+          <div class="add-contract-payment-panel__grid">
+            <VaSelect
+              v-model="addPaymentContractId"
+              :label="$t('clients.addContractPaymentContract')"
+              :options="addPaymentContractOptions"
+              text-by="text"
+              value-by="value"
+            />
+            <VaInput
+              v-model="addPaymentAmount"
+              :label="$t('clients.addContractPaymentAmount')"
+              inputmode="decimal"
+            />
+            <VaDateInput
+              :model-value="addPaymentPaidAt || undefined"
+              :label="$t('clients.addContractPaymentDate')"
+              @update:model-value="(v) => (addPaymentPaidAt = formatIsoDate(v))"
+            />
+            <VaButton :loading="addingContractPayment" @click="submitAddContractPayment">
+              {{ $t('clients.addContractPaymentSubmit') }}
+            </VaButton>
+          </div>
+        </div>
+        <div v-if="!props.paymentsHistory?.length" class="client-tab-empty-wrap">
+          <AppEmptyState
+            icon="receipt_long"
+            :title="$t('clients.paymentsEmptyTitle')"
+            :description="$t('clients.paymentsEmptyDesc')"
+          />
+        </div>
+        <div v-if="props.paymentsHistory?.length" class="contract-history-list payments-history-list">
+          <div v-for="item in props.paymentsHistory" :key="item.id" class="contract-history-row payments-history-row">
+            <div class="payments-history-row__body">
+              <div class="payments-history-row__top">
+                <span class="payments-history-row__amount">
+                  {{ $t('clients.paymentAmount', { amount: Number(item.amount).toFixed(2) }) }}
+                </span>
+                <StatusBadge
+                  class="payments-history-row__badge"
+                  :label="paymentHistoryStatusLabel(item.status)"
+                  :tone="paymentHistoryStatusTone(item.status)"
+                />
+              </div>
+              <div class="payments-history-row__contract">
+                {{
+                  item.contract?.contractNumber?.trim()
+                    ? $t('clients.paymentLinkedContract', { number: item.contract.contractNumber.trim() })
+                    : $t('clients.paymentNoContract')
+                }}
+              </div>
+              <div class="payments-history-row__date">
+                {{ $t('clients.paymentPaidAt') }}: {{ new Date(item.paidAt).toLocaleString('ru-RU') }}
+              </div>
+              <div v-if="item.comment?.trim()" class="payments-history-row__comment">{{ item.comment.trim() }}</div>
             </div>
           </div>
         </div>
-      </div>
+      </template>
     </div>
 
     <div v-else-if="!isCreateMode" class="history-tab">
-      <VaAlert v-if="contractHistoryLoading" color="info" outline>
-        {{ $t('clients.contractHistoryLoading') }}
-      </VaAlert>
-      <VaAlert v-else-if="!props.contractHistory?.length" color="secondary" outline>
-        {{ $t('clients.historyPlaceholder') }}
-      </VaAlert>
+      <div
+        v-if="contractHistoryLoading"
+        class="client-tab-state client-tab-state--loading"
+        role="status"
+        aria-live="polite"
+      >
+        <VaIcon name="sync" size="32px" class="client-tab-state__spinner" aria-hidden="true" />
+        <p class="client-tab-state__text">{{ $t('clients.contractHistoryLoading') }}</p>
+      </div>
+      <div v-else-if="!props.contractHistory?.length" class="client-tab-empty-wrap">
+        <AppEmptyState
+          icon="folder_open"
+          :title="$t('clients.contractHistoryEmptyTitle')"
+          :description="$t('clients.contractHistoryEmptyDesc')"
+        />
+      </div>
       <div v-else class="contract-history-list">
         <div v-for="item in props.contractHistory" :key="item.id" class="contract-history-row">
-          <div>
-            <div class="contract-history-number">{{ item.contractNumber || '—' }}</div>
-            <div class="contract-history-date">
-              {{ new Date(item.createdAt).toLocaleString('ru-RU') }}
+          <div class="contract-history-row__main">
+            <div class="contract-history-header-line">
+              <div class="contract-history-number">{{ item.contractNumber || '—' }}</div>
               <StatusBadge
                 class="contract-history-status"
                 :label="$t(`contracts.contractStatuses.${item.status || 'ACTIVE'}`)"
                 :tone="contractStatusTone(item.status)"
               />
+            </div>
+            <div class="contract-history-date">
+              <div v-if="contractHistoryServicePeriodLine(item)" class="contract-history-period">
+                {{ contractHistoryServicePeriodLine(item) }}
+              </div>
+              <div class="contract-history-registered">
+                {{ $t('clients.contractHistoryRegistered') }}:
+                {{ new Date(item.createdAt).toLocaleString(locale === 'en' ? 'en-US' : 'ru-RU') }}
+              </div>
+            </div>
+            <div v-if="item.paymentPlan && item.paymentPlan !== 'FULL'" class="contract-history-meta">
+              {{ $t('clients.contractPaymentPlanLabel', { plan: paymentPlanShortLabel(item.paymentPlan) }) }}
+            </div>
+            <div
+              v-if="contractShowsUnderpaidNote(item)"
+              class="contract-history-underpaid"
+              role="status"
+            >
+              {{
+                $t('clients.contractNotFullyPaid', {
+                  balance: Number(String(item.balanceDue).replace(',', '.')).toFixed(2),
+                })
+              }}
             </div>
           </div>
           <div class="contract-history-actions">
@@ -1611,18 +1850,19 @@ watch(paymentTextValue, (value) => {
                 @click="emit('terminate-contract-history-item', item.id)"
               />
             </VaPopover>
+            <VaPopover :message="$t('clients.openContract')">
+              <VaButton
+                type="button"
+                size="large"
+                preset="plain"
+                :icon="TableActionIcon.viewDocument"
+                @click="emit('open-contract-history-item', item.id)"
+              />
+            </VaPopover>
           </div>
-          <VaPopover :message="$t('clients.openContract')">
-            <VaButton
-              type="button"
-              size="large"
-              preset="plain"
-              :icon="TableActionIcon.viewDocument"
-              @click="emit('open-contract-history-item', item.id)"
-            />
-          </VaPopover>
         </div>
       </div>
+    </div>
     </div>
 
     <div v-if="photoErrorBanner" class="client-form-footer-errors" role="alert">
@@ -1674,6 +1914,46 @@ watch(paymentTextValue, (value) => {
 .client-form-layout {
   display: grid;
   gap: 0.9rem;
+}
+
+.client-form-layout--tabbed {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.client-form-layout--tabbed .client-form-tab-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 0.35rem 0.45rem 0;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--app-muted) 28%, transparent) transparent;
+}
+
+.client-form-layout--tabbed .client-form-tab-body::-webkit-scrollbar {
+  width: 9px;
+}
+
+.client-form-layout--tabbed .client-form-tab-body::-webkit-scrollbar-track {
+  margin: 0.35rem 0;
+  background: transparent;
+}
+
+.client-form-layout--tabbed .client-form-tab-body::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  background-color: color-mix(in srgb, var(--app-muted) 26%, transparent);
+}
+
+.client-form-layout--tabbed .client-form-tab-body::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in srgb, var(--app-muted) 40%, transparent);
 }
 
 .card-field-append {
@@ -1932,14 +2212,95 @@ watch(paymentTextValue, (value) => {
 
 .contract-empty-state {
   margin-bottom: 0.5rem;
-  border: 1px dashed color-mix(in srgb, var(--app-border) 84%, transparent);
-  border-radius: 8px;
-  padding: 0.6rem 0.7rem;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.85rem 0.95rem;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
+  background: color-mix(in srgb, var(--app-surface) 96%, var(--app-accent) 6%);
+}
+
+.contract-empty-state__icon-wrap {
+  flex-shrink: 0;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--app-accent) 14%, white);
+}
+
+.contract-empty-state__icon {
+  color: var(--app-accent-strong);
+  opacity: 0.95;
+}
+
+.contract-empty-state__body {
+  min-width: 0;
+  flex: 1;
+}
+
+.contract-empty-state__title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--app-text);
+  line-height: 1.3;
+}
+
+.contract-empty-state__desc {
+  margin: 0.35rem 0 0;
+  font-size: 0.86rem;
+  line-height: 1.45;
+  color: color-mix(in srgb, var(--app-muted) 55%, var(--app-text));
+}
+
+.client-tab-state--loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.85rem;
+  min-height: 11rem;
+  padding: 1.6rem 1rem;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--app-border) 78%, transparent);
+  background: color-mix(in srgb, var(--app-surface) 96%, var(--app-accent) 5%);
+}
+
+.client-tab-state__spinner {
+  animation: client-tab-spin 0.85s linear infinite;
+  color: var(--app-accent-strong);
+  opacity: 0.92;
+}
+
+.client-tab-state__text {
+  margin: 0;
+  font-size: 0.98rem;
+  font-weight: 600;
+  color: var(--app-text);
+  text-align: center;
+}
+
+@keyframes client-tab-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.client-tab-empty-wrap {
+  margin-top: 0.4rem;
   display: flex;
   align-items: center;
-  gap: 0.45rem;
-  color: color-mix(in srgb, var(--app-muted) 78%, var(--app-text));
-  font-size: 0.86rem;
+  justify-content: center;
+  min-height: min(36dvh, 18rem);
+  padding: 0.75rem 0 1.25rem;
+  box-sizing: border-box;
+}
+
+.client-tab-empty-wrap :deep(.empty-state) {
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .control-grid--contract {
@@ -2078,32 +2439,48 @@ watch(paymentTextValue, (value) => {
   cursor: not-allowed;
 }
 
-.photo-upload {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 2.25rem;
-  border: 1px solid color-mix(in srgb, var(--app-border) 88%, transparent);
-  border-radius: 8px;
-  padding: 0 0.8rem;
-  cursor: pointer;
-  font-weight: 600;
+.photo-file-input-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
-.photo-upload input { display: none; }
 
 .photo-actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.45rem;
+  flex-direction: row;
+  flex-wrap: nowrap;
   align-items: stretch;
+  gap: 0.45rem;
+  width: 100%;
+  position: relative;
 }
 
-.photo-actions .photo-upload {
-  flex: 1 1 8rem;
+.photo-actions :deep(.photo-action-half.va-button) {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 2.7rem;
+  height: auto;
+  border-radius: 10px;
 }
 
-.photo-camera-btn {
-  flex: 1 1 8rem;
+.photo-actions :deep(.photo-action-half .va-button__content) {
+  justify-content: center;
+  align-items: center;
+  padding: 0.4rem 0.35rem;
+}
+
+.photo-action-half__icon {
+  color: color-mix(in srgb, var(--app-text) 78%, var(--app-muted));
+}
+
+.photo-action-half__icon--spin {
+  animation: client-tab-spin 0.85s linear infinite;
 }
 
 .photo-camera-modal {
@@ -2187,35 +2564,148 @@ watch(paymentTextValue, (value) => {
 
 .contract-history-row {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.6rem;
   border: 1px solid color-mix(in srgb, var(--app-border) 84%, transparent);
   border-radius: 10px;
   padding: 0.55rem 0.65rem;
 }
 
+.contract-history-row__main {
+  flex: 1;
+  min-width: 0;
+}
+
+.contract-history-header-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.65rem;
+}
+
 .contract-history-number {
   font-weight: 600;
+  min-width: 0;
+  line-height: 1.25;
 }
 
 .contract-history-date {
-  margin-top: 0.1rem;
-  font-size: 0.8rem;
-  color: var(--app-muted);
   display: flex;
-  align-items: center;
-  gap: 0.45rem;
+  flex-direction: column;
+  gap: 0.25rem;
+  align-items: flex-start;
+}
+
+.contract-history-period {
+  font-weight: 600;
+}
+
+.contract-history-registered {
+  font-size: 0.85rem;
+  opacity: 0.85;
 }
 
 .contract-history-status {
+  margin-top: 0;
+  font-size: 0.8rem;
+  color: var(--app-muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-shrink: 0;
+}
+
+.contract-history-meta {
+  margin-top: 0.25rem;
+  font-size: 0.8rem;
+  color: var(--app-muted);
+}
+
+.contract-history-underpaid {
+  margin-top: 0.45rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--va-warning) 50%, var(--app-border, #e5e7eb));
+  background: color-mix(in srgb, var(--va-warning) 12%, var(--app-surface, #fff));
+  color: var(--app-text, #111827);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.add-contract-payment-panel {
+  margin-bottom: 1rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--app-border) 84%, transparent);
+  background: color-mix(in srgb, var(--app-surface) 96%, white 4%);
+}
+
+.add-contract-payment-panel__title {
+  font-weight: 600;
+  margin-bottom: 0.55rem;
+}
+
+.add-contract-payment-panel__grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  align-items: flex-end;
+}
+
+.payments-history-list .payments-history-row {
+  align-items: stretch;
+}
+
+.payments-history-row__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.payments-history-row__top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.payments-history-row__amount {
+  font-weight: 700;
+  font-size: 0.95rem;
+}
+
+.payments-history-row__contract {
+  font-size: 0.85rem;
+  color: var(--app-text, inherit);
+  line-height: 1.35;
+}
+
+.payments-history-row__date {
+  font-size: 0.8rem;
+  color: var(--app-muted);
+}
+
+.payments-history-row__comment {
+  font-size: 0.8rem;
+  color: var(--app-muted);
+  line-height: 1.35;
+}
+
+.payments-history-row__badge {
   flex-shrink: 0;
 }
 
 .contract-history-actions {
   display: flex;
   gap: 0.35rem;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  flex-shrink: 0;
+  margin-left: auto;
+  align-self: flex-start;
+  justify-content: flex-end;
 }
 
 .contract-history-actions :deep(.va-button),

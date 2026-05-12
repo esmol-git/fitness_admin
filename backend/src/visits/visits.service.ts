@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { ClientStatus, Prisma, VisitCloseReason, VisitSessionStatus } from '@prisma/client';
 import { RequestContextService } from '../common/request-context.service';
+import { ContractsService } from '../contracts/contracts.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { type ListVisitsSortBy, ListVisitsQueryDto } from './dto/list-visits-query.dto';
@@ -14,6 +15,7 @@ export class VisitsService {
     private readonly requestContext: RequestContextService,
     private readonly config: ConfigService,
     private readonly storage: StorageService,
+    private readonly contracts: ContractsService,
   ) {}
   private readonly logger = new Logger(VisitsService.name);
 
@@ -117,6 +119,7 @@ export class VisitsService {
     await this.markOverdueSessions();
     const client = await this.findClientByCode(code);
     const clientReadable = await this.withReadablePhotoUrl(client);
+    const contractUnpaid = await this.contracts.getPrimaryContractUnpaidSummaryForVisitLookup(client.id);
     const openSession = await this.prisma.visitSession.findFirst({
       where: { clientId: client.id, exitedAt: null },
       orderBy: { enteredAt: 'desc' },
@@ -126,6 +129,7 @@ export class VisitsService {
       client: {
         ...clientReadable,
         fullName: [client.lastName, client.firstName, client.middleName].filter(Boolean).join(' '),
+        contractUnpaid,
       },
       inGym: openSession?.status === VisitSessionStatus.IN_GYM,
       openSession,

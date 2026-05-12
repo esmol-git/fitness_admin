@@ -1,6 +1,7 @@
 <script setup lang="ts">
 defineProps<{
-  title: string
+  /** Если не задан или пустой — блок заголовка не рендерится */
+  title?: string
   subtitle?: string
   /** Для aria-связки с модалкой без заголовка VaModal */
   titleId?: string
@@ -9,7 +10,7 @@ defineProps<{
 
 <template>
   <section class="section-card">
-    <header class="section-card__header">
+    <header v-if="title?.trim()" class="section-card__header">
       <h3 :id="titleId" class="section-card__title">{{ title }}</h3>
       <p v-if="subtitle" class="section-card__subtitle">{{ subtitle }}</p>
     </header>

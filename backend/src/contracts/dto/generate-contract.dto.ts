@@ -2,10 +2,14 @@ import {
   IsBoolean,
   IsDateString,
   IsEmail,
+  IsIn,
+  IsInt,
   IsObject,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
+  Min,
 } from 'class-validator';
 
 export class GenerateContractDto {
@@ -109,4 +113,22 @@ export class GenerateContractDto {
   @IsOptional()
   @IsBoolean()
   flatten?: boolean;
+
+  /** FULL — одна оплата на полную сумму; рассрочка — первая оплата задаётся отдельно. */
+  @IsOptional()
+  @IsIn(['FULL', 'INSTALLMENT_FLEXIBLE', 'INSTALLMENT_EQUAL'])
+  paymentPlan?: 'FULL' | 'INSTALLMENT_FLEXIBLE' | 'INSTALLMENT_EQUAL';
+
+  /** Число равных частей (только для INSTALLMENT_EQUAL), минимум 2. */
+  @IsOptional()
+  @IsInt()
+  @Min(2)
+  @Max(120)
+  installmentCount?: number;
+
+  /** Сумма первого взноса при рассрочке (строка как у servicePrice). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  initialPaymentAmount?: string;
 }

@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { PaymentStatus, Prisma } from '@prisma/client';
+import { PaymentOperationType, PaymentStatus, Prisma } from '@prisma/client';
 import { RequestContextService } from '../common/request-context.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreatePaymentDto } from './dto/create-payment.dto';
@@ -22,7 +22,48 @@ export class PaymentsService {
       code: 'PAYMENT_DELETE_DISABLED',
       message: 'Payment deletion is disabled. Use refund operations instead.',
     },
+    paymentExceedsContractBalance: {
+      code: 'PAYMENT_EXCEEDS_CONTRACT_BALANCE',
+      message: 'Payment amount exceeds remaining balance for this contract',
+    },
   } as const;
+
+  private async assertPaidSaleFitsContractBalance(
+    clientId: string,
+    contractDocumentId: string,
+    additionalAmount: Prisma.Decimal,
+  ) {
+    const contract = await this.prisma.contractDocument.findFirst({
+      where: { id: contractDocumentId, clientId },
+      select: { servicePrice: true },
+    });
+    if (!contract?.servicePrice) return;
+    const [paidAgg, refundedAgg] = await Promise.all([
+      this.prisma.payment.aggregate({
+        where: {
+          contractDocumentId,
+          operationType: PaymentOperationType.SALE,
+          status: PaymentStatus.PAID,
+        },
+        _sum: { amount: true },
+      }),
+      this.prisma.payment.aggregate({
+        where: {
+          contractDocumentId,
+          operationType: PaymentOperationType.REFUND,
+          status: PaymentStatus.REFUNDED,
+        },
+        _sum: { amount: true },
+      }),
+    ]);
+    const totalPaid = paidAgg._sum.amount ?? new Prisma.Decimal(0);
+    const totalRefunded = refundedAgg._sum.amount ?? new Prisma.Decimal(0);
+    const net = totalPaid.minus(totalRefunded);
+    const remaining = new Prisma.Decimal(contract.servicePrice).minus(net);
+    if (additionalAmount.gt(remaining.plus(new Prisma.Decimal('0.01')))) {
+      throw new BadRequestException(this.errors.paymentExceedsContractBalance);
+    }
+  }
 
   async create(dto: CreatePaymentDto, actorId: string) {
     const client = await this.prisma.client.findUnique({
@@ -37,6 +78,15 @@ export class PaymentsService {
         select: { id: true },
       });
       if (!contract) throw new NotFoundException(this.errors.contractNotFoundForClient);
+    }
+
+    const status = dto.status ?? PaymentStatus.PENDING;
+    if (dto.contractDocumentId && status === PaymentStatus.PAID) {
+      await this.assertPaidSaleFitsContractBalance(
+        dto.clientId,
+        dto.contractDocumentId,
+        new Prisma.Decimal(Number(dto.amount).toFixed(2)),
+      );
     }
 
     const created = await this.prisma.payment.create({
@@ -96,8 +146,11 @@ export class PaymentsService {
         : rawStatus && (Object.values(PaymentStatus) as string[]).includes(rawStatus)
           ? (rawStatus as PaymentStatus)
           : undefined;
-    const fromDate = filters?.from ? new Date(filters.from) : null;
-    const toDate = filters?.to ? new Date(filters.to) : null;
+    const fromIso = filters?.from?.trim().slice(0, 10);
+    const toIso = filters?.to?.trim().slice(0, 10);
+    const fromDate = fromIso && /^\d{4}-\d{2}-\d{2}$/.test(fromIso) ? new Date(`${fromIso}T00:00:00.000Z`) : null;
+    /** Верхняя граница включительно по календарному дню UTC (иначе `new Date('YYYY-MM-DD')` = 00:00 и отсекает платежи за этот день). */
+    const toDate = toIso && /^\d{4}-\d{2}-\d{2}$/.test(toIso) ? new Date(`${toIso}T23:59:59.999Z`) : null;
     if ((filters?.from && (fromDate == null || Number.isNaN(fromDate.getTime()))) || (filters?.to && (toDate == null || Number.isNaN(toDate.getTime())))) {
       throw new BadRequestException(this.errors.invalidDateFilter);
     }
@@ -151,7 +204,7 @@ export class PaymentsService {
         refundMethod: true,
         comment: true,
         contract: { select: { id: true, contractNumber: true, s3Url: true } },
-        client: { select: { id: true, firstName: true, lastName: true, middleName: true } },
+        client: { select: { id: true, firstName: true, lastName: true, middleName: true, phone: true } },
         processedBy: { select: { id: true, firstName: true, lastName: true } },
       },
     });

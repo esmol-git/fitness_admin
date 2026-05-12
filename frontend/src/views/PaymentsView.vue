@@ -13,6 +13,7 @@ import StatusBadge from '@/components/ui/StatusBadge.vue'
 import { TableActionIcon } from '@/config/tableActionIcons'
 import { normalizeRouteQuery, routeQueryEquals } from '@/composables/tableListUrlQueryUtils'
 import { resolveApiErrorMessage } from '@/composables/useApiErrorMap'
+import { useUiStore } from '@/stores/ui'
 import { api } from '@/utils/api'
 import { copyTextToClipboard } from '@/utils/clipboard'
 import type { LocationQuery } from 'vue-router'
@@ -21,6 +22,7 @@ const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 const { init: notify } = useToast()
+const ui = useUiStore()
 
 const PAY_QUERY_KEYS = ['paySearch', 'payStatus', 'payFrom', 'payTo', 'payPage', 'payLimit'] as const
 
@@ -76,6 +78,8 @@ const hasItems = computed(() => payments.value.length > 0)
 let applyingFromRoute = false
 let searchUrlTimer: ReturnType<typeof setTimeout> | null = null
 let lastFilterSignature: string | undefined = undefined
+/** Имя маршрута до последнего захода на «Платежи» — чтобы при возврате с карточки клиента список перезагрузился при том же query. */
+let routeNameBeforePayments: typeof route.name | undefined
 
 const paymentStatusFilterOptions = computed(() => [
   { value: PAYMENTS_STATUS_ALL, text: t('common.all') },
@@ -234,12 +238,25 @@ const sortedPayments = computed(() => {
   const factor = sortOrder.value === 'asc' ? 1 : -1
   return list.sort((a, b) => {
     const key = sortBy.value
-    if (key === 'amount') return (Number(a.amount) - Number(b.amount)) * factor
-    if (key === 'paidAt')
-      return (new Date(a.paidAt).getTime() - new Date(b.paidAt).getTime()) * factor
+    if (key === 'amount') {
+      const d = Number(a.amount) - Number(b.amount)
+      if (d !== 0) return d * factor
+      return String(a.id).localeCompare(String(b.id)) * factor
+    }
+    if (key === 'paidAt') {
+      const ta = new Date(a.paidAt).getTime()
+      const tb = new Date(b.paidAt).getTime()
+      const na = Number.isFinite(ta) ? ta : 0
+      const nb = Number.isFinite(tb) ? tb : 0
+      const d = na - nb
+      if (d !== 0) return d * factor
+      return String(a.id).localeCompare(String(b.id)) * factor
+    }
     const av = String(a[key] ?? '')
     const bv = String(b[key] ?? '')
-    return av.localeCompare(bv, 'ru') * factor
+    const c = av.localeCompare(bv, 'ru')
+    if (c !== 0) return c * factor
+    return String(a.id).localeCompare(String(b.id)) * factor
   })
 })
 
@@ -253,8 +270,12 @@ watch([pages, limit], () => {
 })
 
 watch(
-  () => route.query,
+  () => ({ name: route.name, query: route.query }),
   () => {
+    if (route.name !== 'payments') {
+      routeNameBeforePayments = route.name
+      return
+    }
     if (searchUrlTimer) {
       clearTimeout(searchUrlTimer)
       searchUrlTimer = null
@@ -262,11 +283,15 @@ watch(
     applyingFromRoute = true
     applyPaymentsFromRoute()
     const sig = filterSignatureFromQuery(route.query)
-    const shouldLoad = lastFilterSignature === undefined || sig !== lastFilterSignature
+    const reenteredFromOtherPage =
+      routeNameBeforePayments !== undefined && routeNameBeforePayments !== 'payments'
+    const shouldLoad =
+      reenteredFromOtherPage || lastFilterSignature === undefined || sig !== lastFilterSignature
     if (shouldLoad) {
       lastFilterSignature = sig
       void loadPayments()
     }
+    routeNameBeforePayments = 'payments'
     void nextTick(() => {
       applyingFromRoute = false
     })
@@ -295,6 +320,15 @@ watch([page, limit], () => {
   if (applyingFromRoute) return
   pushPaymentsQueryToUrl()
 })
+
+watch(
+  () => ui.paymentsTableRefreshTick,
+  (tick) => {
+    if (tick === 0) return
+    if (route.name !== 'payments') return
+    void loadPayments()
+  },
+)
 
 async function loadPayments() {
   loading.value = true
@@ -371,6 +405,8 @@ function resetFilters() {
   filters.to = ''
   page.value = 1
   limit.value = DEFAULT_TABLE_PAGE_LIMIT
+  sortBy.value = 'paidAt'
+  sortOrder.value = 'desc'
   const base = normalizeRouteQuery(route.query)
   for (const k of PAY_QUERY_KEYS) {
     delete base[k]
@@ -394,7 +430,7 @@ function onSortByUpdate(next?: string) {
     return
   }
   sortBy.value = next as typeof sortBy.value
-  sortOrder.value = 'asc'
+  sortOrder.value = next === 'paidAt' ? 'desc' : 'asc'
 }
 
 function onSortOrderUpdate(next?: string) {

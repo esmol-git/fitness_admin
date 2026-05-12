@@ -79,3 +79,18 @@ export function hasDateFormatError(text: string): boolean {
   if (text.length < 10) return false
   return !ruDateTextToIso(text)
 }
+
+/**
+ * Календарная дата `YYYY-MM-DD` + **текущие** часы/минуты/секунды (момент отправки формы) в локальном
+ * часовом поясе браузера → ISO UTC. Так в реестре видно реальное время оплаты, а не 00:00 или 03:00.
+ */
+export function isoCalendarDateAtNowLocalTimeToUtcIso(isoYmd: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoYmd.trim())
+  const now = new Date()
+  if (!m) return now.toISOString()
+  const y = Number(m[1])
+  const mo = Number(m[2])
+  const d = Number(m[3])
+  if (!y || mo < 1 || mo > 12 || d < 1 || d > 31) return now.toISOString()
+  return new Date(y, mo - 1, d, now.getHours(), now.getMinutes(), now.getSeconds(), now.getMilliseconds()).toISOString()
+}

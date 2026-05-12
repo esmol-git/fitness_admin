@@ -49,6 +49,7 @@ const scannerClientCard = ref<{
   cardNumber: string | null
   status: string
   photoUrl?: string | null
+  contractUnpaid?: { contractNumber: string; balanceDue: string } | null
 } | null>(null)
 const scannerPhotoLoadFailed = ref(false)
 const scannerClientPhotoSrc = computed(() => clientPhotoDisplayUrl(scannerClientCard.value?.photoUrl))
@@ -189,6 +190,7 @@ async function onScannerSubmit() {
         cardNumber: string | null
         status: string
         photoUrl?: string | null
+        contractUnpaid?: { contractNumber: string; balanceDue: string } | null
       }
       inGym: boolean
       openSession?: { lockerNumber: string; status: 'IN_GYM' | 'OVERDUE' | 'LEFT' | 'FORCE_CLOSED' } | null
@@ -450,13 +452,17 @@ const clockTime = computed(() =>
           <div class="scanner-modal__column">
           <div
             class="scanner-modal__code-wrap"
-            :class="{ 'scanner-modal__code-wrap--not-found': scannerHintTone === 'notFound' }"
+            :class="{
+              'scanner-modal__code-wrap--not-found': scannerHintTone === 'notFound',
+              'scanner-modal__code-wrap--locked': Boolean(scannerClientCard),
+            }"
           >
             <VaInput
               v-model="scannerInputValue"
               :label="t('header.scannerInputLabel')"
               autocomplete="off"
               autofocus
+              :readonly="Boolean(scannerClientCard)"
               :disabled="scannerLoading"
               @keydown.enter.prevent="onScannerSubmit"
               @update:model-value="onScannerCodeInput"
@@ -485,6 +491,21 @@ const clockTime = computed(() =>
                   : t('header.scannerInactiveClientBanner')
               }}
             </div>
+            <VaAlert
+              v-if="scannerClientCard.contractUnpaid"
+              color="warning"
+              border="left"
+              outline
+              class="scanner-client-card__unpaid-alert"
+              role="alert"
+            >
+              <span class="scanner-client-card__unpaid-alert-text">{{
+                t('header.scannerContractUnpaidBanner', {
+                  number: scannerClientCard.contractUnpaid.contractNumber,
+                  balance: scannerClientCard.contractUnpaid.balanceDue,
+                })
+              }}</span>
+            </VaAlert>
             <div class="scanner-client-card__stack">
               <div class="scanner-client-card__avatar" aria-hidden="true">
                 <img
@@ -883,6 +904,15 @@ const clockTime = computed(() =>
   opacity: 0;
 }
 
+.scanner-modal__code-wrap--locked :deep(.va-input-wrapper__field) {
+  cursor: default;
+  user-select: all;
+  background: color-mix(in srgb, var(--app-muted) 10%, var(--app-surface, #fff));
+  color: var(--app-text);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
 .scanner-modal__bottom {
   display: flex;
   flex-direction: column;
@@ -1019,6 +1049,24 @@ const clockTime = computed(() =>
   align-items: center;
   gap: 0.5rem;
   min-width: 0;
+}
+
+.scanner-client-card__unpaid-alert {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 0.35rem;
+}
+
+.scanner-client-card__unpaid-alert-text {
+  display: block;
+  font-size: 0.92rem;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.scanner-client-card__unpaid-alert :deep(.va-alert__content) {
+  padding-top: 0.55rem;
+  padding-bottom: 0.55rem;
 }
 
 /* Квадрат 300×300 без лишней серой рамки снаружи. */

@@ -20,6 +20,8 @@
 .app-list-filters-toolbar__filters {
   flex: 1 1 auto;
   min-width: 0;
+  width: 100%;
+  max-width: 100%;
 }
 
 .app-list-filters-toolbar__actions {
@@ -28,5 +30,12 @@
   align-items: center;
   gap: 0.5rem;
   flex-shrink: 0;
+}
+
+@media (max-width: 760px) {
+  .app-list-filters-toolbar {
+    align-items: stretch;
+    gap: 0.65rem;
+  }
 }
 </style>

@@ -1,41 +1,33 @@
 <script setup lang="ts">
-import { storeToRefs } from 'pinia'
-import { computed, onMounted, ref } from 'vue'
+import type { ApexOptions } from 'apexcharts'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import VueApexCharts from 'vue3-apexcharts'
+import { RouterLink } from 'vue-router'
 import { api } from '@/utils/api'
-import { useAuthStore } from '@/stores/auth'
 import AppPageCard from '@/components/ui/AppPageCard.vue'
 import AppSectionCard from '@/components/ui/AppSectionCard.vue'
 import AppEmptyState from '@/components/ui/AppEmptyState.vue'
 
 type SummaryResponse = {
   kpis: {
-    employees: { value: number; trendPct: number; metaValue: number }
     clients: { value: number }
-    membershipsActive: { value: number; sharePct: number }
+    activeClients: { value: number; sharePct: number }
     revenueMonth: { value: number; trendPct: number }
+    activity30d: {
+      visitSessions: number
+      newClients: number
+      contractsCreated: number
+    }
   }
-  roleDistribution: { role: string; value: number }[]
-  recentEmployees: {
-    id: string
-    login: string
-    fullName: string
-    role: string
-    createdAt: string
-  }[]
-  employeesByDay: { day: string; value: number }[]
 }
 
 type ChartsResponse = {
   revenueByDay: { day: string; value: number }[]
-  attendanceByDay: { day: string; value: number }[]
+  visitsByDay: { day: string; value: number }[]
+  newClientsByDay: { day: string; value: number }[]
+  contractsByDay: { day: string; value: number }[]
   membershipsByStatus: { status: string; value: number }[]
-  trainerLoad: {
-    trainerId: string
-    label: string
-    classesCount: number
-    clientsCount: number
-  }[]
 }
 
 type AlertsResponse = {
@@ -50,20 +42,9 @@ type AlertsResponse = {
     amount: number
     paidAt: string
   }[]
-  upcomingClasses: {
-    id: string
-    name: string
-    startTime: string
-    trainer: string
-    capacity: number
-    booked: number
-    occupancyPct: number
-  }[]
 }
 
 const { t, locale } = useI18n()
-const auth = useAuthStore()
-const { user } = storeToRefs(auth)
 
 const loading = ref(true)
 const loadError = ref<string | null>(null)
@@ -76,26 +57,41 @@ const sectionErrors = ref<{ summary: string | null; charts: string | null; alert
   alerts: null,
 })
 
+/** Цвета из темы для Apex (CSS vars не всегда парсятся в canvas). */
+const chartAccent = ref('#2563eb')
+const chartAccent2 = ref('#0ea5e9')
+const chartAccent3 = ref('#7c3aed')
+const chartText = ref('#64748b')
+const chartGrid = ref('rgba(100,116,139,0.2)')
+const chartTooltipTheme = ref<'light' | 'dark'>('light')
+
+/** Узкая ширина: компактные KPI и оси графиков без налезания подписей. */
+const MOBILE_DASHBOARD_MQ = '(max-width: 640px)'
+const isMobileDashboard = ref(false)
+let mobileDashMq: MediaQueryList | null = null
+let mobileDashListener: ((e: MediaQueryListEvent) => void) | null = null
+
+const chartAreaHeight = computed(() => (isMobileDashboard.value ? 210 : 280))
+const chartBarHeight = computed(() => (isMobileDashboard.value ? 240 : 300))
+
 const summaryData = computed<SummaryResponse>(() =>
   summary.value ?? {
     kpis: {
-      employees: { value: 0, trendPct: 0, metaValue: 0 },
       clients: { value: 0 },
-      membershipsActive: { value: 0, sharePct: 0 },
+      activeClients: { value: 0, sharePct: 0 },
       revenueMonth: { value: 0, trendPct: 0 },
+      activity30d: { visitSessions: 0, newClients: 0, contractsCreated: 0 },
     },
-    roleDistribution: [],
-    recentEmployees: [],
-    employeesByDay: [],
   },
 )
 
 const chartsData = computed<ChartsResponse>(() =>
   charts.value ?? {
     revenueByDay: [],
-    attendanceByDay: [],
+    visitsByDay: [],
+    newClientsByDay: [],
+    contractsByDay: [],
     membershipsByStatus: [],
-    trainerLoad: [],
   },
 )
 
@@ -103,7 +99,6 @@ const alertsData = computed<AlertsResponse>(() =>
   alerts.value ?? {
     expiringMemberships: [],
     failedPayments: [],
-    upcomingClasses: [],
   },
 )
 
@@ -154,39 +149,219 @@ function formatDay(value: string) {
   if (Number.isNaN(d.getTime())) return value
   return new Intl.DateTimeFormat(locale.value === 'ru' ? 'ru-RU' : 'en-US', {
     month: 'short',
-    day: '2-digit',
+    day: 'numeric',
   }).format(d)
 }
 
-function sparklinePoints(items: { value: number }[]) {
-  if (items.length === 0) return ''
-  const width = 320
-  const height = 80
-  const max = Math.max(...items.map((i) => i.value), 1)
-  const stepX = items.length > 1 ? width / (items.length - 1) : width
-  return items
-    .map((item, idx) => {
-      const x = Math.round(idx * stepX)
-      const y = Math.round(height - (item.value / max) * height)
-      return `${x},${y}`
-    })
-    .join(' ')
+/** Короткая метка даты на оси X для мобильных (меньше текста в одной метке). */
+function formatDayCompact(value: string) {
+  const d = new Date(value)
+  if (Number.isNaN(d.getTime())) return value
+  return new Intl.DateTimeFormat(locale.value === 'ru' ? 'ru-RU' : 'en-US', {
+    day: 'numeric',
+    month: 'numeric',
+  }).format(d)
 }
 
-const revenuePoints = computed(() => sparklinePoints(chartsData.value.revenueByDay))
-const attendancePoints = computed(() => sparklinePoints(chartsData.value.attendanceByDay))
-const employeePoints = computed(() => sparklinePoints(summaryData.value.employeesByDay))
+/** Разреживаем подписи категорий: первая и последняя дата всегда, между ними — с шагом. */
+function buildSparseCategoryLabels(categories: string[], compactLabel: boolean): string[] {
+  if (!compactLabel || categories.length <= 8) return categories
+  const len = categories.length
+  const maxTicks = 6
+  const step = Math.max(1, Math.ceil(len / maxTicks))
+  return categories.map((raw, i) => {
+    if (i === 0 || i === len - 1) return raw
+    return i % step === 0 ? raw : ''
+  })
+}
 
-const maxTrainerLoad = computed(() =>
-  Math.max(
-    1,
-    ...chartsData.value.trainerLoad.map((item) => item.classesCount + item.clientsCount),
-  ),
+const chartCategories = computed(() =>
+  chartsData.value.revenueByDay.length > 0
+    ? chartsData.value.revenueByDay.map((x) => formatDay(x.day))
+    : chartsData.value.visitsByDay.map((x) => formatDay(x.day)),
 )
 
-const roleTotal = computed(() =>
-  summaryData.value.roleDistribution.reduce((acc, item) => acc + item.value, 0),
-)
+const chartCategoriesAxis = computed(() => {
+  const src =
+    chartsData.value.revenueByDay.length > 0
+      ? chartsData.value.revenueByDay.map((x) => x.day)
+      : chartsData.value.visitsByDay.map((x) => x.day)
+  const labels = src.map((day) =>
+    isMobileDashboard.value ? formatDayCompact(day) : formatDay(day),
+  )
+  return buildSparseCategoryLabels(labels, isMobileDashboard.value)
+})
+
+const revenueSeries = computed(() => [
+  {
+    name: t('home.charts.revenueSeries'),
+    data: chartsData.value.revenueByDay.map((d) => d.value),
+  },
+])
+
+const visitsSeries = computed(() => [
+  {
+    name: t('home.charts.visitsSeries'),
+    data: chartsData.value.visitsByDay.map((d) => d.value),
+  },
+])
+
+const activitySeries = computed(() => [
+  {
+    name: t('home.charts.newClientsSeries'),
+    data: chartsData.value.newClientsByDay.map((d) => d.value),
+  },
+  {
+    name: t('home.charts.contractsSeries'),
+    data: chartsData.value.contractsByDay.map((d) => d.value),
+  },
+])
+
+const baseAreaOptions = computed<ApexOptions>(() => {
+  const mobile = isMobileDashboard.value
+  const manyTicks = chartCategories.value.length > 14
+  const axisFs = mobile ? '9px' : '11px'
+  const strokeW = mobile ? 2 : 2.5
+  return {
+    chart: {
+      fontFamily: 'inherit',
+      toolbar: { show: false },
+      zoom: { enabled: false },
+      animations: { speed: 280 },
+    },
+    colors: [chartAccent.value],
+    grid: {
+      borderColor: chartGrid.value,
+      strokeDashArray: 4,
+      padding: mobile
+        ? { left: 0, right: 4, top: 4, bottom: 4 }
+        : { left: 4, right: 8, top: 8, bottom: 2 },
+    },
+    dataLabels: { enabled: false },
+    stroke: { width: strokeW, curve: 'smooth' },
+    fill: {
+      type: 'gradient',
+      gradient: {
+        shadeIntensity: 1,
+        opacityFrom: mobile ? 0.32 : 0.38,
+        opacityTo: 0.04,
+      },
+    },
+    xaxis: {
+      categories: chartCategoriesAxis.value,
+      labels: {
+        rotate: mobile ? 0 : manyTicks ? -45 : 0,
+        rotateAlways: false,
+        hideOverlappingLabels: true,
+        trim: true,
+        style: { colors: chartText.value, fontSize: axisFs },
+      },
+      axisBorder: { show: false },
+      axisTicks: { show: false },
+    },
+    yaxis: {
+      labels: {
+        style: { colors: chartText.value, fontSize: axisFs },
+        formatter: (v: number) => formatNumber(Math.round(v)),
+        maxWidth: mobile ? 52 : undefined,
+      },
+    },
+    tooltip: {
+      theme: chartTooltipTheme.value,
+    },
+    markers: {
+      size: 0,
+      hover: { size: mobile ? 4 : 5 },
+    },
+  }
+})
+
+const revenueChartOptions = computed<ApexOptions>(() => ({
+  ...baseAreaOptions.value,
+  colors: [chartAccent.value],
+  yaxis: {
+    labels: {
+      style: {
+        colors: chartText.value,
+        fontSize: isMobileDashboard.value ? '9px' : '11px',
+      },
+      formatter: (v: number) => formatMoney(v),
+      maxWidth: isMobileDashboard.value ? 56 : undefined,
+    },
+  },
+  tooltip: {
+    theme: chartTooltipTheme.value,
+    y: {
+      formatter: (v: number) => formatMoney(v),
+    },
+  },
+}))
+
+const visitsChartOptions = computed<ApexOptions>(() => ({
+  ...baseAreaOptions.value,
+  colors: [chartAccent2.value],
+}))
+
+const activityChartOptions = computed<ApexOptions>(() => {
+  const mobile = isMobileDashboard.value
+  const manyTicks = chartCategories.value.length > 14
+  const axisFs = mobile ? '9px' : '11px'
+  return {
+    chart: {
+      fontFamily: 'inherit',
+      toolbar: { show: false },
+      zoom: { enabled: false },
+      animations: { speed: 280 },
+    },
+    colors: [chartAccent2.value, chartAccent3.value],
+    plotOptions: {
+      bar: {
+        borderRadius: mobile ? 3 : 4,
+        columnWidth: mobile ? '78%' : '72%',
+        dataLabels: { position: 'top' },
+      },
+    },
+    dataLabels: { enabled: false },
+    stroke: { width: 0 },
+    grid: {
+      borderColor: chartGrid.value,
+      strokeDashArray: 4,
+      padding: mobile
+        ? { left: 0, right: 4, top: 4, bottom: 4 }
+        : { left: 4, right: 8, top: 8, bottom: 2 },
+    },
+    xaxis: {
+      categories: chartCategoriesAxis.value,
+      labels: {
+        rotate: mobile ? 0 : manyTicks ? -45 : 0,
+        hideOverlappingLabels: true,
+        trim: true,
+        style: { colors: chartText.value, fontSize: axisFs },
+      },
+      axisBorder: { show: false },
+      axisTicks: { show: false },
+    },
+    yaxis: {
+      labels: {
+        style: { colors: chartText.value, fontSize: axisFs },
+        formatter: (v: number) => formatNumber(Math.round(v)),
+        maxWidth: mobile ? 48 : undefined,
+      },
+      min: 0,
+    },
+    legend: {
+      position: mobile ? 'bottom' : 'top',
+      horizontalAlign: mobile ? 'center' : 'right',
+      fontSize: mobile ? '10px' : '12px',
+      offsetY: mobile ? 0 : undefined,
+      itemMargin: { horizontal: mobile ? 10 : 14, vertical: mobile ? 4 : 6 },
+      labels: { colors: chartText.value },
+    },
+    tooltip: {
+      theme: chartTooltipTheme.value,
+    },
+  }
+})
 
 const statusTotal = computed(() =>
   chartsData.value.membershipsByStatus.reduce((acc, item) => acc + item.value, 0),
@@ -200,6 +375,7 @@ const donutBackground = computed(() => {
     ACTIVE: '#16a34a',
     EXPIRED: '#f59e0b',
     CANCELLED: '#ef4444',
+    PENDING: '#64748b',
   }
   let from = 0
   const parts: string[] = []
@@ -212,13 +388,19 @@ const donutBackground = computed(() => {
   return `conic-gradient(${parts.join(', ')})`
 })
 
-const dayTicks = computed(() => {
-  const source = chartsData.value.revenueByDay
-  if (source.length <= 3) return source.map((x) => x.day)
-  return [source[0]?.day, source[Math.floor(source.length / 2)]?.day, source[source.length - 1]?.day].filter(
-    (x): x is string => Boolean(x),
-  )
-})
+function syncChartThemeFromDom() {
+  const root = document.documentElement
+  const primary = getComputedStyle(root).getPropertyValue('--va-primary').trim()
+  if (primary && /^#/.test(primary)) {
+    chartAccent.value = primary
+  }
+  const isDark = root.classList.contains('dark') || root.getAttribute('data-theme') === 'dark'
+  chartTooltipTheme.value = isDark ? 'dark' : 'light'
+  chartText.value = getComputedStyle(root).getPropertyValue('--app-muted').trim() || '#64748b'
+  chartGrid.value = isDark ? 'rgba(148,163,184,0.18)' : 'rgba(100,116,139,0.2)'
+  chartAccent2.value = isDark ? '#38bdf8' : '#0ea5e9'
+  chartAccent3.value = isDark ? '#a78bfa' : '#7c3aed'
+}
 
 async function loadDashboard() {
   loading.value = true
@@ -258,16 +440,29 @@ async function loadDashboard() {
 }
 
 onMounted(() => {
+  syncChartThemeFromDom()
+  mobileDashMq = window.matchMedia(MOBILE_DASHBOARD_MQ)
+  isMobileDashboard.value = mobileDashMq.matches
+  mobileDashListener = (e: MediaQueryListEvent) => {
+    isMobileDashboard.value = e.matches
+  }
+  mobileDashMq.addEventListener('change', mobileDashListener)
   void loadDashboard()
+})
+
+onBeforeUnmount(() => {
+  if (mobileDashMq && mobileDashListener) {
+    mobileDashMq.removeEventListener('change', mobileDashListener)
+  }
+})
+
+watch(locale, () => {
+  syncChartThemeFromDom()
 })
 </script>
 
 <template>
   <div class="dashboard-page">
-    <VaAlert v-if="user" color="primary" border="left" class="session-alert">
-      {{ t('home.session', { account: user.email ?? user.login, role: user.role }) }}
-    </VaAlert>
-
     <VaAlert v-if="loadError" color="danger" outline class="mb-2">
       {{ loadError }}
     </VaAlert>
@@ -276,6 +471,9 @@ onMounted(() => {
     </VaAlert>
 
     <div class="dashboard-actions">
+      <RouterLink class="reports-link" to="/reports">
+        {{ t('home.openReports') }}
+      </RouterLink>
       <VaButton size="small" icon="refresh" :loading="loading" @click="loadDashboard">
         {{ t('common.refresh') }}
       </VaButton>
@@ -287,71 +485,87 @@ onMounted(() => {
         :key="`kpi-${i}`"
         animation="wave"
         variant="rounded"
-        height="96px"
+        height="104px"
       />
     </div>
 
     <template v-else-if="hasAnyData">
       <div class="dashboard-grid dashboard-grid--kpis">
-        <AppPageCard :title="t('home.kpi.employees')">
-          <div class="kpi-value">{{ formatNumber(summaryData.kpis.employees.value) }}</div>
-          <div class="kpi-meta">
-            {{ t('home.kpi.newIn30d', { value: formatNumber(summaryData.kpis.employees.metaValue) }) }}
-          </div>
-          <div class="kpi-trend" :class="{ 'kpi-trend--down': summaryData.kpis.employees.trendPct < 0 }">
-            {{ summaryData.kpis.employees.trendPct >= 0 ? '+' : '' }}{{ summaryData.kpis.employees.trendPct }}%
-          </div>
-        </AppPageCard>
-
-        <AppPageCard :title="t('home.kpi.clients')">
+        <AppPageCard :title="t('home.kpi.clients')" class="kpi-card">
           <div class="kpi-value">{{ formatNumber(summaryData.kpis.clients.value) }}</div>
           <div class="kpi-meta">{{ t('home.kpi.totalClients') }}</div>
         </AppPageCard>
 
-        <AppPageCard :title="t('home.kpi.membershipsActive')">
-          <div class="kpi-value">{{ formatNumber(summaryData.kpis.membershipsActive.value) }}</div>
-          <div class="kpi-meta">{{ t('home.kpi.shareActive', { pct: summaryData.kpis.membershipsActive.sharePct }) }}</div>
+        <AppPageCard :title="t('home.kpi.activeClients')" class="kpi-card">
+          <div class="kpi-value">{{ formatNumber(summaryData.kpis.activeClients.value) }}</div>
+          <div class="kpi-meta">{{ t('home.kpi.shareActive', { pct: summaryData.kpis.activeClients.sharePct }) }}</div>
         </AppPageCard>
 
-        <AppPageCard :title="t('home.kpi.revenueMonth')">
+        <AppPageCard :title="t('home.kpi.revenueMonth')" class="kpi-card">
           <div class="kpi-value">{{ formatMoney(summaryData.kpis.revenueMonth.value) }}</div>
-          <div class="kpi-trend" :class="{ 'kpi-trend--down': summaryData.kpis.revenueMonth.trendPct < 0 }">
-            {{ summaryData.kpis.revenueMonth.trendPct >= 0 ? '+' : '' }}{{ summaryData.kpis.revenueMonth.trendPct }}%
+          <div
+            class="kpi-trend"
+            :class="{ 'kpi-trend--down': summaryData.kpis.revenueMonth.trendPct < 0 }"
+          >
+            {{ summaryData.kpis.revenueMonth.trendPct >= 0 ? '+' : ''
+            }}{{ summaryData.kpis.revenueMonth.trendPct }}%
+          </div>
+          <div class="kpi-meta">{{ t('home.kpi.vsPrevMonth') }}</div>
+        </AppPageCard>
+
+        <AppPageCard :title="t('home.kpi.activity30d')" class="kpi-card kpi-card--activity">
+          <div class="kpi-value">{{ formatNumber(summaryData.kpis.activity30d.visitSessions) }}</div>
+          <div class="kpi-meta">{{ t('home.kpi.visitsInGym') }}</div>
+          <div class="activity-split">
+            <span>{{ t('home.kpi.newClientsShort') }}: {{ formatNumber(summaryData.kpis.activity30d.newClients) }}</span>
+            <span>{{ t('home.kpi.contractsShort') }}: {{ formatNumber(summaryData.kpis.activity30d.contractsCreated) }}</span>
           </div>
         </AppPageCard>
       </div>
 
-      <div class="dashboard-grid dashboard-grid--charts">
-        <AppSectionCard :title="t('home.charts.revenue30d')" :subtitle="t('home.charts.daily')">
-          <div class="chart-wrap">
-            <svg viewBox="0 0 320 80" class="sparkline" preserveAspectRatio="none">
-              <polyline :points="revenuePoints" fill="none" stroke="var(--app-accent)" stroke-width="3" />
-            </svg>
-            <div class="chart-axis">
-              <span v-for="tick in dayTicks" :key="`rev-${tick}`">{{ formatDay(tick) }}</span>
-            </div>
+      <div class="dashboard-grid dashboard-grid--charts-main">
+        <AppSectionCard :title="t('home.charts.revenue30d')" :subtitle="t('home.charts.dailyTrend')">
+          <div class="chart-shell">
+            <VueApexCharts
+              v-if="chartsData.revenueByDay.length > 0"
+              type="area"
+              :height="chartAreaHeight"
+              :options="revenueChartOptions"
+              :series="revenueSeries"
+            />
+            <div v-else class="chart-empty">{{ t('home.chartEmpty') }}</div>
           </div>
         </AppSectionCard>
 
-        <AppSectionCard :title="t('home.charts.attendance30d')" :subtitle="t('home.charts.daily')">
-          <div class="chart-wrap">
-            <svg viewBox="0 0 320 80" class="sparkline" preserveAspectRatio="none">
-              <polyline
-                :points="attendancePoints"
-                fill="none"
-                stroke="color-mix(in srgb, var(--app-accent) 70%, #0ea5e9)"
-                stroke-width="3"
-              />
-            </svg>
-            <div class="chart-axis">
-              <span v-for="tick in dayTicks" :key="`att-${tick}`">{{ formatDay(tick) }}</span>
-            </div>
+        <AppSectionCard :title="t('home.charts.visits30d')" :subtitle="t('home.charts.dailyTrend')">
+          <div class="chart-shell">
+            <VueApexCharts
+              v-if="chartsData.visitsByDay.length > 0"
+              type="area"
+              :height="chartAreaHeight"
+              :options="visitsChartOptions"
+              :series="visitsSeries"
+            />
+            <div v-else class="chart-empty">{{ t('home.chartEmpty') }}</div>
           </div>
         </AppSectionCard>
       </div>
 
-      <div class="dashboard-grid dashboard-grid--analytics">
-        <AppSectionCard :title="t('home.charts.membershipStatus')" :subtitle="t('home.charts.currentSnapshot')">
+      <AppSectionCard :title="t('home.charts.registrations30d')" :subtitle="t('home.charts.registrationsSubtitle')">
+        <div class="chart-shell chart-shell--wide">
+          <VueApexCharts
+            v-if="chartsData.newClientsByDay.length > 0"
+            type="bar"
+            :height="chartBarHeight"
+            :options="activityChartOptions"
+            :series="activitySeries"
+          />
+          <div v-else class="chart-empty">{{ t('home.chartEmpty') }}</div>
+        </div>
+      </AppSectionCard>
+
+      <div class="dashboard-grid dashboard-grid--bottom">
+        <AppSectionCard :title="t('home.charts.contractsByStatus')" :subtitle="t('home.charts.currentSnapshot')">
           <div class="donut-wrap">
             <div class="donut-chart" :style="{ background: donutBackground }">
               <div class="donut-center">{{ statusTotal }}</div>
@@ -366,45 +580,6 @@ onMounted(() => {
               </div>
             </div>
           </div>
-        </AppSectionCard>
-
-        <AppSectionCard :title="t('home.charts.trainerLoad')" :subtitle="t('home.charts.top7')">
-          <div class="bar-list">
-            <div v-for="item in chartsData.trainerLoad" :key="item.trainerId" class="bar-item">
-              <div class="bar-label">{{ item.label }}</div>
-              <div class="bar-track">
-                <div
-                  class="bar-fill"
-                  :style="{ width: `${((item.classesCount + item.clientsCount) / maxTrainerLoad) * 100}%` }"
-                />
-              </div>
-              <div class="bar-value">{{ item.classesCount }} / {{ item.clientsCount }}</div>
-            </div>
-          </div>
-        </AppSectionCard>
-      </div>
-
-      <div class="dashboard-grid dashboard-grid--bottom">
-        <AppSectionCard :title="t('home.tables.upcomingClasses')" :subtitle="t('home.tables.nextFive')">
-          <div v-if="alertsData.upcomingClasses.length === 0" class="empty-inline">{{ t('home.emptyClasses') }}</div>
-          <table v-else class="mini-table">
-            <thead>
-              <tr>
-                <th>{{ t('home.tables.class') }}</th>
-                <th>{{ t('home.tables.trainer') }}</th>
-                <th>{{ t('home.tables.time') }}</th>
-                <th>{{ t('home.tables.load') }}</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="row in alertsData.upcomingClasses" :key="row.id">
-                <td>{{ row.name }}</td>
-                <td>{{ row.trainer }}</td>
-                <td>{{ formatDateTime(row.startTime) }}</td>
-                <td>{{ row.booked }}/{{ row.capacity }} ({{ row.occupancyPct }}%)</td>
-              </tr>
-            </tbody>
-          </table>
         </AppSectionCard>
 
         <AppSectionCard :title="t('home.tables.alerts')" :subtitle="t('home.tables.needsAttention')">
@@ -428,53 +603,6 @@ onMounted(() => {
           </div>
         </AppSectionCard>
       </div>
-
-      <div class="dashboard-grid dashboard-grid--mvp">
-        <AppSectionCard :title="t('home.charts.employeesTrend30d')" :subtitle="t('home.charts.usersMvpSource')">
-          <div class="chart-wrap">
-            <svg viewBox="0 0 320 80" class="sparkline" preserveAspectRatio="none">
-              <polyline :points="employeePoints" fill="none" stroke="#7c3aed" stroke-width="3" />
-            </svg>
-          </div>
-        </AppSectionCard>
-
-        <AppSectionCard :title="t('home.tables.recentEmployees')" :subtitle="t('home.tables.lastFive')">
-          <div v-if="summaryData.recentEmployees.length === 0" class="empty-inline">{{ t('home.emptyEmployees') }}</div>
-          <table v-else class="mini-table">
-            <thead>
-              <tr>
-                <th>{{ t('users.login') }}</th>
-                <th>{{ t('users.fullName') }}</th>
-                <th>{{ t('users.role') }}</th>
-                <th>{{ t('users.createdAt') }}</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="row in summaryData.recentEmployees" :key="row.id">
-                <td>{{ row.login }}</td>
-                <td>{{ row.fullName }}</td>
-                <td>{{ t(`users.roles.${row.role}`) }}</td>
-                <td>{{ formatDateTime(row.createdAt) }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </AppSectionCard>
-      </div>
-
-      <AppSectionCard :title="t('home.charts.roles')" :subtitle="t('home.charts.usersMvpSource')">
-        <div class="bar-list">
-          <div v-for="role in summaryData.roleDistribution" :key="role.role" class="bar-item">
-            <div class="bar-label">{{ t(`users.roles.${role.role}`) }}</div>
-            <div class="bar-track">
-              <div
-                class="bar-fill"
-                :style="{ width: `${roleTotal ? (role.value / roleTotal) * 100 : 0}%` }"
-              />
-            </div>
-            <div class="bar-value">{{ role.value }}</div>
-          </div>
-        </div>
-      </AppSectionCard>
     </template>
 
     <AppEmptyState
@@ -495,15 +623,27 @@ onMounted(() => {
   min-width: 0;
 }
 
-.session-alert {
-  font-size: 0.9rem;
-  width: 100%;
-  align-self: stretch;
-}
-
 .dashboard-actions {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+.reports-link {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--app-accent-strong);
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--app-accent) 45%, transparent);
+  padding-bottom: 1px;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.reports-link:hover {
+  color: var(--app-accent);
+  border-bottom-color: var(--app-accent);
 }
 
 .dashboard-grid {
@@ -515,29 +655,33 @@ onMounted(() => {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
-.dashboard-grid--charts,
-.dashboard-grid--analytics,
-.dashboard-grid--bottom,
-.dashboard-grid--mvp {
+.dashboard-grid--charts-main,
+.dashboard-grid--bottom {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.kpi-card {
+  min-height: 104px;
 }
 
 .kpi-value {
   margin-top: 0.1rem;
-  font-size: 1.75rem;
+  font-size: 1.65rem;
   line-height: 1.15;
   font-weight: 700;
   color: var(--app-text);
+  letter-spacing: -0.02em;
 }
 
 .kpi-meta {
-  margin-top: 0.25rem;
+  margin-top: 0.3rem;
   color: var(--app-muted);
-  font-size: 0.86rem;
+  font-size: 0.84rem;
+  line-height: 1.35;
 }
 
 .kpi-trend {
-  margin-top: 0.4rem;
+  margin-top: 0.35rem;
   font-size: 0.88rem;
   font-weight: 700;
   color: #16a34a;
@@ -547,24 +691,32 @@ onMounted(() => {
   color: #dc2626;
 }
 
-.chart-wrap {
+.activity-split {
   display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-}
-
-.sparkline {
-  width: 100%;
-  height: 92px;
-  background: color-mix(in srgb, var(--app-accent) 6%, transparent);
-  border-radius: var(--app-radius-md);
-}
-
-.chart-axis {
-  display: flex;
-  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.35rem 1rem;
+  margin-top: 0.45rem;
+  font-size: 0.8rem;
   color: var(--app-muted);
-  font-size: 0.78rem;
+}
+
+.chart-shell {
+  min-height: 280px;
+  border-radius: var(--app-radius-md);
+  background: color-mix(in srgb, var(--app-accent) 5%, transparent);
+  padding: 0.35rem 0.25rem 0;
+}
+
+.chart-shell--wide {
+  min-height: 300px;
+}
+
+.chart-empty {
+  display: grid;
+  place-items: center;
+  min-height: 260px;
+  color: var(--app-muted);
+  font-size: 0.88rem;
 }
 
 .donut-wrap {
@@ -614,71 +766,10 @@ onMounted(() => {
   font-weight: 600;
 }
 
-.bar-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.45rem;
-}
-
-.bar-item {
-  display: grid;
-  grid-template-columns: 120px 1fr auto;
-  align-items: center;
-  gap: 0.6rem;
-}
-
-.bar-label {
-  font-size: 0.85rem;
-  color: var(--app-text);
-}
-
-.bar-track {
-  width: 100%;
-  height: 8px;
-  background: color-mix(in srgb, var(--app-border) 85%, transparent);
-  border-radius: 999px;
-  overflow: hidden;
-}
-
-.bar-fill {
-  height: 100%;
-  background: var(--app-accent);
-  border-radius: 999px;
-}
-
-.bar-value {
-  font-size: 0.82rem;
-  color: var(--app-muted);
-  min-width: 64px;
-  text-align: right;
-}
-
-.mini-table {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-.mini-table th,
-.mini-table td {
-  padding: 0.45rem 0.25rem;
-  border-bottom: 1px solid var(--app-border);
-  font-size: var(--app-table-body-size);
-  text-align: left;
-}
-
-.mini-table th {
-  color: var(--app-muted);
-  font-weight: 600;
-}
-
-.mini-table td {
-  color: var(--app-text);
-}
-
 .alerts-stack {
   display: flex;
   flex-direction: column;
-  gap: 0.7rem;
+  gap: 0.85rem;
 }
 
 .alert-block {
@@ -719,10 +810,8 @@ onMounted(() => {
 }
 
 @media (max-width: 860px) {
-  .dashboard-grid--charts,
-  .dashboard-grid--analytics,
-  .dashboard-grid--bottom,
-  .dashboard-grid--mvp {
+  .dashboard-grid--charts-main,
+  .dashboard-grid--bottom {
     grid-template-columns: 1fr;
   }
 
@@ -730,14 +819,106 @@ onMounted(() => {
     grid-template-columns: 1fr;
     justify-items: center;
   }
+}
 
-  .bar-item {
+@media (max-width: 640px) {
+  .dashboard-grid--kpis {
     grid-template-columns: 1fr;
-    gap: 0.2rem;
   }
 
-  .bar-value {
-    text-align: left;
+  .kpi-value {
+    font-size: 1.22rem;
+    letter-spacing: -0.01em;
+  }
+
+  .kpi-meta {
+    font-size: 0.75rem;
+    margin-top: 0.2rem;
+  }
+
+  .kpi-trend {
+    font-size: 0.78rem;
+    margin-top: 0.25rem;
+  }
+
+  .activity-split {
+    font-size: 0.72rem;
+    margin-top: 0.35rem;
+    gap: 0.3rem 0.75rem;
+  }
+
+  .kpi-card {
+    min-height: 0;
+  }
+
+  .dashboard-grid--kpis :deep(.page-card__title) {
+    font-size: 0.82rem;
+    font-weight: 700;
+    line-height: 1.25;
+  }
+
+  .chart-shell {
+    min-height: 210px;
+    padding: 0.2rem 0.05rem 0;
+  }
+
+  .chart-shell--wide {
+    min-height: 240px;
+  }
+
+  .chart-empty {
+    min-height: 200px;
+    font-size: 0.8rem;
+  }
+
+  .reports-link {
+    font-size: 0.8rem;
+  }
+
+  .dashboard-actions {
+    gap: 0.45rem;
+    justify-content: space-between;
+    width: 100%;
+  }
+
+  .donut-chart {
+    width: 96px;
+    height: 96px;
+  }
+
+  .donut-center {
+    width: 58px;
+    height: 58px;
+    font-size: 0.92rem;
+  }
+
+  .legend-label {
+    font-size: 0.76rem;
+  }
+
+  .legend-value {
+    font-size: 0.76rem;
+    font-weight: 600;
+  }
+
+  .alert-block__title,
+  .alert-row,
+  .empty-inline {
+    font-size: 0.78rem;
+  }
+
+  .dashboard-page :deep(.section-card) {
+    padding: 0.7rem 0.75rem;
+  }
+
+  .dashboard-page :deep(.section-card__title) {
+    font-size: 0.9rem;
+    line-height: 1.25;
+  }
+
+  .dashboard-page :deep(.section-card__subtitle) {
+    font-size: 0.78rem;
+    margin-top: 0.25rem;
   }
 }
 </style>

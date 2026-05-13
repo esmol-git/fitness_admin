@@ -41,6 +41,9 @@ function onPageSizeChange() {
   justify-content: space-between;
   gap: 1rem;
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .app-table-pager-row__pagination {
@@ -48,5 +51,21 @@ function onPageSizeChange() {
   justify-content: flex-end;
   flex: 1;
   min-width: 0;
+}
+
+@media (max-width: 640px) {
+  .app-table-pager-row {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
+    gap: 0.65rem;
+  }
+
+  .app-table-pager-row__pagination {
+    flex: none;
+    width: 100%;
+    max-width: 100%;
+    justify-content: flex-start;
+  }
 }
 </style>

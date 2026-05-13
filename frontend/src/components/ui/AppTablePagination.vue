@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 const page = defineModel<number>({ required: true })
 
@@ -16,8 +16,39 @@ const props = withDefaults(
   },
 )
 
+/** Узкий экран: меньше номеров в полоске — без налезания на соседние блоки. */
+const MOBILE_PAGER_MQ = '(max-width: 640px)'
+const MAX_VISIBLE_PAGES_MOBILE = 3
+
+const isMobilePager = ref(false)
+let mobilePagerMq: MediaQueryList | null = null
+let mobilePagerListener: ((e: MediaQueryListEvent) => void) | null = null
+
+onMounted(() => {
+  mobilePagerMq = window.matchMedia(MOBILE_PAGER_MQ)
+  isMobilePager.value = mobilePagerMq.matches
+  mobilePagerListener = (e: MediaQueryListEvent) => {
+    isMobilePager.value = e.matches
+  }
+  mobilePagerMq.addEventListener('change', mobilePagerListener)
+})
+
+onBeforeUnmount(() => {
+  if (mobilePagerMq && mobilePagerListener) {
+    mobilePagerMq.removeEventListener('change', mobilePagerListener)
+  }
+})
+
+const paginationSize = computed(() => (isMobilePager.value ? 'small' : 'medium'))
+
+const capVisibleButtons = computed(() =>
+  isMobilePager.value
+    ? Math.min(MAX_VISIBLE_PAGES_MOBILE, props.visiblePageButtons)
+    : props.visiblePageButtons,
+)
+
 const numberStripSize = computed(() =>
-  Math.min(props.visiblePageButtons, Math.max(1, props.pages)),
+  Math.min(capVisibleButtons.value, Math.max(1, props.pages)),
 )
 
 function goFirst() {
@@ -41,7 +72,7 @@ function goLast() {
       plain
       rounded
       icon="va-arrow-first"
-      size="medium"
+      :size="paginationSize"
       :disabled="disabled || page <= 1"
       :aria-label="$t('common.paginationFirst')"
       @click="goFirst"
@@ -51,7 +82,7 @@ function goLast() {
       plain
       rounded
       icon="va-arrow-left"
-      size="medium"
+      :size="paginationSize"
       :disabled="disabled || page <= 1"
       :aria-label="$t('common.paginationPrev')"
       @click="goPrev"
@@ -65,18 +96,18 @@ function goLast() {
       :boundary-links="false"
       rounded
       gapped
-      size="medium"
+      :size="paginationSize"
       :disabled="disabled"
       color="primary"
-      :button-props="{ preset: 'secondary', plain: true, size: 'medium' }"
-      :active-button-props="{ color: 'primary', plain: false, size: 'medium' }"
+      :button-props="{ preset: 'secondary', plain: true, size: paginationSize }"
+      :active-button-props="{ color: 'primary', plain: false, size: paginationSize }"
     />
     <VaButton
       preset="secondary"
       plain
       rounded
       icon="va-arrow-right"
-      size="medium"
+      :size="paginationSize"
       :disabled="disabled || page >= pages"
       :aria-label="$t('common.paginationNext')"
       @click="goNext"
@@ -86,7 +117,7 @@ function goLast() {
       plain
       rounded
       icon="va-arrow-last"
-      size="medium"
+      :size="paginationSize"
       :disabled="disabled || page >= pages"
       :aria-label="$t('common.paginationLast')"
       @click="goLast"
@@ -152,5 +183,25 @@ function goLast() {
   background-color: transparent !important;
   box-shadow: none !important;
   filter: none;
+}
+
+@media (max-width: 640px) {
+  .app-table-pagination {
+    justify-content: flex-start;
+    flex-wrap: nowrap;
+    gap: 0.35rem;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: visible;
+    -webkit-overflow-scrolling: touch;
+    padding: 0.1rem 0;
+    box-sizing: border-box;
+  }
+
+  .app-table-pagination__numbers {
+    flex-shrink: 0;
+  }
 }
 </style>

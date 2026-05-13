@@ -75,6 +75,10 @@ const props = withDefaults(
 .table-shell {
   display: grid;
   gap: 0.9rem;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .table-shell__state {
@@ -87,11 +91,17 @@ const props = withDefaults(
 
 .table-shell__state--data {
   min-height: 0;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
 }
 
 .table-shell__data-wrap {
   position: relative;
   transition: opacity 0.15s ease;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
 }
 
 .table-shell__data-wrap--busy {

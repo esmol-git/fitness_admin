@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { useUiStore } from '@/stores/ui'
 import ConfirmModal from '@/components/ui/ConfirmModal.vue'
 
 const props = defineProps<{
@@ -16,8 +17,56 @@ const emit = defineEmits<{
 const { t } = useI18n()
 const auth = useAuthStore()
 const router = useRouter()
+const route = useRoute()
+const ui = useUiStore()
 const logoutConfirmOpen = ref(false)
 const logoutLoading = ref(false)
+
+const MOBILE_NAV_MQ = '(max-width: 960px)'
+const isMobile = ref(false)
+let mq: MediaQueryList | null = null
+let mqListener: ((e: MediaQueryListEvent) => void) | null = null
+
+onMounted(() => {
+  mq = window.matchMedia(MOBILE_NAV_MQ)
+  isMobile.value = mq.matches
+  mqListener = (e: MediaQueryListEvent) => {
+    isMobile.value = e.matches
+    if (!e.matches) ui.closeMobileSidebar()
+  }
+  mq.addEventListener('change', mqListener)
+})
+
+onBeforeUnmount(() => {
+  if (mq && mqListener) mq.removeEventListener('change', mqListener)
+})
+
+watch(
+  () => route.fullPath,
+  () => {
+    if (isMobile.value) ui.closeMobileSidebar()
+  },
+)
+
+watch(
+  [() => ui.mobileSidebarOpen, () => isMobile.value],
+  ([open, mobile]) => {
+    if (typeof document === 'undefined') return
+    document.body.style.overflow = mobile && open ? 'hidden' : ''
+  },
+  { immediate: true },
+)
+
+/** На мобилке сайдбар в оверлее всегда «развёрнут»; узкая колонка только на десктопе. */
+const railCollapsed = computed(() => Boolean(props.collapsed && !isMobile.value))
+
+function onNavLinkClick() {
+  if (isMobile.value) ui.closeMobileSidebar()
+}
+
+function onBackdropClick() {
+  ui.closeMobileSidebar()
+}
 
 const items = computed(() => {
   if (auth.user?.role === 'MANAGER') {
@@ -132,13 +181,28 @@ const userCard = computed(() => {
 </script>
 
 <template>
-  <aside class="sidebar rounded-2xl" :class="{ 'sidebar--collapsed': props.collapsed }">
-    <div class="sidebar-title" v-if="!props.collapsed">
+  <Teleport to="body">
+    <div
+      v-if="isMobile && ui.mobileSidebarOpen"
+      class="sidebar-mobile-backdrop"
+      aria-hidden="true"
+      @click="onBackdropClick"
+    />
+  </Teleport>
+  <aside
+    class="sidebar rounded-2xl"
+    :class="{
+      'sidebar--collapsed': railCollapsed,
+      'sidebar--mobile': isMobile,
+      'sidebar--mobile-open': isMobile && ui.mobileSidebarOpen,
+    }"
+  >
+    <div class="sidebar-title" v-if="!railCollapsed">
       {{ t('sidebar.navigation') }}
     </div>
     <nav class="sidebar-nav">
       <template v-for="item in items" :key="`${item.kind}-${item.label}-${item.to}`">
-        <div v-if="item.kind === 'section'" v-show="!props.collapsed" class="sidebar-group-title">
+        <div v-if="item.kind === 'section'" v-show="!railCollapsed" class="sidebar-group-title">
           {{ item.label }}
         </div>
         <RouterLink
@@ -146,15 +210,16 @@ const userCard = computed(() => {
           :to="item.to"
           class="sidebar-link"
           :title="item.label"
+          @click="onNavLinkClick"
         >
           <VaIcon :name="item.icon" size="18px" class="sidebar-link__icon" />
-          <span v-if="!props.collapsed" class="sidebar-link__label">{{ item.label }}</span>
+          <span v-if="!railCollapsed" class="sidebar-link__label">{{ item.label }}</span>
         </RouterLink>
       </template>
     </nav>
     <div class="sidebar-footer">
       <div
-        v-if="userCard && !props.collapsed"
+        v-if="userCard && !railCollapsed"
         class="sidebar-user"
         :title="userCard.subtitle"
       >
@@ -166,16 +231,21 @@ const userCard = computed(() => {
       </div>
       <VaButton
         class="sidebar-logout"
-        :class="{ 'sidebar-logout--icon-only': props.collapsed }"
+        :class="{ 'sidebar-logout--icon-only': railCollapsed }"
         block
         preset="secondary"
         icon="logout"
         @click="askLogout"
       >
-        <span v-if="!props.collapsed">{{ t('home.logout') }}</span>
+        <span v-if="!railCollapsed">{{ t('home.logout') }}</span>
       </VaButton>
     </div>
-    <button class="sidebar-toggle" type="button" @click="emit('toggle')">
+    <button
+      v-if="!isMobile"
+      class="sidebar-toggle"
+      type="button"
+      @click="emit('toggle')"
+    >
       <VaIcon :name="props.collapsed ? 'chevron_right' : 'chevron_left'" />
     </button>
 
@@ -401,25 +471,55 @@ const userCard = computed(() => {
 }
 
 @media (max-width: 960px) {
-  .sidebar {
-    width: 100%;
-    height: auto;
-    min-height: unset;
-    border-right: 0;
-    border-bottom: 1px solid var(--app-border);
-    padding: 0.75rem;
+  .sidebar.sidebar--mobile:not(.sidebar--mobile-open) {
+    display: none;
   }
 
-  .sidebar-nav {
-    flex-direction: row;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    overflow: visible;
-    padding-right: 0;
+  .sidebar.sidebar--mobile.sidebar--mobile-open {
+    display: flex;
+    position: fixed;
+    z-index: 210;
+    left: 0.75rem;
+    top: 0.75rem;
+    bottom: 0.75rem;
+    width: min(22rem, calc(100vw - 1.5rem));
+    height: auto;
+    max-height: calc(100vh - 1.5rem);
+    margin: 0;
+    padding: 1rem 0.75rem;
+    box-shadow: var(--app-shadow-soft);
+    overflow: hidden;
+    animation: sidebar-slide-in 0.22s ease-out;
+  }
+
+  .sidebar.sidebar--mobile.sidebar--mobile-open .sidebar-nav {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    overflow: auto;
+    padding-right: 0.2rem;
   }
 
   .sidebar-toggle {
     display: none;
   }
+}
+
+@keyframes sidebar-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(-12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.sidebar-mobile-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 205;
+  background: color-mix(in srgb, var(--app-text) 28%, transparent);
+  backdrop-filter: blur(2px);
 }
 </style>

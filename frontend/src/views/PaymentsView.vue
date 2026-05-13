@@ -494,6 +494,7 @@ onBeforeUnmount(() => {
               mode="range"
               :model-value="paymentsDateRangeModel"
               :label="t('payments.filterDateRange')"
+              :placeholder="t('payments.filterDateRangePlaceholder')"
               clearable
               @update:model-value="onFilterDateRange"
             />

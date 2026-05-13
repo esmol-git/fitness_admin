@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRoute, useRouter } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { DEFAULT_TABLE_PAGE_LIMIT, TABLE_PAGE_SIZES, type TablePageSizeOption } from '@/config/tablePagination'
 import AppDataTableShell from '@/components/ui/AppDataTableShell.vue'
+import AppEmptyState from '@/components/ui/AppEmptyState.vue'
 import AppListFiltersToolbar from '@/components/ui/AppListFiltersToolbar.vue'
 import AppPageCard from '@/components/ui/AppPageCard.vue'
 import AppTablePagerRow from '@/components/ui/AppTablePagerRow.vue'
@@ -12,6 +13,7 @@ import { normalizeRouteQuery, routeQueryEquals } from '@/composables/tableListUr
 import { resolveApiErrorMessage } from '@/composables/useApiErrorMap'
 import { useUiStore } from '@/stores/ui'
 import { api } from '@/utils/api'
+import { clientPhotoDisplayUrl } from '@/utils/clientPhotoUrl'
 
 const { t } = useI18n()
 const ui = useUiStore()
@@ -47,7 +49,15 @@ const visits = ref<
     status: 'IN_GYM' | 'LEFT' | 'OVERDUE' | 'FORCE_CLOSED'
     closeReason?: string | null
     exitedBy?: { firstName?: string | null; lastName?: string | null; login?: string } | null
-    client: { firstName: string; lastName: string; middleName?: string | null; phone: string; cardNumber?: string | null }
+    client: {
+      id: string
+      firstName: string
+      lastName: string
+      middleName?: string | null
+      phone: string
+      cardNumber?: string | null
+      photoUrl?: string | null
+    }
   }>
 >([])
 
@@ -311,7 +321,8 @@ function closeReasonTone(
   if (!reason || reason === 'NORMAL') return 'neutral'
   if (reason === 'FOUND_LATER') return 'warning'
   if (reason === 'AUTO_TIMEOUT') return 'warning'
-  if (reason === 'LOST_KEY' || reason === 'BLOCKED' || reason === 'ADMIN_CORRECTION') return 'danger'
+  if (reason === 'LOST_KEY' || reason === 'BLOCKED') return 'danger'
+  if (reason === 'ADMIN_CORRECTION') return 'warning'
   return 'neutral'
 }
 
@@ -489,6 +500,13 @@ onBeforeUnmount(() => {
     <VaAlert v-if="error" color="danger" outline class="visits-error">{{ error }}</VaAlert>
 
     <AppDataTableShell :loading="loading" :has-items="hasItems" :show-pager="hasItems && pages > 1">
+      <template #empty>
+        <AppEmptyState
+          icon="history"
+          :title="t('visits.emptyTitle')"
+          :description="hasActiveFilters ? t('visits.emptyDescFiltered') : t('visits.emptyDesc')"
+        />
+      </template>
       <VaDataTable
         :items="visits"
         :loading="loading"
@@ -498,7 +516,28 @@ onBeforeUnmount(() => {
         @update:sort-by="onSortByUpdate"
         @update:sorting-order="onSortOrderUpdate"
       >
-        <template #cell(clientLastName)="{ rowData }">{{ fullName(rowData.client) }}</template>
+        <template #cell(clientLastName)="{ rowData }">
+          <div class="visits-client-name-cell">
+            <div class="visits-client-name-cell__avatar" aria-hidden="true">
+              <img
+                v-if="clientPhotoDisplayUrl(rowData.client.photoUrl)"
+                :src="clientPhotoDisplayUrl(rowData.client.photoUrl)"
+                alt=""
+                class="visits-client-name-cell__img"
+              />
+              <div v-else class="visits-client-name-cell__placeholder">
+                <VaIcon name="person" size="16px" />
+              </div>
+            </div>
+            <RouterLink
+              class="visits-client-name-cell__link"
+              :to="{ name: 'clients', query: { edit: rowData.client.id } }"
+              :title="t('header.openClientProfile')"
+            >
+              {{ fullName(rowData.client) }}
+            </RouterLink>
+          </div>
+        </template>
         <template #cell(clientPhone)="{ rowData }">{{ rowData.client.phone }}</template>
         <template #cell(enteredAt)="{ rowData }">{{ formatDate(rowData.enteredAt) }}</template>
         <template #cell(exitedAt)="{ rowData }">{{ formatDate(rowData.exitedAt) }}</template>
@@ -529,6 +568,52 @@ onBeforeUnmount(() => {
 .visits-error {
   margin-bottom: var(--app-section-gap);
   width: 100%;
+}
+
+.visits-client-name-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+.visits-client-name-cell__avatar {
+  flex-shrink: 0;
+}
+
+.visits-client-name-cell__img {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  object-fit: cover;
+  display: block;
+  border: 1px solid var(--app-border);
+}
+
+.visits-client-name-cell__placeholder {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--app-border);
+  color: var(--app-muted);
+  background: color-mix(in srgb, var(--app-surface) 85%, var(--app-border));
+}
+
+.visits-client-name-cell__link {
+  font-weight: 600;
+  color: var(--va-primary);
+  text-decoration: none;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.visits-client-name-cell__link:hover {
+  text-decoration: underline;
 }
 
 @media (max-width: 960px) {

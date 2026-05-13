@@ -320,6 +320,7 @@ export class VisitsService {
               membershipType: true,
               phone: true,
               cardNumber: true,
+              photoUrl: true,
             },
           },
           enteredBy: { select: { id: true, firstName: true, lastName: true, login: true } },
@@ -329,8 +330,18 @@ export class VisitsService {
       this.prisma.visitSession.count({ where }),
     ]);
 
+    const itemsWithPhotos = await Promise.all(
+      items.map(async (row) => ({
+        ...row,
+        client: await this.withReadablePhotoUrl({
+          ...row.client,
+          photoUrl: row.client.photoUrl,
+        }),
+      })),
+    );
+
     return {
-      items,
+      items: itemsWithPhotos,
       meta: { total, page, limit },
     };
   }

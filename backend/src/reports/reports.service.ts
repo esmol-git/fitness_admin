@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { PaymentStatus, Prisma } from '@prisma/client';
+import { ContractsService } from '../contracts/contracts.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 function decimalToNumber(value: Prisma.Decimal | null | undefined): number {
@@ -25,7 +26,10 @@ function safePct(current: number, previous: number): number {
 
 @Injectable()
 export class ReportsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly contracts: ContractsService,
+  ) {}
 
   async getOverview(filters?: { from?: string; to?: string }) {
     const from = filters?.from ? new Date(filters.from) : null;
@@ -47,50 +51,78 @@ export class ReportsService {
         : undefined;
     const currentFrom = paidAtRange?.gte ?? startOfDay(new Date(new Date().getFullYear(), new Date().getMonth(), 1));
     const currentTo = paidAtRange?.lte ?? endOfDay(new Date());
+    /** Единое окно для сумм по оплатам (если в фильтре только одна граница — добиваем дефолтом месяц/сегодня). */
+    const effFrom = paidAtRange?.gte ?? currentFrom;
+    const effTo = paidAtRange?.lte ?? currentTo;
+    const paidWindow = { gte: effFrom, lte: effTo };
+
     const rangeMs = Math.max(24 * 60 * 60 * 1000, currentTo.getTime() - currentFrom.getTime() + 1);
     const prevFrom = new Date(currentFrom.getTime() - rangeMs);
     const prevTo = new Date(currentTo.getTime() - rangeMs);
 
-    const [clientCount, activeMemberships, totalMemberships, paidAgg, paidPrevAgg, failedPayments, highLoadClasses] =
-      await this.prisma.$transaction([
-        this.prisma.client.count(),
-        this.prisma.membership.count({ where: { status: 'ACTIVE' } }),
-        this.prisma.membership.count(),
-        this.prisma.payment.aggregate({
-          where: { status: PaymentStatus.PAID, paidAt: paidAtRange },
-          _sum: { amount: true },
-          _count: { id: true },
-        }),
-        this.prisma.payment.aggregate({
-          where: {
-            status: PaymentStatus.PAID,
-            paidAt: { gte: prevFrom, lte: prevTo },
-          },
-          _sum: { amount: true },
-        }),
-        this.prisma.payment.findMany({
-          where: { status: PaymentStatus.FAILED, paidAt: paidAtRange },
-          select: { id: true, amount: true, paidAt: true },
-          orderBy: { paidAt: 'desc' },
-        }),
-        this.prisma.gymClass.findMany({
-          where: {
-            startTime: {
-              gte: from ? startOfDay(from) : undefined,
-              lte: to ? endOfDay(to) : undefined,
-            },
-          },
-          include: { _count: { select: { bookings: true } } },
-        }),
-      ]);
+    const [
+      clientCount,
+      paidAgg,
+      paidPrevAgg,
+      refundAgg,
+      failedAgg,
+      visitSessionsCount,
+      newClientsCount,
+      contractsCreatedCount,
+      installmentAgg,
+    ] = await this.prisma.$transaction([
+      this.prisma.client.count(),
+      this.prisma.payment.aggregate({
+        where: { status: PaymentStatus.PAID, paidAt: paidWindow },
+        _sum: { amount: true },
+        _count: { id: true },
+      }),
+      this.prisma.payment.aggregate({
+        where: {
+          status: PaymentStatus.PAID,
+          paidAt: { gte: prevFrom, lte: prevTo },
+        },
+        _sum: { amount: true },
+      }),
+      this.prisma.payment.aggregate({
+        where: { status: PaymentStatus.REFUNDED, paidAt: paidWindow },
+        _sum: { amount: true },
+        _count: { id: true },
+      }),
+      this.prisma.payment.aggregate({
+        where: { status: PaymentStatus.FAILED, paidAt: paidWindow },
+        _sum: { amount: true },
+        _count: { id: true },
+      }),
+      this.prisma.visitSession.count({
+        where: { enteredAt: { gte: effFrom, lte: effTo } },
+      }),
+      this.prisma.client.count({
+        where: { createdAt: { gte: effFrom, lte: effTo } },
+      }),
+      this.prisma.contractDocument.count({
+        where: { createdAt: { gte: effFrom, lte: effTo } },
+      }),
+      this.prisma.$queryRaw<Array<{ s: unknown; c: bigint }>>(
+        Prisma.sql`
+          SELECT COALESCE(SUM(p.amount), 0) AS s, COUNT(p.id)::bigint AS c
+          FROM "Payment" p
+          INNER JOIN "ContractDocument" cd ON cd.id = p."contractDocumentId"
+          WHERE p.status = 'PAID'::"PaymentStatus"
+            AND p."paidAt" >= ${effFrom}
+            AND p."paidAt" <= ${effTo}
+            AND (cd.payload->>'paymentPlan') IN ('INSTALLMENT_FLEXIBLE', 'INSTALLMENT_EQUAL')
+        `,
+      ),
+    ]);
 
-    const highLoadCount = highLoadClasses.filter((row) => {
-      if (!row.capacity) return false;
-      return (row._count.bookings / row.capacity) * 100 >= 85;
-    }).length;
+    const activeClientsCount = await this.contracts.countClientsWithDerivedActiveContract();
 
     const paidAmount = decimalToNumber(paidAgg._sum.amount);
     const paidBaseline = decimalToNumber(paidPrevAgg._sum.amount);
+    const instRow = installmentAgg[0];
+    const installmentPaidAmount = decimalToNumber(instRow?.s as Prisma.Decimal | null | undefined);
+    const installmentPaidCount = Number(instRow?.c ?? 0);
 
     return {
       period: {
@@ -101,17 +133,23 @@ export class ReportsService {
         paidAmount,
         paidCount: paidAgg._count.id,
         trendPct: safePct(paidAmount, paidBaseline),
-        failedAmount: failedPayments.reduce((acc, item) => acc + decimalToNumber(item.amount), 0),
-        failedCount: failedPayments.length,
+        refundAmount: decimalToNumber(refundAgg._sum.amount),
+        refundCount: refundAgg._count.id,
+        installmentPaidAmount,
+        installmentPaidCount,
+        failedAmount: decimalToNumber(failedAgg._sum.amount),
+        failedCount: failedAgg._count.id,
       },
       clients: {
         totalClients: clientCount,
-        activeMemberships,
-        activeMembershipSharePct:
-          totalMemberships > 0 ? Number(((activeMemberships / totalMemberships) * 100).toFixed(1)) : 0,
+        activeClients: activeClientsCount,
+        activeClientsSharePct:
+          clientCount > 0 ? Number(((activeClientsCount / clientCount) * 100).toFixed(1)) : 0,
       },
-      risks: {
-        highLoadClasses: highLoadCount,
+      activity: {
+        visitSessionsCount,
+        newClientsCount,
+        contractsCreatedCount,
       },
     };
   }

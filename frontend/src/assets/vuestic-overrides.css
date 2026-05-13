@@ -138,3 +138,46 @@
 :root[data-theme='dark'] .va-select-content {
   color: var(--app-text) !important;
 }
+
+/*
+  Мобильные модалки: меньше горизонтальных полей — контент шире.
+*/
+@media (max-width: 640px) {
+  .va-modal--fixed-layout .va-modal__inner > .va-modal__message {
+    padding: 0.35rem 0.12rem 0.42rem;
+  }
+
+  .va-modal .section-card {
+    padding: 0.3rem 0.18rem 0.38rem;
+  }
+
+  /*
+    Редактор клиента: диалог почти на всю ширину; убираем «двойную коробку»
+    (внешняя section-card + внутренний general-layout).
+  */
+  .clients-editor-modal.va-modal .va-modal__dialog {
+    width: calc(100vw - 10px) !important;
+    max-width: calc(100vw - 10px) !important;
+    margin: 5px auto !important;
+  }
+
+  /* Скролл контента модалки клиента на iOS */
+  .clients-editor-modal.va-modal--fixed-layout .va-modal__inner > .va-modal__message {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+
+  .clients-editor-modal.va-modal .section-card.client-editor-card {
+    padding: 0 !important;
+    border: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+  }
+
+  .clients-editor-modal .app-modal-actions.clients-modal-actions .va-button {
+    min-height: 2.05rem !important;
+    font-size: 0.78rem !important;
+    padding-top: 0.28rem !important;
+    padding-bottom: 0.28rem !important;
+  }
+}

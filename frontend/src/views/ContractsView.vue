@@ -562,11 +562,12 @@ function stripContractDraftQueryParams() {
 
 async function hydrateDraftFromClientApi(cid: string, contractNumberFromQuery?: string) {
   formError.value = null
+  /** До loadClientOptions: в список опций подмешивается GET /clients/:id, и sync в конце load не ломает форму. */
+  clientId.value = cid
   try {
     await Promise.all([loadClientOptions(), loadMembershipOptions()])
     const { data } = await api.get(`/clients/${cid}`)
     const row = data as Record<string, unknown>
-    clientId.value = cid
     const trimmed = contractNumberFromQuery?.trim()
     form.contractNumber = trimmed && trimmed.length > 0 ? trimmed : generateContractNumber(new Date())
     form.lastName = typeof row.lastName === 'string' ? row.lastName : ''
@@ -618,8 +619,8 @@ async function hydrateDraftFromClientApi(cid: string, contractNumberFromQuery?: 
 }
 
 function syncClientFields(selectedClientId: string) {
-  const selected = clientOptions.value.find((item) => item.value === selectedClientId)
-  if (!selected) {
+  const trimmed = selectedClientId.trim()
+  if (!trimmed) {
     form.firstName = ''
     form.lastName = ''
     form.middleName = ''
@@ -629,6 +630,9 @@ function syncClientFields(selectedClientId: string) {
     form.birthDate = ''
     return
   }
+  const selected = clientOptions.value.find((item) => item.value === trimmed)
+  /** Не затирать форму: клиент может быть ещё не в первой странице списка (после hydrateDraftFromClientApi). */
+  if (!selected) return
 
   form.firstName = selected.firstName?.trim() || ''
   form.lastName = selected.lastName?.trim() || ''

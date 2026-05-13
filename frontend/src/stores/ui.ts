@@ -18,6 +18,8 @@ export const useUiStore = defineStore('ui', {
     /** Префилл номера карты при открытии создания клиента из сканера («не найден»). */
     createClientPrefillCardNumber: '',
     createClientFromScannerTick: 0,
+    /** Мобильное меню (бургер): выезд сайдбара ≤960px. На десктопе не используется. */
+    mobileSidebarOpen: false,
   }),
   actions: {
     setPendingNotice(kind: UiPendingNotice) {
@@ -47,6 +49,12 @@ export const useUiStore = defineStore('ui', {
     },
     bumpPaymentsTableRefresh() {
       this.paymentsTableRefreshTick += 1
+    },
+    toggleMobileSidebar() {
+      this.mobileSidebarOpen = !this.mobileSidebarOpen
+    },
+    closeMobileSidebar() {
+      this.mobileSidebarOpen = false
     },
   },
 })

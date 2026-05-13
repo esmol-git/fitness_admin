@@ -536,6 +536,22 @@ function onPhotoPreviewImgError() {
 
 const activeTab = ref<'general' | 'payments' | 'history'>('general')
 
+/** На узком экране — один селект вместо горизонтальных табов. */
+const MOBILE_TAB_SELECT_MQ = '(max-width: 640px)'
+const mobileTabSelect = ref(false)
+let tabSelectMq: MediaQueryList | null = null
+let tabSelectListener: ((e: MediaQueryListEvent) => void) | null = null
+
+const tabSelectOptions = computed(() => [
+  { value: 'general' as const, text: t('clients.tabGeneral') },
+  { value: 'payments' as const, text: t('clients.tabPayments') },
+  { value: 'history' as const, text: t('clients.tabHistory') },
+])
+
+function onTabSelectChange(value: unknown) {
+  if (value === 'general' || value === 'payments' || value === 'history') activeTab.value = value
+}
+
 function pickPrimaryListContract<
   T extends { id: string; status?: string; createdAt: string },
 >(contracts: T[]): T | null {
@@ -1055,6 +1071,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', onDocumentPointerDown, true)
   if (addressSuggestTimer) clearTimeout(addressSuggestTimer)
   if (addressSuggestBlurTimer) clearTimeout(addressSuggestBlurTimer)
+  if (tabSelectMq && tabSelectListener) tabSelectMq.removeEventListener('change', tabSelectListener)
   unmountPhoneMask()
   unmountBirthMask()
   unmountContractDateMasks()
@@ -1064,6 +1081,12 @@ onBeforeUnmount(() => {
 })
 
 onMounted(async () => {
+  tabSelectMq = window.matchMedia(MOBILE_TAB_SELECT_MQ)
+  mobileTabSelect.value = tabSelectMq.matches
+  tabSelectListener = (e: MediaQueryListEvent) => {
+    mobileTabSelect.value = e.matches
+  }
+  tabSelectMq.addEventListener('change', tabSelectListener)
   document.addEventListener('pointerdown', onDocumentPointerDown, true)
   await nextTick()
   birthTextValue.value = toRuDateText(props.modelValue.birthDate)
@@ -1184,7 +1207,24 @@ watch(paymentTextValue, (value) => {
     class="client-form-layout"
     :class="{ 'client-form-layout--tabbed': !isCreateMode }"
   >
-    <div v-if="!isCreateMode" class="tabs-row" role="tablist" aria-label="Client form tabs">
+    <div v-if="!isCreateMode && mobileTabSelect" class="tabs-select-wrap">
+      <VaSelect
+        :model-value="activeTab"
+        :options="tabSelectOptions"
+        value-by="value"
+        text-by="text"
+        class="tabs-select"
+        :label="$t('clients.tabSectionSelect')"
+        width="100%"
+        @update:model-value="onTabSelectChange"
+      />
+    </div>
+    <div
+      v-else-if="!isCreateMode"
+      class="tabs-row"
+      role="tablist"
+      :aria-label="$t('clients.tabListAria')"
+    >
       <VaButton type="button" size="small" :preset="activeTab === 'general' ? 'primary' : 'secondary'" @click="activeTab = 'general'">
         {{ $t('clients.tabGeneral') }}
       </VaButton>
@@ -1997,6 +2037,16 @@ watch(paymentTextValue, (value) => {
   margin-top: 0.25rem;
 }
 
+.tabs-select-wrap {
+  width: 100%;
+  min-width: 0;
+}
+
+.tabs-select {
+  width: 100%;
+  --va-input-wrapper-width: 100%;
+}
+
 .tabs-row {
   display: flex;
   align-items: center;
@@ -2777,6 +2827,95 @@ watch(paymentTextValue, (value) => {
   }
   .photo-preview {
     width: 120px;
+  }
+}
+
+@media (max-width: 640px) {
+  .tabs-row {
+    flex-wrap: nowrap;
+    gap: 0.3rem;
+    padding: 0.28rem 0.35rem;
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+  }
+
+  .tabs-row :deep(.va-button) {
+    flex: 0 0 auto;
+    padding: 0 0.52rem;
+    font-size: 0.72rem;
+    --va-button-sm-height: 1.85rem;
+  }
+
+  .general-layout {
+    padding: 0.42rem 0.38rem;
+    border-radius: 12px;
+    gap: 0.55rem;
+  }
+
+  .general-top {
+    gap: 0.55rem;
+  }
+
+  .photo-rail {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: center;
+    width: 100%;
+    max-width: 8.75rem;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .photo-preview {
+    width: 100%;
+    max-width: 8rem;
+  }
+
+  .photo-actions {
+    width: 100%;
+    max-width: 8rem;
+    justify-content: center;
+    gap: 0.35rem;
+  }
+
+  .photo-actions :deep(.photo-action-half.va-button) {
+    min-height: 2.35rem !important;
+  }
+
+  .form-col__title {
+    font-size: 0.68rem;
+    letter-spacing: 0.05em;
+  }
+
+  .contracts-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .contracts-actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .contract-history-row {
+    flex-direction: column;
+    gap: 0.45rem;
+  }
+
+  .contract-history-actions {
+    margin-left: 0;
+    align-self: stretch;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+
+  .add-contract-payment-panel__grid {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .client-form-layout--tabbed .client-form-tab-body {
+    padding: 0 0.08rem 0.35rem 0;
   }
 }
 </style>

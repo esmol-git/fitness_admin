@@ -280,6 +280,61 @@ export class ContractsService {
     return { ok: true };
   }
 
+  /**
+   * Отчёты: число клиентов с хотя бы одним договором в производном статусе ACTIVE.
+   * Не опирается только на `Client.status` (может не успеть обновиться без cron).
+   */
+  async countClientsWithDerivedActiveContract(): Promise<number> {
+    await this.syncExpiredContracts();
+    await this.syncExpiredFreezes();
+    const rows = await this.prisma.contractDocument.findMany({
+      select: {
+        clientId: true,
+        status: true,
+        serviceStartDate: true,
+        serviceEndDate: true,
+      },
+    });
+    const clientIds = new Set<string>();
+    for (const row of rows) {
+      if (this.deriveContractStatus(row.status, row.serviceStartDate, row.serviceEndDate) === 'ACTIVE') {
+        clientIds.add(row.clientId);
+      }
+    }
+    return clientIds.size;
+  }
+
+  /**
+   * Дашборд: распределение договоров по производному статусу (как в отчётах).
+   * PENDING — черновики, пауза и прочее, кроме действующих / истёкших / отменённых.
+   */
+  async getContractsDerivedDistribution(): Promise<
+    { status: 'ACTIVE' | 'EXPIRED' | 'CANCELLED' | 'PENDING'; value: number }[]
+  > {
+    await this.syncExpiredContracts();
+    await this.syncExpiredFreezes();
+    const rows = await this.prisma.contractDocument.findMany({
+      select: { status: true, serviceStartDate: true, serviceEndDate: true },
+    });
+    let active = 0;
+    let expired = 0;
+    let cancelled = 0;
+    let pending = 0;
+    for (const row of rows) {
+      const d = this.deriveContractStatus(row.status, row.serviceStartDate, row.serviceEndDate);
+      if (d === 'ACTIVE') active++;
+      else if (d === 'EXPIRED') expired++;
+      else if (d === 'CANCELLED') cancelled++;
+      else pending++;
+    }
+    return [
+      { status: 'ACTIVE', value: active },
+      { status: 'EXPIRED', value: expired },
+      { status: 'CANCELLED', value: cancelled },
+      { status: 'PENDING', value: pending },
+    ];
+  }
+
   private async canCreateContractForClient(clientId: string, contractNumber?: string) {
     await this.syncExpiredFreezes();
     await this.syncExpiredContracts();

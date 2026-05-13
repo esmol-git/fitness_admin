@@ -707,6 +707,11 @@ function closeClientRowActionsMenu() {
   clientsRowMenuAnchorRect.value = null
 }
 
+/** Список: «Сгенерировать договор» только без действующего договора (ACTIVE совпадает с проверкой /can-generate на бэкенде). */
+function clientRowShowsGenerateContract(row: ClientRow) {
+  return row.status !== 'BLOCKED' && row.status !== 'ACTIVE'
+}
+
 const clientsRowMenuLayerStyle = computed(() => {
   const r = clientsRowMenuAnchorRect.value
   if (!r || typeof window === 'undefined') return {}
@@ -759,9 +764,11 @@ function onRowMenuTriggerClick(row: ClientRow, ev: MouseEvent) {
   clientsRowMenuAnchorRect.value = el.getBoundingClientRect()
 }
 
-function runClientRowMenuAction(action: () => void) {
+/** Строка меню передаётся аргументом: до вызова обнуляется `clientsRowMenuRow`, колбэк без аргумента получил бы `null`. */
+function runRowMenuAction(row: ClientRow | null, action: (r: ClientRow) => void) {
+  if (!row) return
   closeClientRowActionsMenu()
-  action()
+  action(row)
 }
 
 type ClientsTableRowClickPayload = {
@@ -1089,12 +1096,71 @@ async function generateContractForEditingClient() {
   await proceedGenerateContractForEditingClient()
 }
 
+/**
+ * Проверка can-generate и переход на страницу договора с черновиком.
+ * Без открытия модалки клиента — от таблицы вызывать с seed из строки.
+ */
+async function proceedGenerateContractNavigation(
+  clientId: string,
+  seedContractNumber: string,
+  options?: { syncContractNumberToEditForm?: boolean },
+) {
+  let contractNumber = seedContractNumber.trim()
+  if (!contractNumber) {
+    contractNumber = generateContractNumber(new Date())
+    if (options?.syncContractNumberToEditForm) {
+      editState.form.value.contractNumber = contractNumber
+    }
+  }
+  const maxAttempts = 8
+  let canGenerate = false
+  try {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const { data } = await api.get<{ ok: boolean; reason?: string }>(
+        `/contracts/client/${clientId}/can-generate`,
+        { params: { contractNumber: contractNumber || undefined } },
+      )
+      if (data?.ok) {
+        canGenerate = true
+        break
+      }
+      if (data?.reason === 'ACTIVE_CONTRACT_EXISTS') {
+        notify({ color: 'warning', message: t('clients.activeContractAlreadyExists') })
+        return
+      }
+      if (data?.reason === 'CONTRACT_NUMBER_EXISTS') {
+        contractNumber = generateContractNumber(new Date())
+        if (options?.syncContractNumberToEditForm) {
+          editState.form.value.contractNumber = contractNumber
+        }
+        continue
+      }
+      notify({ color: 'danger', message: t('clients.contractNumberRequired') })
+      return
+    }
+    if (!canGenerate) {
+      notify({ color: 'danger', message: t('clients.contractNumberTaken') })
+      return
+    }
+  } catch {
+    notify({ color: 'danger', message: t('clients.contractGenerateFailed') })
+    return
+  }
+  await router.push({
+    name: 'contracts',
+    query: {
+      clientId,
+      newContract: '1',
+      contractNumber: contractNumber.trim() || undefined,
+    },
+  })
+}
+
 async function generateContractFromTableRow(row: ClientRow) {
   contractGenerateLoadingId.value = row.id
   try {
-    openEdit(row)
-    await nextTick()
-    await generateContractForEditingClient()
+    const seed = (row.contractNumber ?? '').trim()
+    await proceedGenerateContractNavigation(row.id, seed)
   } finally {
     contractGenerateLoadingId.value = null
   }
@@ -1146,45 +1212,8 @@ async function proceedGenerateContractForEditingClient() {
   if (!editState.form.value.contractNumber.trim()) {
     regenerateEditContractNumber()
   }
-  const form = editState.form.value
-  const maxAttempts = 8
-  let canGenerate = false
-  try {
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const { data } = await api.get<{ ok: boolean; reason?: string }>(
-        `/contracts/client/${editingId.value}/can-generate`,
-        { params: { contractNumber: form.contractNumber || undefined } },
-      )
-      if (data?.ok) {
-        canGenerate = true
-        break
-      }
-      if (data?.reason === 'ACTIVE_CONTRACT_EXISTS') {
-        notify({ color: 'warning', message: t('clients.activeContractAlreadyExists') })
-        return
-      }
-      if (data?.reason === 'CONTRACT_NUMBER_EXISTS') {
-        regenerateEditContractNumber()
-        continue
-      }
-      notify({ color: 'danger', message: t('clients.contractNumberRequired') })
-      return
-    }
-    if (!canGenerate) {
-      notify({ color: 'danger', message: t('clients.contractNumberTaken') })
-      return
-    }
-  } catch {
-    notify({ color: 'danger', message: t('clients.contractGenerateFailed') })
-    return
-  }
-  await router.push({
-    name: 'contracts',
-    query: {
-      clientId: editingId.value,
-      newContract: '1',
-      contractNumber: form.contractNumber.trim() || undefined,
-    },
+  await proceedGenerateContractNavigation(editingId.value, editState.form.value.contractNumber, {
+    syncContractNumberToEditForm: true,
   })
 }
 
@@ -1581,14 +1610,6 @@ function toIsoDate(value: unknown) {
   return ''
 }
 
-function onLastVisitFromFilter(value: unknown) {
-  patchFilters({ lastVisitFrom: toIsoDate(value) })
-}
-
-function onLastVisitToFilter(value: unknown) {
-  patchFilters({ lastVisitTo: toIsoDate(value) })
-}
-
 function isoToDate(value?: string) {
   if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null
   const [yy, mm, dd] = value.split('-').map((v) => Number(v))
@@ -1596,21 +1617,39 @@ function isoToDate(value?: string) {
   return new Date(yy, mm - 1, dd)
 }
 
+/** Как VisitsView: VaDateInput range отдаёт `{ start, end }`, не массив — иначе фильтр очищался. */
 const visitRangeValue = computed(() => {
-  const from = isoToDate(filters.value.lastVisitFrom)
-  const to = isoToDate(filters.value.lastVisitTo)
-  if (!from || !to) return undefined
-  return [from, to] as [Date, Date]
+  const fromStr = filters.value.lastVisitFrom || ''
+  const toStr = filters.value.lastVisitTo || ''
+  const hasFrom = Boolean(fromStr)
+  const hasTo = Boolean(toStr)
+  if (!hasFrom && !hasTo) return undefined
+  return {
+    start: hasFrom ? isoToDate(fromStr) ?? undefined : undefined,
+    end: hasTo ? isoToDate(toStr) ?? undefined : undefined,
+  }
 })
 
 function onVisitRangeFilter(value: unknown) {
-  if (!Array.isArray(value) || value.length < 2) {
+  if (value == null || value === '' || value === false) {
     patchFilters({ lastVisitFrom: '', lastVisitTo: '' })
     return
   }
-  const from = toIsoDate(value[0])
-  const to = toIsoDate(value[1])
-  patchFilters({ lastVisitFrom: from, lastVisitTo: to })
+  if (Array.isArray(value)) {
+    const [a, b] = value
+    patchFilters({
+      lastVisitFrom: a != null && a !== '' ? toIsoDate(a) : '',
+      lastVisitTo: b != null && b !== '' ? toIsoDate(b) : '',
+    })
+    return
+  }
+  if (typeof value === 'object' && value !== null && ('start' in value || 'end' in value)) {
+    const r = value as { start?: Date | string | null; end?: Date | string | null }
+    patchFilters({
+      lastVisitFrom: r.start != null && r.start !== '' ? toIsoDate(r.start) : '',
+      lastVisitTo: r.end != null && r.end !== '' ? toIsoDate(r.end) : '',
+    })
+  }
 }
 
 const ageRangeValue = ref<[number, number]>([18, 99])
@@ -1845,7 +1884,7 @@ watch(
 </script>
 
 <template>
-  <div>
+  <div class="clients-view">
     <AppPageCard :title="t('clients.title')">
       <template #actions>
         <VaButton preset="secondary" :disabled="loading" icon="refresh" @click="clientsSource.reload">
@@ -1923,7 +1962,9 @@ watch(
               <VaDateInput
                 :model-value="visitRangeValue"
                 mode="range"
+                clearable
                 :label="t('clients.lastVisitRange')"
+                :placeholder="t('clients.lastVisitRangePlaceholder')"
                 class="cf-visit toolbar-select toolbar-range"
                 @update:model-value="onVisitRangeFilter"
               />
@@ -2121,13 +2162,13 @@ watch(
                 type="button"
                 role="menuitem"
                 class="clients-row-menu__item"
-                @click="runClientRowMenuAction(() => openEdit(clientsRowMenuRow!))"
+                @click="runRowMenuAction(clientsRowMenuRow!, (r) => openEdit(r))"
               >
                 <VaIcon :name="TableActionIcon.edit" size="18px" />
                 {{ t('clients.edit') }}
               </button>
             </li>
-            <li v-if="clientsRowMenuRow!.status !== 'BLOCKED'" role="none">
+            <li v-if="clientRowShowsGenerateContract(clientsRowMenuRow!)" role="none">
               <button
                 type="button"
                 role="menuitem"
@@ -2136,9 +2177,7 @@ watch(
                   contractGenerateLoadingId === clientsRowMenuRow!.id ||
                   statusActionLoadingId === clientsRowMenuRow!.id
                 "
-                @click="
-                  runClientRowMenuAction(() => void generateContractFromTableRow(clientsRowMenuRow!))
-                "
+                @click="runRowMenuAction(clientsRowMenuRow!, (r) => void generateContractFromTableRow(r))"
               >
                 <VaIcon
                   :name="TableActionIcon.generateContract"
@@ -2154,7 +2193,7 @@ watch(
                 role="menuitem"
                 class="clients-row-menu__item clients-row-menu__item--warning"
                 :disabled="statusActionLoadingId === clientsRowMenuRow!.id"
-                @click="runClientRowMenuAction(() => blockClient(clientsRowMenuRow!))"
+                @click="runRowMenuAction(clientsRowMenuRow!, (r) => blockClient(r))"
               >
                 <VaIcon :name="TableActionIcon.blockClient" size="18px" />
                 {{ t('clients.block') }}
@@ -2166,7 +2205,7 @@ watch(
                 role="menuitem"
                 class="clients-row-menu__item"
                 :disabled="statusActionLoadingId === clientsRowMenuRow!.id"
-                @click="runClientRowMenuAction(() => unblockClient(clientsRowMenuRow!))"
+                @click="runRowMenuAction(clientsRowMenuRow!, (r) => unblockClient(r))"
               >
                 <VaIcon :name="TableActionIcon.unblockClient" size="18px" />
                 {{ t('clients.unblock') }}
@@ -2177,7 +2216,7 @@ watch(
                 type="button"
                 role="menuitem"
                 class="clients-row-menu__item clients-row-menu__item--danger"
-                @click="runClientRowMenuAction(() => askDelete(clientsRowMenuRow!))"
+                @click="runRowMenuAction(clientsRowMenuRow!, (r) => askDelete(r))"
               >
                 <VaIcon :name="TableActionIcon.delete" size="18px" />
                 {{ t('clients.delete') }}
@@ -2189,10 +2228,12 @@ watch(
     </Teleport>
 
     <VaModal
+      class="clients-editor-modal"
       :model-value="createState.open.value"
       hide-default-actions
       fixed-layout
-      max-width="min(95vw, 900px)"
+      :mobile-fullscreen="false"
+      max-width="min(calc(100vw - 12px), 900px)"
       @update:model-value="(v) => (v ? (createState.open.value = true) : requestCloseCreate())"
     >
       <template #header />
@@ -2212,9 +2253,25 @@ watch(
             @photo-draft-changed="onCreatePhotoDraftChanged"
           />
         </AppSectionCard>
-        <div class="app-modal-actions">
-          <VaButton type="button" preset="secondary" :disabled="createState.loading.value" @click="requestCloseCreate">{{ t('common.cancel') }}</VaButton>
-          <VaButton type="submit" :loading="createState.loading.value">{{ t('users.save') }}</VaButton>
+        <div class="app-modal-actions clients-modal-actions">
+          <VaButton
+            type="button"
+            preset="secondary"
+            icon="close"
+            :aria-label="t('common.cancel')"
+            :disabled="createState.loading.value"
+            @click="requestCloseCreate"
+          >
+            <span class="clients-modal-action-label">{{ t('common.cancel') }}</span>
+          </VaButton>
+          <VaButton
+            type="submit"
+            icon="save"
+            :loading="createState.loading.value"
+            :aria-label="t('users.save')"
+          >
+            <span class="clients-modal-action-label">{{ t('users.save') }}</span>
+          </VaButton>
         </div>
         <div
           v-if="createModalErrorText"
@@ -2227,10 +2284,12 @@ watch(
     </VaModal>
 
     <VaModal
+      class="clients-editor-modal"
       :model-value="editState.open.value"
       hide-default-actions
       fixed-layout
-      max-width="min(95vw, 900px)"
+      :mobile-fullscreen="false"
+      max-width="min(calc(100vw - 12px), 900px)"
       @update:model-value="(v) => (v ? (editState.open.value = true) : requestCloseEdit())"
     >
       <template #header />
@@ -2277,19 +2336,36 @@ watch(
           />
           </div>
         </AppSectionCard>
-        <div class="app-modal-actions">
+        <div class="app-modal-actions clients-modal-actions">
           <VaButton
             type="button"
             preset="secondary"
             :icon="TableActionIcon.viewDocument"
+            :aria-label="t('clients.generateContract')"
             :disabled="editState.loading.value || !editingId || hasCurrentContractForEdit"
             :title="hasCurrentContractForEdit ? t('clients.activeContractAlreadyExists') : ''"
             @click="generateContractForEditingClient"
           >
-            {{ t('clients.generateContract') }}
+            <span class="clients-modal-action-label">{{ t('clients.generateContract') }}</span>
           </VaButton>
-          <VaButton type="button" preset="secondary" :disabled="editState.loading.value" @click="requestCloseEdit">{{ t('common.cancel') }}</VaButton>
-          <VaButton type="submit" :loading="editState.loading.value">{{ t('users.save') }}</VaButton>
+          <VaButton
+            type="button"
+            preset="secondary"
+            icon="close"
+            :aria-label="t('common.cancel')"
+            :disabled="editState.loading.value"
+            @click="requestCloseEdit"
+          >
+            <span class="clients-modal-action-label">{{ t('common.cancel') }}</span>
+          </VaButton>
+          <VaButton
+            type="submit"
+            icon="save"
+            :loading="editState.loading.value"
+            :aria-label="t('users.save')"
+          >
+            <span class="clients-modal-action-label">{{ t('users.save') }}</span>
+          </VaButton>
         </div>
         <div
           v-if="editModalErrorText"
@@ -2441,11 +2517,20 @@ watch(
 </template>
 
 <style scoped>
+.clients-view {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
 .clients-filter-bar {
   width: 100%;
   display: flex;
   flex-direction: column;
   gap: 0.45rem;
+  min-width: 0;
+  overflow: visible;
 }
 .clients-filters-grid {
   width: 100%;
@@ -2455,7 +2540,7 @@ watch(
     'search mship status ingym .'
     'gender age age visit reset';
   gap: 0.45rem 0.5rem;
-  align-items: end;
+  align-items: stretch;
 }
 .cf-search {
   grid-area: search;
@@ -2480,6 +2565,7 @@ watch(
 .cf-age {
   grid-area: age;
   min-width: 0;
+  width: 100%;
 }
 .cf-visit {
   grid-area: visit;
@@ -2487,8 +2573,8 @@ watch(
 }
 .cf-reset {
   grid-area: reset;
-  justify-self: end;
-  align-self: end;
+  justify-self: stretch;
+  align-self: stretch;
 }
 .clients-filters-grid .toolbar-select,
 .clients-filters-grid .toolbar-search {
@@ -2506,6 +2592,9 @@ watch(
   align-items: center;
   gap: 0.5rem 0.65rem;
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
   padding: 0.4rem 0 0.2rem;
   border-top: 1px solid color-mix(in srgb, var(--app-border) 86%, transparent);
   margin-top: 0.05rem;
@@ -2518,6 +2607,7 @@ watch(
 }
 .clients-filters-grid .toolbar-select {
   min-width: 0;
+  max-width: none;
 }
 .toolbar-date {
   flex-basis: 11.5rem;
@@ -2541,14 +2631,17 @@ watch(
   margin-bottom: 0.2rem;
 }
 .age-slider__label {
-  font-size: 0.72rem;
+  font-size: 0.8125rem;
+  letter-spacing: 0.02em;
+  line-height: 1.35;
   font-weight: 600;
   color: var(--app-muted);
 }
 .age-slider__value {
-  font-size: 0.76rem;
+  font-size: 0.8125rem;
   font-weight: 700;
-  color: color-mix(in srgb, var(--app-text) 82%, var(--app-muted));
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, var(--app-text) 88%, var(--app-muted));
 }
 .toolbar-range {
   min-width: 0;
@@ -2609,6 +2702,13 @@ watch(
 .clients-filter-bar :deep(.va-select),
 .clients-filter-bar :deep(.va-date-input) {
   background: transparent;
+  width: 100%;
+  max-width: none;
+}
+
+.clients-filter-bar :deep(.va-input-wrapper) {
+  width: 100%;
+  max-width: none;
 }
 .clients-filter-bar :deep(.va-button) {
   min-height: var(--app-control-height);
@@ -2720,6 +2820,46 @@ watch(
   white-space: nowrap;
   line-height: 1;
 }
+
+@media (max-width: 640px) {
+  .person-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.55rem;
+    margin: 0 0 0.45rem;
+    padding: 0 0 0.35rem;
+  }
+
+  .person-headline-wrap {
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .person-headline {
+    font-size: 1.02rem;
+    line-height: 1.28;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    hyphens: auto;
+  }
+
+  .person-status-wrap {
+    max-width: 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+  }
+
+  .person-status-note {
+    white-space: normal;
+    flex: 1 1 100%;
+    line-height: 1.3;
+  }
+
+  .app-modal-form--client-edit-scroll :deep(.section-card__header) {
+    margin-bottom: 0.4rem;
+  }
+}
 .modal-title {
   margin: 0 0 0.75rem;
   font-size: 1.04rem;
@@ -2794,7 +2934,9 @@ watch(
 
 .clients-table-scroll {
   width: 100%;
+  max-width: 100%;
   min-width: 0;
+  box-sizing: border-box;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
 }
@@ -2900,34 +3042,17 @@ watch(
   }
 }
 
-@media (max-width: 1200px) {
-  .clients-filters-grid {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    grid-template-areas:
-      'search search'
-      'mship status'
-      'ingym ingym'
-      'gender gender'
-      'age age'
-      'visit visit'
-      'reset reset';
-  }
+@media (min-width: 1201px) {
   .cf-reset {
-    justify-self: stretch;
-  }
-  .clients-filters-reset {
-    width: 100%;
-  }
-  .preset-strip--age,
-  .preset-strip--visit {
-    min-width: 100%;
-    flex-basis: 100%;
-    flex-wrap: wrap;
+    justify-self: end;
+    align-self: end;
   }
 }
-@media (max-width: 760px) {
+
+@media (max-width: 1200px) {
+  /* Одна колонка на планшетах и телефонах — иначе селекты с max-width ломают сетку. */
   .clients-filters-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
       'search'
       'mship'
@@ -2937,6 +3062,101 @@ watch(
       'age'
       'visit'
       'reset';
+    gap: 0.55rem 0;
+    align-items: stretch;
+  }
+
+  .cf-reset {
+    justify-self: stretch;
+    align-self: stretch;
+  }
+
+  .clients-filters-reset {
+    width: 100%;
+  }
+
+  .clients-presets-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .preset-strip--age,
+  .preset-strip--visit {
+    min-width: 100%;
+    flex-basis: 100%;
+    flex-wrap: wrap;
+    width: 100%;
+  }
+}
+
+@media (max-width: 760px) {
+  .clients-filter-bar {
+    gap: 0.55rem;
+    padding-bottom: 0.25rem;
+  }
+
+  .clients-filters-grid {
+    gap: 0.65rem 0;
+  }
+
+  /* Единый вид подписей с селектами (в т.ч. возраст). */
+  .clients-filter-bar :deep(.va-input-label) {
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .clients-filter-bar .age-slider__label {
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .clients-filter-bar .age-slider__value {
+    font-size: 0.875rem;
+    padding: 0.12rem 0.45rem;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--va-primary) 10%, var(--app-surface));
+    color: var(--va-primary);
+  }
+
+  .toolbar-age-slider {
+    padding: 0.45rem 0.55rem 0.55rem;
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--app-border) 35%, transparent);
+    min-height: auto;
+  }
+
+  .age-slider__head {
+    margin-bottom: 0.35rem;
+  }
+
+  .clients-filter-bar :deep(.va-slider__handler) {
+    width: 1.15rem !important;
+    height: 1.15rem !important;
+  }
+
+  .clients-filter-bar :deep(.va-slider__container) {
+    min-height: 1.65rem;
+  }
+
+  .cf-visit {
+    overflow: visible;
+  }
+
+  .clients-filter-bar :deep(.va-date-input) {
+    width: 100%;
+    max-width: none;
+  }
+
+  .clients-filter-bar :deep(.va-date-input .va-input-wrapper) {
+    overflow: visible;
+  }
+
+  .clients-presets-row {
+    padding-top: 0.55rem;
+    padding-bottom: 0.15rem;
+    gap: 0.55rem;
   }
 }
 </style>

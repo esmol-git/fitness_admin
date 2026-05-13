@@ -111,4 +111,26 @@ function onSelect(value: unknown) {
   justify-content: flex-start;
   text-align: left;
 }
+
+@media (max-width: 640px) {
+  .app-table-page-size {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.35rem;
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .app-table-page-size__label {
+    white-space: normal;
+    font-size: 0.8125rem;
+    line-height: 1.25;
+  }
+
+  .app-table-page-size__wrap {
+    flex: none;
+    width: 100%;
+    max-width: 100%;
+  }
+}
 </style>

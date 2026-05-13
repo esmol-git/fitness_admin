@@ -71,6 +71,15 @@ const scannerVisitStatus = ref<'IN_GYM' | 'OVERDUE' | 'LEFT' | 'FORCE_CLOSED' | 
 const scannerCurrentLocker = ref<string | null>(null)
 let timer: ReturnType<typeof setInterval> | null = null
 
+/** «Бургер» для выезда сайдбара на узком экране (см. AppSidebar). */
+const isMobileNav = ref(false)
+let navMq: MediaQueryList | null = null
+let navMqListener: ((e: MediaQueryListEvent) => void) | null = null
+
+const showMobileNavButton = computed(
+  () => !props.compact && Boolean(auth.user) && isMobileNav.value,
+)
+
 type ScannerHintTone = 'default' | 'notFound' | 'error' | 'searching' | 'callout'
 
 /** Visual emphasis for lookup result (not found / error). */
@@ -100,7 +109,7 @@ const scannerClientEntryNotAllowed = computed(
   () => Boolean(scannerClientCard.value && scannerClientCard.value.status !== 'ACTIVE'),
 )
 
-/** Незакрытая сессия визита (в зале или просрочена) — с check-in нельзя, нужен выход/force-close. */
+/** Незакрытая сессия визита: в зале — выход или принудительное закрытие; просрочена — только принудительное закрытие. */
 const scannerHasOpenVisit = computed(
   () => scannerVisitStatus.value === 'IN_GYM' || scannerVisitStatus.value === 'OVERDUE',
 )
@@ -288,7 +297,7 @@ async function scannerCheckOut() {
   }
 }
 
-async function scannerForceClose(reason: 'LOST_KEY' | 'FOUND_LATER' = 'LOST_KEY') {
+async function scannerForceClose(reason: 'LOST_KEY' | 'FOUND_LATER' | 'ADMIN_CORRECTION') {
   const code = scannerInputValue.value.trim()
   if (!code) return
   scannerLoading.value = true
@@ -323,11 +332,19 @@ onMounted(() => {
     now.value = new Date()
   }, 1000)
   window.addEventListener('keydown', onGlobalKeydown)
+  navMq = window.matchMedia('(max-width: 960px)')
+  isMobileNav.value = navMq.matches
+  navMqListener = (e: MediaQueryListEvent) => {
+    isMobileNav.value = e.matches
+    if (!e.matches) ui.closeMobileSidebar()
+  }
+  navMq.addEventListener('change', navMqListener)
 })
 
 onBeforeUnmount(() => {
   if (timer) clearInterval(timer)
   window.removeEventListener('keydown', onGlobalKeydown)
+  if (navMq && navMqListener) navMq.removeEventListener('change', navMqListener)
 })
 
 watch(scannerOpen, async (open, prevOpen) => {
@@ -371,6 +388,19 @@ const clockDate = computed(() => {
   return raw.replace(/[\s\u00a0]*г\.?[\s\u00a0]*$/iu, '').trim()
 })
 
+/** Короткая дата для узкого хедера (напр. 13.05.26). */
+const clockDateShort = computed(() =>
+  new Intl.DateTimeFormat(prefs.locale, {
+    day: '2-digit',
+    month: '2-digit',
+    year: '2-digit',
+  }).format(now.value),
+)
+
+const displayClockDate = computed(() =>
+  isMobileNav.value ? clockDateShort.value : clockDate.value,
+)
+
 const clockTime = computed(() =>
   new Intl.DateTimeFormat(prefs.locale, {
     hour: '2-digit',
@@ -383,9 +413,22 @@ const clockTime = computed(() =>
 
 <template>
   <div class="app-header-shell">
-    <VaNavbar class="app-header rounded-2xl">
+    <VaNavbar
+      class="app-header rounded-2xl"
+      :class="{ 'app-header--mobile-bar': isMobileNav && !props.compact }"
+    >
       <template #left>
         <div class="nav-left">
+          <VaButton
+            v-if="showMobileNavButton"
+            :icon="ui.mobileSidebarOpen ? 'close' : 'menu'"
+            preset="plain"
+            color="primary"
+            class="header-mobile-nav-btn"
+            :aria-label="ui.mobileSidebarOpen ? t('header.closeNav') : t('header.openNav')"
+            :aria-expanded="ui.mobileSidebarOpen ? 'true' : 'false'"
+            @click="ui.toggleMobileSidebar()"
+          />
           <RouterLink to="/" class="brand-link" :aria-label="t('header.logoAlt')">
             <img
               class="brand-logo"
@@ -399,22 +442,35 @@ const clockTime = computed(() =>
         </div>
       </template>
 
+      <template #center v-if="!props.compact">
+        <div class="header-clock-wrap">
+          <div class="header-clock" :class="{ 'header-clock--compact': isMobileNav }">
+            <span class="header-clock__date">{{ displayClockDate }}</span>
+            <template v-if="isMobileNav">
+              <span class="header-clock__time">{{ clockTime }}</span>
+            </template>
+            <template v-else>
+              <span class="header-clock__sep">, </span>
+              <span class="header-clock__time">{{ clockTime }}</span>
+            </template>
+          </div>
+        </div>
+      </template>
+
       <template #right>
         <div v-if="!props.compact" class="header-tools">
           <VaButton
-            size="small"
             icon="qr_code_scanner"
             preset="secondary"
+            color="primary"
             class="header-scan-btn"
+            :class="{ 'header-scan-btn--icon-only': isMobileNav }"
+            :size="isMobileNav ? 'medium' : 'small'"
+            :aria-label="t('header.scanClient')"
             @click="openScannerModal"
           >
-            {{ t('header.scanClient') }}
+            <span v-if="!isMobileNav">{{ t('header.scanClient') }}</span>
           </VaButton>
-          <div class="header-clock">
-            <span class="header-clock__date">{{ clockDate }}</span
-            ><span class="header-clock__sep">, </span
-            ><span class="header-clock__time">{{ clockTime }}</span>
-          </div>
         </div>
       </template>
     </VaNavbar>
@@ -659,27 +715,42 @@ const clockTime = computed(() =>
             </VaButton>
             <template v-if="scannerClientCard && scannerHasOpenVisit">
               <VaButton
+                v-if="scannerVisitStatus !== 'OVERDUE'"
                 type="button"
                 size="large"
                 color="warning"
                 icon="logout"
-                class="scanner-modal__action-split"
+                class="scanner-modal__action-span"
                 :loading="scannerLoading"
                 @click="scannerCheckOut"
               >
                 {{ t('header.scannerCheckOut') }}
               </VaButton>
-              <VaButton
-                type="button"
-                size="large"
-                color="danger"
-                icon="lock_reset"
-                class="scanner-modal__action-split"
-                :loading="scannerLoading"
-                @click="scannerForceClose('LOST_KEY')"
-              >
-                {{ t('header.scannerForceClose') }}
-              </VaButton>
+              <div class="scanner-modal__force-close-span">
+                <VaButton
+                  type="button"
+                  size="large"
+                  preset="secondary"
+                  color="primary"
+                  icon="vpn_key"
+                  class="scanner-modal__force-close-btn"
+                  :loading="scannerLoading"
+                  @click="scannerForceClose('ADMIN_CORRECTION')"
+                >
+                  {{ t('header.scannerForceCloseKeyReturned') }}
+                </VaButton>
+                <VaButton
+                  type="button"
+                  size="large"
+                  color="danger"
+                  icon="lock_reset"
+                  class="scanner-modal__force-close-btn"
+                  :loading="scannerLoading"
+                  @click="scannerForceClose('LOST_KEY')"
+                >
+                  {{ t('header.scannerForceCloseNoKey') }}
+                </VaButton>
+              </div>
             </template>
           </div>
           </div>
@@ -701,8 +772,34 @@ const clockTime = computed(() =>
   color: var(--app-text);
   box-shadow: var(--app-shadow-soft);
   border-radius: 16px;
-  --va-navbar-padding-y: 0.4rem;
+  --va-navbar-padding-y: 0.45rem;
+  --va-navbar-padding-x: 0.65rem;
   --va-navbar-height: auto;
+}
+
+@media (max-width: 960px) {
+  .app-header {
+    --va-navbar-padding-y: 0.5rem;
+    --va-navbar-padding-x: 0.55rem;
+  }
+
+  .nav-left {
+    gap: 0.55rem;
+  }
+
+  .brand-logo {
+    width: 3.15rem;
+    height: 3.15rem;
+  }
+}
+
+/** Мобильная «карточка» под макет: нижнее скругление чуть сильнее, лёгкая тень. */
+.app-header.app-header--mobile-bar {
+  border-radius: 14px 14px 22px 22px;
+  box-shadow:
+    0 1px 0 color-mix(in srgb, var(--app-border) 55%, transparent),
+    0 10px 32px rgba(15, 23, 42, 0.07),
+    0 4px 12px rgba(15, 23, 42, 0.04);
 }
 
 .nav-left {
@@ -710,6 +807,12 @@ const clockTime = computed(() =>
   align-items: center;
   gap: 0.9rem;
   min-width: 0;
+}
+
+.header-mobile-nav-btn {
+  flex-shrink: 0;
+  min-width: 2.75rem;
+  min-height: 2.75rem;
 }
 
 .brand-link {
@@ -735,13 +838,42 @@ const clockTime = computed(() =>
 .header-tools {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 0.5rem 0.75rem;
   justify-content: flex-end;
+  min-width: 0;
 }
 
 .header-scan-btn {
   --va-button-sm-height: 2rem;
+}
+
+.header-scan-btn--icon-only {
+  --va-button-md-height: 3rem;
+  --va-button-md-width: 3rem;
+  min-width: 3rem !important;
+  min-height: 3rem !important;
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+  border-radius: 14px !important;
+}
+
+.header-scan-btn--icon-only :deep(.va-button__content) {
+  gap: 0;
+}
+
+.header-scan-btn--icon-only :deep(.material-icons),
+.header-scan-btn--icon-only :deep(.va-icon) {
+  font-size: 1.75rem !important;
+  width: 1.75rem !important;
+  height: 1.75rem !important;
+}
+
+.header-clock-wrap {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  padding: 0 0.35rem;
 }
 
 .label {
@@ -754,10 +886,37 @@ const clockTime = computed(() =>
   font-size: 0.84rem;
   text-transform: capitalize;
   font-variant-numeric: tabular-nums;
+  text-align: center;
+  line-height: 1.25;
+  white-space: nowrap;
 }
 
 .header-clock__time {
   font-weight: 600;
+}
+
+.header-clock--compact {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.12rem;
+  text-transform: none;
+  font-size: 0.78rem;
+}
+
+.header-clock--compact .header-clock__date {
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  color: color-mix(in srgb, var(--app-muted) 88%, var(--app-text) 12%);
+}
+
+.header-clock--compact .header-clock__time {
+  font-weight: 800;
+  font-size: 1.08rem;
+  letter-spacing: 0.02em;
+  line-height: 1.15;
+  color: var(--app-text);
 }
 
 .scanner-modal {
@@ -1226,6 +1385,18 @@ const clockTime = computed(() =>
   gap: 0.5rem;
 }
 
+.scanner-modal__force-close-span {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.55rem;
+  width: 100%;
+}
+
+.scanner-modal__force-close-btn {
+  min-width: 0;
+}
+
 @media (max-width: 440px) {
   .scanner-modal__actions {
     grid-template-columns: 1fr;
@@ -1233,6 +1404,10 @@ const clockTime = computed(() =>
 
   .scanner-modal__action-split {
     grid-column: 1 / -1;
+  }
+
+  .scanner-modal__force-close-span {
+    grid-template-columns: 1fr;
   }
 }
 </style>

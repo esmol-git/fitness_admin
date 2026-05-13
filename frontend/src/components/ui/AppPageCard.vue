@@ -30,6 +30,10 @@ defineProps<{
   transition:
     box-shadow 0.2s ease,
     transform 0.2s ease;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .page-card:hover {
@@ -39,7 +43,11 @@ defineProps<{
 
 .page-card__content {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--app-page-gap);
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .page-card__header {
@@ -48,6 +56,13 @@ defineProps<{
   justify-content: space-between;
   gap: 1rem;
   flex-wrap: wrap;
+  min-width: 0;
+}
+
+.page-card__body {
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
 }
 
 .page-card__title {
@@ -69,8 +84,11 @@ defineProps<{
 
 .page-card__filters {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 0.5rem;
   flex-wrap: wrap;
+  width: 100%;
+  min-width: 0;
+  overflow: visible;
 }
 </style>

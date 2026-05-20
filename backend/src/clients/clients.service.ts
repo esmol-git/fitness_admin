@@ -23,6 +23,8 @@ const CLIENT_LIST_SELECT = {
   membershipType: true,
   contractStartDate: true,
   contractEndDate: true,
+  cardNumber: true,
+  accessKey: true,
   photoUrl: true,
 } satisfies Prisma.ClientSelect;
 

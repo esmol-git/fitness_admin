@@ -623,9 +623,10 @@ async function hydrateDraftFromClientApi(cid: string, contractNumberFromQuery?: 
     form.clubAddress = ''
     form.executorName = ''
     form.executorRepresentative = ''
-    const mid = row.membershipType != null ? String(row.membershipType) : ''
-    selectedMembershipId.value = mid
-    syncMembershipFields(mid)
+    const mid = row.membershipType != null ? String(row.membershipType).trim() : ''
+    selectedMembershipId.value =
+      mid && membershipOptions.value.some((item) => item.value === mid) ? mid : ''
+    syncMembershipFields(selectedMembershipId.value)
     if (row.paymentDate instanceof Date) {
       form.contractDate = row.paymentDate.toISOString().slice(0, 10)
     } else if (typeof row.paymentDate === 'string') {
@@ -681,8 +682,16 @@ function syncClientFields(selectedClientId: string) {
 }
 
 function syncMembershipFields(selectedId: string) {
-  const selected = membershipOptions.value.find((item) => item.value === selectedId)
+  const trimmed = selectedId.trim()
+  if (!trimmed) {
+    form.serviceName = ''
+    form.servicePrice = ''
+    form.serviceEndDate = ''
+    return
+  }
+  const selected = membershipOptions.value.find((item) => item.value === trimmed)
   if (!selected) {
+    if (selectedMembershipId.value === trimmed) selectedMembershipId.value = ''
     form.serviceName = ''
     form.servicePrice = ''
     form.serviceEndDate = ''
@@ -693,6 +702,19 @@ function syncMembershipFields(selectedId: string) {
   syncPaymentAmountFromServicePrice(true)
   syncServiceEndDateByMembership()
 }
+
+function sanitizeSelectedMembershipId() {
+  const id = selectedMembershipId.value.trim()
+  if (!id) {
+    selectedMembershipId.value = ''
+    return
+  }
+  if (!membershipOptions.value.some((item) => item.value === id)) {
+    selectedMembershipId.value = ''
+  }
+}
+
+const hasActiveMembershipOptions = computed(() => membershipOptions.value.length > 0)
 
 function parseRegistryStatusFromQuery(raw: string): string {
   if (!raw) return ''
@@ -823,6 +845,7 @@ watch(
       unmountContractPassportMask()
       return
     }
+    void loadMembershipOptions(true)
     await nextTick()
     contractBirthTextValue.value = toRuDateText(form.birthDate)
     await nextTick()
@@ -879,7 +902,10 @@ function openCreateContractModal() {
   resetClientOptionsSearchState()
   lastHydratedModalClientId = ''
   clientId.value = ''
+  selectedMembershipId.value = ''
+  syncMembershipFields('')
   void loadClientOptions('')
+  void loadMembershipOptions(true)
   applyDefaultContractDates()
   createContractModalOpen.value = true
 }
@@ -1033,20 +1059,29 @@ async function loadClientOptions(search = clientOptionsSearch.value) {
   }
 }
 
-async function loadMembershipOptions() {
+async function loadMembershipOptions(force = false) {
   loadingMemberships.value = true
   try {
-    membershipOptions.value = await fetchActiveMembershipCatalogOptions()
+    membershipOptions.value = await fetchActiveMembershipCatalogOptions(force)
+    sanitizeSelectedMembershipId()
     if (selectedMembershipId.value) {
       syncMembershipFields(selectedMembershipId.value)
     } else if (form.serviceName) {
       const matched = membershipOptions.value.find((item) => item.text === form.serviceName)
       if (matched) {
         selectedMembershipId.value = matched.value
+      } else {
+        form.serviceName = ''
+        form.servicePrice = ''
+        form.serviceEndDate = ''
       }
     }
   } catch {
     membershipOptions.value = []
+    sanitizeSelectedMembershipId()
+    form.serviceName = ''
+    form.servicePrice = ''
+    form.serviceEndDate = ''
   } finally {
     loadingMemberships.value = false
   }
@@ -2105,19 +2140,28 @@ void (async () => {
               :label="t('contracts.passportIssuedAt')"
               @update:model-value="form.passportIssuedAt = toIsoDate($event)"
             />
-            <VaSelect
-              :model-value="selectedMembershipId"
-              class="contracts-form-grid__full contracts-form-section-start"
-              :label="t('contracts.serviceName')"
-              :options="membershipOptions"
-              :loading="loadingMemberships"
-              :disabled="loadingMemberships"
-              text-by="text"
-              value-by="value"
-              searchable
-              clearable
-              @update:model-value="(value) => (selectedMembershipId = typeof value === 'string' ? value : '')"
-            />
+            <div class="contracts-form-service-section">
+              <p
+                v-if="!loadingMemberships && !hasActiveMembershipOptions"
+                class="contracts-form-service-section__notice"
+              >
+                {{ t('contracts.noActiveMemberships') }}
+              </p>
+              <VaSelect
+                :model-value="selectedMembershipId"
+                class="contracts-form-service-section__select"
+                :label="t('contracts.serviceName')"
+                :options="membershipOptions"
+                :loading="loadingMemberships"
+                :disabled="loadingMemberships || !hasActiveMembershipOptions"
+                :placeholder="t('contracts.serviceSelectPlaceholder')"
+                text-by="text"
+                value-by="value"
+                searchable
+                clearable
+                @update:model-value="(value) => (selectedMembershipId = typeof value === 'string' ? value : '')"
+              />
+            </div>
 
             <div class="contracts-form-bottom contracts-form-grid__full">
               <div class="contracts-form-block">
@@ -2610,6 +2654,33 @@ void (async () => {
   margin-top: 0.15rem;
   padding-top: 0.85rem;
   border-top: 1px solid color-mix(in srgb, var(--app-border) 88%, transparent);
+}
+
+.contracts-form-service-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.contracts-form-service-section__notice {
+  margin: 0;
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--va-warning) 24%, var(--app-border));
+  background: color-mix(in srgb, var(--va-warning) 7%, var(--app-surface));
+  color: color-mix(in srgb, var(--app-text) 78%, var(--va-warning));
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.contracts-form-service-section__select {
+  width: 100%;
+}
+
+.contracts-form-service-section :deep(.va-select--disabled .va-select__anchor) {
+  opacity: 1;
+  background: color-mix(in srgb, var(--app-text) 3%, var(--app-surface));
 }
 
 .contracts-form-bottom {

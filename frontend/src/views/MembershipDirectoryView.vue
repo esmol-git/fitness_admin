@@ -9,6 +9,7 @@ import ConfirmModal from '@/components/ui/ConfirmModal.vue'
 import { resolveApiErrorMessage } from '@/composables/useApiErrorMap'
 import { invalidateActiveMembershipCatalogCache } from '@/composables/membershipCatalogCache'
 import { api } from '@/utils/api'
+import type { TableHeaderConfig } from '@/types/table'
 
 type MembershipItem = {
   id: string
@@ -26,6 +27,7 @@ const { init: notify } = useToast()
 const loading = ref(false)
 const saving = ref(false)
 const deleting = ref(false)
+const togglingId = ref<string | null>(null)
 const error = ref<string | null>(null)
 const items = ref<MembershipItem[]>([])
 const open = ref(false)
@@ -103,6 +105,22 @@ const durationSummary = computed(() => {
   })
 })
 
+const tableBusy = computed(() => loading.value || saving.value || deleting.value || togglingId.value !== null)
+
+const tableColumns = computed<TableHeaderConfig[]>(() => [
+  { key: 'name', label: t('directories.memberships.fields.name') },
+  { key: 'isActive', label: t('directories.memberships.fields.isActive') },
+  { key: 'price', label: t('directories.memberships.fields.price') },
+  { key: 'term', label: t('directories.memberships.fields.term') },
+  {
+    key: 'actions',
+    label: t('clients.actions'),
+    width: '10rem',
+    thAlign: 'right',
+    tdAlign: 'right',
+  },
+])
+
 async function loadItems() {
   loading.value = true
   error.value = null
@@ -125,6 +143,7 @@ function openCreate() {
 }
 
 function openEdit(item: MembershipItem) {
+  if (tableBusy.value) return
   editingId.value = item.id
   const unit = item.durationUnit || 'MONTH'
   form.value = {
@@ -148,8 +167,50 @@ function onDurationUnitChange(v: unknown) {
 }
 
 function askDelete(item: MembershipItem) {
+  if (tableBusy.value) return
   deletingItem.value = item
   deleteOpen.value = true
+}
+
+type MembershipTableRowClickPayload = {
+  event: Event
+  item: Record<string, unknown>
+  itemIndex: number
+}
+
+function handleTableRowClick(payload: MembershipTableRowClickPayload) {
+  if (tableBusy.value) return
+  const target = payload.event.target
+  if (!(target instanceof Element)) return
+  if (target.closest('.app-actions-cell')) return
+  openEdit(payload.item as MembershipItem)
+}
+
+async function toggleActive(item: MembershipItem) {
+  if (tableBusy.value) return
+  const nextActive = item.isActive === false
+  togglingId.value = item.id
+  try {
+    await api.patch(`/membership-catalog/${item.id}`, { isActive: nextActive })
+    invalidateActiveMembershipCatalogCache()
+    const row = items.value.find((entry) => entry.id === item.id)
+    if (row) row.isActive = nextActive
+    notify({
+      color: 'success',
+      message: nextActive
+        ? t('directories.memberships.activated')
+        : t('directories.memberships.deactivated'),
+    })
+  } catch (e: unknown) {
+    notify({
+      color: 'danger',
+      message: resolveApiErrorMessage(e, {
+        defaultMessage: t('directories.memberships.saveFailed'),
+      }),
+    })
+  } finally {
+    togglingId.value = null
+  }
 }
 
 async function save() {
@@ -261,14 +322,15 @@ void loadItems()
 
     <VaAlert v-if="error" color="danger" outline>{{ error }}</VaAlert>
 
-    <VaDataTable class="app-table-actions-last-col" :items="items" :columns="[
-      { key: 'name', label: t('directories.memberships.fields.name') },
-      { key: 'isActive', label: t('directories.memberships.fields.isActive') },
-      { key: 'price', label: t('directories.memberships.fields.price') },
-      { key: 'term', label: t('directories.memberships.fields.term') },
-      { key: 'description', label: t('directories.memberships.fields.description') },
-      { key: 'actions', label: t('clients.actions') },
-    ]" :loading="loading">
+    <VaDataTable
+      class="membership-directory-table app-table-actions-last-col"
+      clickable
+      hoverable
+      :items="items"
+      :columns="tableColumns"
+      :loading="loading"
+      @row:click="handleTableRowClick"
+    >
       <template #cell(isActive)="{ rowData }">
         <StatusBadge
           :label="rowData.isActive !== false ? t('directories.memberships.activeYes') : t('directories.memberships.activeNo')"
@@ -281,17 +343,30 @@ void loadItems()
       <template #cell(term)="{ rowData }">
         {{ formatTerm(rowData) }}
       </template>
-      <template #cell(description)="{ rowData }">
-        {{ rowData.description || '—' }}
-      </template>
       <template #cell(actions)="{ rowData }">
-        <div class="app-actions-cell">
+        <div class="app-actions-cell" @click.stop>
+          <button
+            type="button"
+            role="switch"
+            class="membership-row-switch"
+            :class="{ 'membership-row-switch--on': rowData.isActive !== false }"
+            :aria-checked="rowData.isActive !== false"
+            :aria-label="rowData.isActive !== false ? t('directories.memberships.deactivateAction') : t('directories.memberships.activateAction')"
+            :title="rowData.isActive !== false ? t('directories.memberships.deactivateAction') : t('directories.memberships.activateAction')"
+            :disabled="tableBusy"
+            @click="toggleActive(rowData)"
+          >
+            <span class="membership-row-switch__track" aria-hidden="true">
+              <span class="membership-row-switch__thumb" />
+            </span>
+          </button>
           <VaButton
             size="large"
             preset="plain"
             :icon="TableActionIcon.edit"
             :aria-label="t('clients.edit')"
             :title="t('clients.edit')"
+            :disabled="tableBusy"
             @click="openEdit(rowData)"
           />
           <VaButton
@@ -301,6 +376,7 @@ void loadItems()
             :icon="TableActionIcon.delete"
             :aria-label="t('clients.delete')"
             :title="t('clients.delete')"
+            :disabled="tableBusy"
             @click="askDelete(rowData)"
           />
         </div>
@@ -462,6 +538,72 @@ void loadItems()
 </template>
 
 <style scoped>
+.membership-directory-table :deep(tbody tr) {
+  cursor: pointer;
+}
+
+.membership-row-switch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 2.35rem;
+  height: var(--app-action-icon-size);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.membership-row-switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.membership-row-switch__track {
+  position: relative;
+  display: block;
+  width: 2.1rem;
+  height: 1.2rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-muted) 42%, var(--app-border));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--app-border) 88%, transparent);
+  transition:
+    background-color 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+.membership-row-switch--on .membership-row-switch__track {
+  background: linear-gradient(
+    165deg,
+    color-mix(in srgb, var(--app-accent) 88%, white 12%) 0%,
+    color-mix(in srgb, var(--app-accent) 74%, black 26%) 100%
+  );
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--app-accent) 35%, transparent);
+}
+
+.membership-row-switch__thumb {
+  position: absolute;
+  top: 0.12rem;
+  left: 0.12rem;
+  width: 0.96rem;
+  height: 0.96rem;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--app-text) 18%, transparent);
+  transition: transform 0.18s ease;
+}
+
+.membership-row-switch--on .membership-row-switch__thumb {
+  transform: translateX(0.9rem);
+}
+
+.membership-row-switch:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--app-accent) 55%, transparent);
+  outline-offset: 2px;
+  border-radius: 999px;
+}
+
 .membership-editor {
   display: flex;
   flex-direction: column;

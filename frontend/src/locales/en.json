@@ -103,6 +103,10 @@
       "deleteMessage": "Delete membership \"{name}\"?",
       "created": "Membership created",
       "updated": "Membership updated",
+      "activated": "Membership enabled",
+      "deactivated": "Membership disabled",
+      "activateAction": "Enable",
+      "deactivateAction": "Disable",
       "deleted": "Membership deleted",
       "loadFailed": "Failed to load membership directory",
       "saveFailed": "Failed to save membership",
@@ -264,6 +268,12 @@
     "emptyTitle": "No employees found",
     "emptyDesc": "Adjust filters or add your first employee.",
     "formHint": "Fill in the main employee data.",
+    "editFormHint": "Update account details for {login}.",
+    "sections": {
+      "personal": "Personal details",
+      "account": "Account"
+    },
+    "passwordSectionHint": "Leave password fields empty to keep the current password.",
     "validation": {
       "loginRequired": "Login is required",
       "loginInvalid": "3–64 characters: letters, digits, dot, underscore, hyphen",
@@ -604,6 +614,8 @@
     "passportIssuedBy": "Passport issued by",
     "passportIssuedAt": "Passport issue date",
     "serviceName": "Service",
+    "serviceSelectPlaceholder": "Select a service",
+    "noActiveMemberships": "There are no active memberships in the catalog. Add or enable a membership in the Membership directory.",
     "servicePrice": "Service price",
     "paymentPlan": "Payment",
     "paymentAmount": "Payment amount",

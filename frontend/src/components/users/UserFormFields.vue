@@ -31,8 +31,10 @@ const props = withDefaults(
     showFieldError: (field: keyof UserForm) => boolean
     fieldErrorMessage: (field: keyof UserForm) => string
     immediateValidation?: boolean
+    /** Подсказка под блоком пароля (редактирование — необязательный пароль). */
+    passwordHint?: string
   }>(),
-  { immediateValidation: false },
+  { immediateValidation: false, passwordHint: '' },
 )
 
 const emit = defineEmits<{
@@ -221,149 +223,114 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="user-form-stack">
-    <div class="user-form-stack__row">
-      <VaInput
-        :model-value="modelValue.firstName"
-        :label="$t('users.firstName')"
-        :immediate-validation="props.immediateValidation"
-        :error="props.showFieldError('firstName')"
-        :error-messages="props.fieldErrorMessage('firstName') ? [props.fieldErrorMessage('firstName')] : []"
-        @update:model-value="patch('firstName', $event)"
-      />
-      <VaInput
-        :model-value="modelValue.lastName"
-        :label="$t('users.lastName')"
-        :immediate-validation="props.immediateValidation"
-        :error="props.showFieldError('lastName')"
-        :error-messages="props.fieldErrorMessage('lastName') ? [props.fieldErrorMessage('lastName')] : []"
-        @update:model-value="patch('lastName', $event)"
-      />
-    </div>
-
-    <div class="user-form-stack__row user-form-stack__row--single">
-      <div ref="birthFieldWrapRef" class="custom-date-field">
+  <div class="user-form">
+    <section class="user-form-card">
+      <header class="user-form-card__head">
+        <span class="user-form-card__label">{{ $t('users.sections.personal') }}</span>
+      </header>
+      <div class="user-form-card__grid user-form-card__grid--2">
         <VaInput
-          ref="birthTextFieldRef"
-          :model-value="birthTextValue"
-          :label="$t('users.birthDate')"
-          :placeholder="$t('users.birthDatePlaceholder')"
-          inputmode="numeric"
-          :class="{ 'date-input--invalid': birthInputError }"
-          :error="birthInputError"
-          :error-messages="birthInputErrorMessages"
-          @focus="mountBirthMask"
-          @update:model-value="onBirthTextInput(typeof $event === 'string' ? $event : String($event ?? ''))"
-          @blur="onBirthTextBlur"
-        >
-          <template #appendInner>
-            <VaButton
-              v-if="birthTextValue"
-              type="button"
-              preset="plain"
-              icon="close"
-              size="small"
-              class="date-clear-btn"
-              @click.stop="clearBirthDate"
-            />
-            <VaButton
-              type="button"
-              preset="plain"
-              icon="date_range"
-              size="medium"
-              class="date-trigger-btn"
-              @click.stop="birthPickerOpen = !birthPickerOpen"
-            />
-          </template>
-        </VaInput>
-        <div v-if="birthPickerOpen" class="date-picker-popup">
-          <VaDatePicker
-            :model-value="toDateValue(modelValue.birthDate)"
-            :month-names="birthPickerMonthNames"
-            :weekday-names="birthPickerWeekdayNames"
-            first-weekday="monday"
-            @update:model-value="onBirthDatePickerSelect"
-          />
-        </div>
+          :model-value="modelValue.firstName"
+          :label="$t('users.firstName')"
+          :immediate-validation="props.immediateValidation"
+          :error="props.showFieldError('firstName')"
+          :error-messages="props.fieldErrorMessage('firstName') ? [props.fieldErrorMessage('firstName')] : []"
+          @update:model-value="patch('firstName', $event)"
+        />
+        <VaInput
+          :model-value="modelValue.lastName"
+          :label="$t('users.lastName')"
+          :immediate-validation="props.immediateValidation"
+          :error="props.showFieldError('lastName')"
+          :error-messages="props.fieldErrorMessage('lastName') ? [props.fieldErrorMessage('lastName')] : []"
+          @update:model-value="patch('lastName', $event)"
+        />
       </div>
-    </div>
+      <div class="user-form-card__grid user-form-card__grid--2">
+        <div ref="birthFieldWrapRef" class="custom-date-field">
+          <VaInput
+            ref="birthTextFieldRef"
+            :model-value="birthTextValue"
+            :label="$t('users.birthDate')"
+            :placeholder="$t('users.birthDatePlaceholder')"
+            inputmode="numeric"
+            :class="{ 'date-input--invalid': birthInputError }"
+            :error="birthInputError"
+            :error-messages="birthInputErrorMessages"
+            @focus="mountBirthMask"
+            @update:model-value="onBirthTextInput(typeof $event === 'string' ? $event : String($event ?? ''))"
+            @blur="onBirthTextBlur"
+          >
+            <template #appendInner>
+              <VaButton
+                v-if="birthTextValue"
+                type="button"
+                preset="plain"
+                icon="close"
+                size="small"
+                class="date-clear-btn"
+                @click.stop="clearBirthDate"
+              />
+              <VaButton
+                type="button"
+                preset="plain"
+                icon="date_range"
+                size="medium"
+                class="date-trigger-btn"
+                @click.stop="birthPickerOpen = !birthPickerOpen"
+              />
+            </template>
+          </VaInput>
+          <div v-if="birthPickerOpen" class="date-picker-popup">
+            <VaDatePicker
+              :model-value="toDateValue(modelValue.birthDate)"
+              :month-names="birthPickerMonthNames"
+              :weekday-names="birthPickerWeekdayNames"
+              first-weekday="monday"
+              @update:model-value="onBirthDatePickerSelect"
+            />
+          </div>
+        </div>
+        <VaInput
+          ref="phoneFieldRef"
+          :model-value="modelValue.phone"
+          :label="$t('users.phone')"
+          :placeholder="$t('clients.phonePlaceholder')"
+          :immediate-validation="props.immediateValidation"
+          :error="props.showFieldError('phone')"
+          :error-messages="props.fieldErrorMessage('phone') ? [props.fieldErrorMessage('phone')] : []"
+          @update:model-value="patch('phone', $event)"
+        />
+      </div>
+    </section>
 
-    <div class="user-form-stack__row">
-      <VaInput
-        :model-value="modelValue.login"
-        :label="$t('users.login')"
-        autocomplete="username"
-        :immediate-validation="props.immediateValidation"
-        :error="props.showFieldError('login')"
-        :error-messages="props.fieldErrorMessage('login') ? [props.fieldErrorMessage('login')] : []"
-        @update:model-value="patch('login', $event)"
-      />
-      <VaInput
-        :model-value="modelValue.email"
-        :label="$t('users.email')"
-        type="email"
-        :immediate-validation="props.immediateValidation"
-        :error="props.showFieldError('email')"
-        :error-messages="props.fieldErrorMessage('email') ? [props.fieldErrorMessage('email')] : []"
-        @update:model-value="patch('email', $event)"
-      />
-    </div>
-
-    <div class="user-form-stack__row">
-      <VaInput
-        class="user-form-password"
-        :model-value="modelValue.password"
-        :label="passwordLabel"
-        :type="showPassword ? 'text' : 'password'"
-        autocomplete="new-password"
-        :immediate-validation="props.immediateValidation"
-        :error="props.showFieldError('password')"
-        :error-messages="props.fieldErrorMessage('password') ? [props.fieldErrorMessage('password')] : []"
-        @update:model-value="patch('password', $event)"
-      >
-        <template #appendInner>
-          <VaButton
-            type="button"
-            preset="plain"
-            size="small"
-            class="user-form-password__toggle"
-            :icon="showPassword ? 'visibility_off' : 'visibility'"
-            :title="showPassword ? $t('users.hidePassword') : $t('users.showPassword')"
-            :aria-label="showPassword ? $t('users.hidePassword') : $t('users.showPassword')"
-            @click.stop="showPassword = !showPassword"
-          />
-        </template>
-      </VaInput>
-      <VaInput
-        class="user-form-password"
-        :model-value="modelValue.passwordConfirm"
-        :label="$t('users.passwordConfirm')"
-        :type="showPasswordConfirm ? 'text' : 'password'"
-        autocomplete="new-password"
-        :immediate-validation="props.immediateValidation"
-        :error="props.showFieldError('passwordConfirm')"
-        :error-messages="
-          props.fieldErrorMessage('passwordConfirm') ? [props.fieldErrorMessage('passwordConfirm')] : []
-        "
-        @update:model-value="patch('passwordConfirm', $event)"
-      >
-        <template #appendInner>
-          <VaButton
-            type="button"
-            preset="plain"
-            size="small"
-            class="user-form-password__toggle"
-            :icon="showPasswordConfirm ? 'visibility_off' : 'visibility'"
-            :title="showPasswordConfirm ? $t('users.hidePassword') : $t('users.showPassword')"
-            :aria-label="showPasswordConfirm ? $t('users.hidePassword') : $t('users.showPassword')"
-            @click.stop="showPasswordConfirm = !showPasswordConfirm"
-          />
-        </template>
-      </VaInput>
-    </div>
-
-    <div v-if="canAssignRole" class="user-form-stack__row user-form-stack__row--single">
+    <section class="user-form-card">
+      <header class="user-form-card__head">
+        <span class="user-form-card__label">{{ $t('users.sections.account') }}</span>
+      </header>
+      <div class="user-form-card__grid user-form-card__grid--2">
+        <VaInput
+          :model-value="modelValue.login"
+          :label="$t('users.login')"
+          autocomplete="username"
+          :immediate-validation="props.immediateValidation"
+          :error="props.showFieldError('login')"
+          :error-messages="props.fieldErrorMessage('login') ? [props.fieldErrorMessage('login')] : []"
+          @update:model-value="patch('login', $event)"
+        />
+        <VaInput
+          :model-value="modelValue.email"
+          :label="$t('users.email')"
+          type="email"
+          autocomplete="email"
+          :immediate-validation="props.immediateValidation"
+          :error="props.showFieldError('email')"
+          :error-messages="props.fieldErrorMessage('email') ? [props.fieldErrorMessage('email')] : []"
+          @update:model-value="patch('email', $event)"
+        />
+      </div>
       <VaSelect
+        v-if="canAssignRole"
         :model-value="modelValue.role"
         :label="$t('users.role')"
         :options="[...roleOptions]"
@@ -374,76 +341,135 @@ onBeforeUnmount(() => {
         :error-messages="props.fieldErrorMessage('role') ? [props.fieldErrorMessage('role')] : []"
         @update:model-value="patch('role', $event)"
       />
-    </div>
-
-    <div class="user-form-stack__row user-form-stack__row--single">
-      <VaInput
-        ref="phoneFieldRef"
-        :model-value="modelValue.phone"
-        :label="$t('users.phone')"
-        :placeholder="$t('clients.phonePlaceholder')"
-        :immediate-validation="props.immediateValidation"
-        :error="props.showFieldError('phone')"
-        :error-messages="props.fieldErrorMessage('phone') ? [props.fieldErrorMessage('phone')] : []"
-        @update:model-value="patch('phone', $event)"
-      />
-    </div>
+      <p v-if="passwordHint" class="user-form-card__hint">{{ passwordHint }}</p>
+      <div class="user-form-card__grid user-form-card__grid--2">
+        <VaInput
+          class="user-form-password"
+          :model-value="modelValue.password"
+          :label="passwordLabel"
+          :type="showPassword ? 'text' : 'password'"
+          autocomplete="new-password"
+          :immediate-validation="props.immediateValidation"
+          :error="props.showFieldError('password')"
+          :error-messages="props.fieldErrorMessage('password') ? [props.fieldErrorMessage('password')] : []"
+          @update:model-value="patch('password', $event)"
+        >
+          <template #appendInner>
+            <VaButton
+              type="button"
+              preset="plain"
+              size="small"
+              class="user-form-password__toggle"
+              :icon="showPassword ? 'visibility_off' : 'visibility'"
+              :title="showPassword ? $t('users.hidePassword') : $t('users.showPassword')"
+              :aria-label="showPassword ? $t('users.hidePassword') : $t('users.showPassword')"
+              @click.stop="showPassword = !showPassword"
+            />
+          </template>
+        </VaInput>
+        <VaInput
+          class="user-form-password"
+          :model-value="modelValue.passwordConfirm"
+          :label="$t('users.passwordConfirm')"
+          :type="showPasswordConfirm ? 'text' : 'password'"
+          autocomplete="new-password"
+          :immediate-validation="props.immediateValidation"
+          :error="props.showFieldError('passwordConfirm')"
+          :error-messages="
+            props.fieldErrorMessage('passwordConfirm') ? [props.fieldErrorMessage('passwordConfirm')] : []
+          "
+          @update:model-value="patch('passwordConfirm', $event)"
+        >
+          <template #appendInner>
+            <VaButton
+              type="button"
+              preset="plain"
+              size="small"
+              class="user-form-password__toggle"
+              :icon="showPasswordConfirm ? 'visibility_off' : 'visibility'"
+              :title="showPasswordConfirm ? $t('users.hidePassword') : $t('users.showPassword')"
+              :aria-label="showPasswordConfirm ? $t('users.hidePassword') : $t('users.showPassword')"
+              @click.stop="showPasswordConfirm = !showPasswordConfirm"
+            />
+          </template>
+        </VaInput>
+      </div>
+    </section>
   </div>
 </template>
 
 <style scoped>
-.user-form-stack {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-  align-items: stretch;
+.user-form {
+  display: grid;
+  gap: 0.75rem;
   min-width: 0;
 }
 
-.user-form-stack__row {
+.user-form-card {
   display: grid;
+  gap: 0.7rem;
+  padding: 0.8rem 0.85rem;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--app-border) 84%, transparent);
+  background: color-mix(in srgb, var(--app-surface) 98%, white 2%);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--app-text) 4%, transparent);
+}
+
+.user-form-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.user-form-card__label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--app-muted);
+}
+
+.user-form-card__hint {
+  margin: -0.15rem 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  color: var(--app-muted);
+}
+
+.user-form-card__grid {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.user-form-card__grid--2 {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 0.75rem 1rem;
-  align-items: start;
 }
 
-.user-form-stack__row--single {
-  grid-template-columns: minmax(0, 1fr);
-}
-
-.user-form-stack__row :deep(.va-input-wrapper),
-.user-form-stack__row :deep(.va-select),
-.user-form-stack__row :deep(.va-date-input) {
+.user-form-card :deep(.va-input-wrapper),
+.user-form-card :deep(.va-select),
+.user-form-card :deep(.va-date-input) {
   min-width: 0;
   max-width: 100%;
 }
 
-.user-form-stack__row :deep(.va-input-wrapper__container),
-.user-form-stack__row :deep(.va-input-wrapper__field),
-.user-form-stack__row :deep(.va-select__anchor) {
+.user-form-card :deep(.va-input-wrapper__container),
+.user-form-card :deep(.va-input-wrapper__field),
+.user-form-card :deep(.va-select__anchor) {
   min-height: 2.85rem;
 }
 
-.user-form-stack__row :deep(.va-input-wrapper__messages) {
+.user-form-card :deep(.va-input-wrapper__messages) {
   min-height: 1.2rem;
   margin-top: 0.2rem;
 }
 
-.user-form-stack__row :deep(.va-message-list__list) {
+.user-form-card :deep(.va-message-list__list) {
   min-height: 1.2rem;
 }
 
-.user-form-stack__row :deep(.va-message-list__item) {
-  line-height: 1.2;
-}
-
-/* Ошибка: красная обводка и при фокусе (перекрывает синее кольцо Vuestic) */
-.user-form-stack :deep(.va-input-wrapper--error .va-input-wrapper__field) {
-  border-color: var(--va-danger) !important;
-  box-shadow: inset 0 0 0 1px var(--va-danger) !important;
-}
-
-.user-form-stack :deep(.va-input-wrapper--error.va-input-wrapper--focused .va-input-wrapper__field) {
+.user-form-card :deep(.va-input-wrapper--error .va-input-wrapper__field),
+.user-form-card :deep(.va-input-wrapper--error.va-input-wrapper--focused .va-input-wrapper__field) {
   border-color: var(--va-danger) !important;
   box-shadow: inset 0 0 0 1px var(--va-danger) !important;
 }
@@ -461,11 +487,7 @@ onBeforeUnmount(() => {
   width: 100%;
 }
 
-.custom-date-field :deep(.date-input--invalid .va-input-wrapper__field) {
-  border-color: var(--va-danger) !important;
-  box-shadow: inset 0 0 0 1px var(--va-danger) !important;
-}
-
+.custom-date-field :deep(.date-input--invalid .va-input-wrapper__field),
 .custom-date-field :deep(.date-input--invalid .va-input-wrapper--focused .va-input-wrapper__field) {
   border-color: var(--va-danger) !important;
   box-shadow: inset 0 0 0 1px var(--va-danger) !important;
@@ -486,12 +508,8 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
-.date-picker-popup :deep(.va-date-picker__month-year) {
-  font-size: 0.92rem;
-}
-
 @media (max-width: 520px) {
-  .user-form-stack__row:not(.user-form-stack__row--single) {
+  .user-form-card__grid--2 {
     grid-template-columns: 1fr;
   }
 }

@@ -93,6 +93,16 @@
   padding: 0;
 }
 
+.user-editor-modal-shell .va-modal__inner {
+  overflow: visible;
+}
+
+.user-editor-modal-shell .va-modal__inner > .va-modal__message {
+  overflow: visible;
+  margin-bottom: 0;
+  padding: 0;
+}
+
 .scanner-modal-shell .va-modal__inner {
   overflow: visible;
 }

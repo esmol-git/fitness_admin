@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { TableActionIcon } from '@/config/tableActionIcons'
 import { createUsersTableColumns } from '@/config/usersTable'
+import StatusBadge from '@/components/ui/StatusBadge.vue'
 import type { UserRow, UserRole } from '@/types/users'
 import type { TableHeaderConfig, TableSortOrder } from '@/types/table'
 
@@ -51,6 +52,13 @@ function roleLabel(t: (key: string) => string, role: UserRole) {
   return t(`users.roles.${role}`)
 }
 
+function roleTone(role: UserRole): 'success' | 'warning' | 'info' | 'neutral' {
+  if (role === 'ADMIN') return 'success'
+  if (role === 'MANAGER') return 'info'
+  if (role === 'RECEPTIONIST') return 'warning'
+  return 'neutral'
+}
+
 function formatFullName(row: UserRow) {
   const parts = [row.firstName, row.lastName]
     .filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
@@ -80,11 +88,27 @@ function handleSortOrderUpdate(value: unknown) {
     emit('sortOrder', (value ?? null) as TableSortOrder)
   }
 }
+
+type UsersTableRowClickPayload = {
+  event: Event
+  item: Record<string, unknown>
+  itemIndex: number
+}
+
+function handleRowClick(payload: UsersTableRowClickPayload) {
+  if (props.busy || props.loading) return
+  const target = payload.event.target
+  if (!(target instanceof Element)) return
+  if (target.closest('.app-actions-cell')) return
+  emit('edit', payload.item as UserRow)
+}
 </script>
 
 <template>
   <VaDataTable
-    class="app-table-actions-last-col"
+    class="users-data-table app-table-actions-last-col"
+    clickable
+    hoverable
     :items="items"
     :columns="headerConfig"
     :loading="loading"
@@ -93,27 +117,33 @@ function handleSortOrderUpdate(value: unknown) {
     :sorting-order="props.sortOrder ?? undefined"
     @update:sort-by="handleSortByUpdate"
     @update:sorting-order="handleSortOrderUpdate"
+    @row:click="handleRowClick"
   >
     <template #cell(rowNum)="{ rowIndex }">
       {{ displayRowNumber(rowIndex) }}
     </template>
     <template #cell(fullName)="{ rowData }">
-      {{ formatFullName(rowData) }}
+      <span class="users-table__name">{{ formatFullName(rowData) }}</span>
     </template>
     <template #cell(login)="{ rowData }">
-      {{ rowData.login }}
+      <span class="users-table__login">{{ rowData.login || '—' }}</span>
     </template>
     <template #cell(email)="{ rowData }">
-      {{ rowData.email ?? '—' }}
+      <span class="users-table__email">{{ rowData.email?.trim() || '—' }}</span>
     </template>
     <template #cell(role)="{ rowData }">
-      {{ roleLabel($t, rowData.role) }}
+      <StatusBadge
+        v-if="rowData.role"
+        :label="roleLabel($t, rowData.role)"
+        :tone="roleTone(rowData.role)"
+      />
+      <span v-else>—</span>
     </template>
     <template #cell(createdAt)="{ rowData }">
       {{ formatCreatedAt(rowData.createdAt) }}
     </template>
     <template #cell(actions)="{ rowData }">
-      <div class="app-actions-cell">
+      <div class="app-actions-cell" @click.stop>
         <VaButton
           size="large"
           preset="plain"
@@ -139,6 +169,10 @@ function handleSortOrderUpdate(value: unknown) {
 </template>
 
 <style scoped>
+:deep(.users-data-table tbody tr) {
+  cursor: pointer;
+}
+
 :deep(tr.users-table__row--self) {
   background: color-mix(in srgb, var(--va-primary) 12%, var(--va-background-secondary));
   box-shadow: inset 3px 0 0 0 var(--va-primary);
@@ -146,5 +180,22 @@ function handleSortOrderUpdate(value: unknown) {
 
 :deep(tr.users-table__row--self:hover) {
   background: color-mix(in srgb, var(--va-primary) 18%, var(--va-background-secondary));
+}
+
+.users-table__name {
+  font-weight: 600;
+  color: var(--app-text);
+}
+
+.users-table__login {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  font-size: 0.84rem;
+  color: color-mix(in srgb, var(--app-text) 88%, var(--app-muted));
+}
+
+.users-table__email {
+  font-size: 0.875rem;
+  color: var(--app-muted);
+  word-break: break-all;
 }
 </style>

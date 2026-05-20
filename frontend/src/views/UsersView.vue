@@ -20,7 +20,6 @@ import AppPageCard from '@/components/ui/AppPageCard.vue'
 import ConfirmModal from '@/components/ui/ConfirmModal.vue'
 import AppDataTableShell from '@/components/ui/AppDataTableShell.vue'
 import AppEmptyState from '@/components/ui/AppEmptyState.vue'
-import AppSectionCard from '@/components/ui/AppSectionCard.vue'
 import AppFilterBar from '@/components/ui/AppFilterBar.vue'
 import AppTablePagerRow from '@/components/ui/AppTablePagerRow.vue'
 import { useTableDataSource } from '@/composables/useTableDataSource'
@@ -670,19 +669,35 @@ watch(
     <VaModal
       :model-value="createState.open.value"
       hide-default-actions
-      fixed-layout
+      no-padding
       max-width="min(92vw, 640px)"
-      class="user-crud-modal"
+      class="user-editor-modal-shell"
       @update:model-value="onCreateModalUpdate"
     >
       <template #header />
-      <form class="modal-body user-crud-modal__form" @submit.prevent="createUser" @keydown="onFormTabKeydown">
-        <AppSectionCard
-          class="user-modal-section"
-          :title-id="'user-modal-create-title'"
-          :title="t('users.add')"
-          :subtitle="t('users.formHint')"
-        >
+      <form class="user-editor" @submit.prevent="createUser" @keydown="onFormTabKeydown">
+        <header class="user-editor__header">
+          <div class="user-editor__lead">
+            <div class="user-editor__icon" aria-hidden="true">
+              <VaIcon name="person_add" size="22px" />
+            </div>
+            <div class="user-editor__head-copy">
+              <h3 class="user-editor__title">{{ t('users.add') }}</h3>
+              <p class="user-editor__summary">{{ t('users.formHint') }}</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            class="user-editor__close"
+            :disabled="createState.loading.value"
+            :aria-label="t('users.cancel')"
+            @click="closeCreateModal"
+          >
+            <VaIcon name="close" size="22px" />
+          </button>
+        </header>
+
+        <div class="user-editor__body">
           <UserFormFields
             v-model="createState.form.value"
             :can-assign-role="canAssignRole"
@@ -692,14 +707,16 @@ watch(
             :show-field-error="showCreateFieldError"
             :field-error-message="createFieldErrorMessage"
           />
-        </AppSectionCard>
-        <VaAlert v-if="createState.error.value" color="danger" outline class="users-alert users-alert--modal">
-          {{ createState.error.value }}
-        </VaAlert>
-        <div class="modal-actions app-modal-actions">
+          <VaAlert v-if="createState.error.value" color="danger" outline class="users-alert users-alert--modal">
+            {{ createState.error.value }}
+          </VaAlert>
+        </div>
+
+        <footer class="user-editor__footer">
           <VaButton
             type="button"
             preset="secondary"
+            icon="close"
             :disabled="createState.loading.value"
             @click="closeCreateModal"
           >
@@ -708,43 +725,64 @@ watch(
           <VaButton type="submit" :loading="createState.loading.value" icon="check">
             {{ t('users.save') }}
           </VaButton>
-        </div>
+        </footer>
       </form>
     </VaModal>
 
     <VaModal
       :model-value="editState.open.value"
       hide-default-actions
-      fixed-layout
+      no-padding
       max-width="min(92vw, 640px)"
-      class="user-crud-modal"
+      class="user-editor-modal-shell"
       @update:model-value="onEditModalUpdate"
     >
       <template #header />
-      <form class="modal-body user-crud-modal__form" @submit.prevent="updateUser" @keydown="onFormTabKeydown">
-        <AppSectionCard
-          class="user-modal-section"
-          :title-id="'user-modal-edit-title'"
-          :title="t('users.editTitle')"
-          :subtitle="t('users.formHint')"
-        >
+      <form class="user-editor" @submit.prevent="updateUser" @keydown="onFormTabKeydown">
+        <header class="user-editor__header">
+          <div class="user-editor__lead">
+            <div class="user-editor__icon" aria-hidden="true">
+              <VaIcon name="badge" size="22px" />
+            </div>
+            <div class="user-editor__head-copy">
+              <h3 class="user-editor__title">{{ t('users.editTitle') }}</h3>
+              <p class="user-editor__summary">
+                {{ t('users.editFormHint', { login: originalEditLogin ?? '—' }) }}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            class="user-editor__close"
+            :disabled="editState.loading.value"
+            :aria-label="t('users.cancel')"
+            @click="closeEditModal"
+          >
+            <VaIcon name="close" size="22px" />
+          </button>
+        </header>
+
+        <div class="user-editor__body">
           <UserFormFields
             v-model="editState.form.value"
             :can-assign-role="canAssignRole"
             :password-label="t('users.newPasswordOptional')"
+            :password-hint="t('users.passwordSectionHint')"
             :role-options="roleSelectOptionsEdit"
             :immediate-validation="editFormImmediateValidation"
             :show-field-error="showEditFieldError"
             :field-error-message="editFieldErrorMessage"
           />
-        </AppSectionCard>
-        <VaAlert v-if="editState.error.value" color="danger" outline class="users-alert users-alert--modal">
-          {{ editState.error.value }}
-        </VaAlert>
-        <div class="modal-actions app-modal-actions">
+          <VaAlert v-if="editState.error.value" color="danger" outline class="users-alert users-alert--modal">
+            {{ editState.error.value }}
+          </VaAlert>
+        </div>
+
+        <footer class="user-editor__footer">
           <VaButton
             type="button"
             preset="secondary"
+            icon="close"
             :disabled="editState.loading.value"
             @click="closeEditModal"
           >
@@ -753,7 +791,7 @@ watch(
           <VaButton type="submit" :loading="editState.loading.value" icon="save">
             {{ t('users.save') }}
           </VaButton>
-        </div>
+        </footer>
       </form>
     </VaModal>
 
@@ -793,63 +831,109 @@ watch(
 }
 
 .users-alert--modal {
-  margin-top: 0.1rem;
+  margin-top: 0;
 }
 
-.modal-body {
+.user-editor {
   display: flex;
   flex-direction: column;
-  gap: var(--app-section-gap);
-  min-width: 0;
-  width: 100%;
-  max-width: 100%;
-  box-sizing: border-box;
-  /* запас под focus-ring кнопок, без этого скролл-контейнер иногда на 1–2px не хватает */
-  padding-bottom: 0.35rem;
+  min-height: 0;
 }
 
-.user-crud-modal__form {
-  gap: 1rem;
-}
-
-:deep(.user-modal-section.section-card) {
-  border: none;
-  background: transparent;
-  padding: 0;
-  box-shadow: none;
-}
-
-:deep(.user-modal-section .section-card__header) {
-  margin-bottom: 1rem;
-  padding-bottom: 0.75rem;
-  border-bottom: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
-}
-
-:deep(.user-modal-section .section-card__title) {
-  font-size: 1.2rem;
-  font-weight: 800;
-  letter-spacing: -0.02em;
-  line-height: 1.25;
-}
-
-:deep(.user-modal-section .section-card__subtitle) {
-  margin-top: 0.45rem;
-  font-size: 0.875rem;
-  line-height: 1.45;
-  max-width: 36rem;
-}
-
-.modal-actions {
-  margin-top: 0.25rem;
-  padding-top: 1rem;
-  border-top: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
+.user-editor__header {
   display: flex;
-  justify-content: flex-end;
-  gap: 0.5rem;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.9rem 1rem 0.8rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--app-border) 78%, transparent);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--app-accent) 5%, var(--app-surface)) 0%,
+    var(--app-surface) 100%
+  );
+}
+
+.user-editor__lead {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  min-width: 0;
+}
+
+.user-editor__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--app-accent) 14%, var(--app-surface));
+  color: var(--app-accent);
   flex-shrink: 0;
 }
 
-.modal-actions :deep(.va-button) {
+.user-editor__head-copy {
+  min-width: 0;
+}
+
+.user-editor__title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.user-editor__summary {
+  margin: 0.22rem 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: var(--app-muted);
+}
+
+.user-editor__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--app-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.user-editor__close:hover:not(:disabled) {
+  color: var(--app-text);
+  background: color-mix(in srgb, var(--app-surface) 86%, var(--app-border) 14%);
+}
+
+.user-editor__close:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--app-accent) 55%, transparent);
+  outline-offset: 2px;
+}
+
+.user-editor__body {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  max-height: min(68dvh, 42rem);
+  overflow: auto;
+}
+
+.user-editor__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem 0.9rem;
+  border-top: 1px solid color-mix(in srgb, var(--app-border) 78%, transparent);
+  background: color-mix(in srgb, var(--app-surface) 96%, var(--app-bg-end));
+}
+
+.user-editor__footer :deep(.va-button) {
   min-height: var(--app-action-height);
   min-width: 8.5rem;
 }
@@ -874,12 +958,12 @@ watch(
     min-width: min(100%, 12rem);
   }
 
-  .modal-actions {
+  .user-editor__footer {
     flex-direction: column-reverse;
     align-items: stretch;
   }
 
-  .modal-actions :deep(.va-button) {
+  .user-editor__footer :deep(.va-button) {
     width: 100%;
     min-width: 0;
   }

@@ -114,7 +114,18 @@ export class GenerateContractDto {
   @IsBoolean()
   flatten?: boolean;
 
-  /** FULL — одна оплата на полную сумму; рассрочка — первая оплата задаётся отдельно. */
+  /** Сумма оплаты при заключении договора (не больше servicePrice). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  paymentAmount?: string;
+
+  /** CASH — наличные; NON_CASH — безнал. */
+  @IsOptional()
+  @IsIn(['CASH', 'NON_CASH'])
+  paymentChannel?: 'CASH' | 'NON_CASH';
+
+  /** @deprecated Выводится из paymentAmount; оставлено для совместимости payload. */
   @IsOptional()
   @IsIn(['FULL', 'INSTALLMENT_FLEXIBLE', 'INSTALLMENT_EQUAL'])
   paymentPlan?: 'FULL' | 'INSTALLMENT_FLEXIBLE' | 'INSTALLMENT_EQUAL';

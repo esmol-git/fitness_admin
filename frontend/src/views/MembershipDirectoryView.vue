@@ -3,9 +3,11 @@ import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useToast } from 'vuestic-ui'
 import AppPageCard from '@/components/ui/AppPageCard.vue'
+import StatusBadge from '@/components/ui/StatusBadge.vue'
 import { TableActionIcon } from '@/config/tableActionIcons'
 import ConfirmModal from '@/components/ui/ConfirmModal.vue'
 import { resolveApiErrorMessage } from '@/composables/useApiErrorMap'
+import { invalidateActiveMembershipCatalogCache } from '@/composables/membershipCatalogCache'
 import { api } from '@/utils/api'
 
 type MembershipItem = {
@@ -15,6 +17,7 @@ type MembershipItem = {
   durationValue: number | null
   durationUnit: 'DAY' | 'WEEK' | 'MONTH' | 'TRIAL' | null
   description: string | null
+  isActive: boolean
 }
 
 const { t } = useI18n()
@@ -35,6 +38,7 @@ const form = ref({
   durationValue: '',
   durationUnit: 'MONTH' as 'DAY' | 'WEEK' | 'MONTH' | 'TRIAL',
   description: '',
+  isActive: true,
 })
 
 const canSubmit = computed(() => form.value.name.trim().length > 0)
@@ -116,7 +120,7 @@ async function loadItems() {
 
 function openCreate() {
   editingId.value = null
-  form.value = { name: '', price: '', durationValue: '', durationUnit: 'MONTH', description: '' }
+  form.value = { name: '', price: '', durationValue: '', durationUnit: 'MONTH', description: '', isActive: true }
   open.value = true
 }
 
@@ -130,6 +134,7 @@ function openEdit(item: MembershipItem) {
       unit === 'TRIAL' ? '1' : item.durationValue == null ? '' : String(item.durationValue),
     durationUnit: unit,
     description: item.description ?? '',
+    isActive: item.isActive !== false,
   }
   open.value = true
 }
@@ -171,6 +176,7 @@ async function save() {
           ? form.value.durationUnit
           : undefined,
       description: form.value.description.trim() || undefined,
+      isActive: form.value.isActive,
     }
     if (editingId.value) {
       await api.patch(`/membership-catalog/${editingId.value}`, payload)
@@ -180,6 +186,7 @@ async function save() {
       notify({ color: 'success', message: t('directories.memberships.created') })
     }
     open.value = false
+    invalidateActiveMembershipCatalogCache()
     await loadItems()
   } catch (e: unknown) {
     error.value = resolveApiErrorMessage(e, {
@@ -198,6 +205,11 @@ async function save() {
 function applyPreset(value: number, unit: 'DAY' | 'WEEK' | 'MONTH' | 'TRIAL') {
   form.value.durationValue = String(value)
   form.value.durationUnit = unit
+}
+
+function isPresetActive(preset: { value: number; unit: 'DAY' | 'WEEK' | 'MONTH' | 'TRIAL' }) {
+  if (!hasDurationValue.value) return false
+  return form.value.durationUnit === preset.unit && Number(form.value.durationValue) === preset.value
 }
 
 function formatTerm(item: MembershipItem) {
@@ -219,6 +231,7 @@ async function remove() {
     await api.delete(`/membership-catalog/${deletingItem.value.id}`)
     deleteOpen.value = false
     notify({ color: 'success', message: t('directories.memberships.deleted') })
+    invalidateActiveMembershipCatalogCache()
     await loadItems()
   } catch (e: unknown) {
     error.value = resolveApiErrorMessage(e, {
@@ -250,11 +263,18 @@ void loadItems()
 
     <VaDataTable class="app-table-actions-last-col" :items="items" :columns="[
       { key: 'name', label: t('directories.memberships.fields.name') },
+      { key: 'isActive', label: t('directories.memberships.fields.isActive') },
       { key: 'price', label: t('directories.memberships.fields.price') },
       { key: 'term', label: t('directories.memberships.fields.term') },
       { key: 'description', label: t('directories.memberships.fields.description') },
       { key: 'actions', label: t('clients.actions') },
     ]" :loading="loading">
+      <template #cell(isActive)="{ rowData }">
+        <StatusBadge
+          :label="rowData.isActive !== false ? t('directories.memberships.activeYes') : t('directories.memberships.activeNo')"
+          :tone="rowData.isActive !== false ? 'success' : 'neutral'"
+        />
+      </template>
       <template #cell(price)="{ rowData }">
         {{ formatPrice(rowData) }}
       </template>
@@ -287,85 +307,144 @@ void loadItems()
       </template>
     </VaDataTable>
 
-    <VaModal v-model="open" hide-default-actions max-width="min(92vw, 640px)" class="membership-editor-modal">
-      <template #header>
-        <h3 class="membership-editor-modal__title">
-          {{ editingId ? t('directories.memberships.editTitle') : t('directories.memberships.createTitle') }}
-        </h3>
-      </template>
-      <form class="membership-editor-form" @submit.prevent="save">
-        <div class="membership-editor-form__row">
-          <VaInput
-            :model-value="form.name"
-            :label="t('directories.memberships.fields.name')"
-            @update:model-value="(v) => (form.name = typeof v === 'string' ? v : '')"
-          />
-          <VaInput
-            :model-value="form.price"
-            :label="t('directories.memberships.fields.price')"
-            type="number"
-            min="0"
-            step="0.01"
-            @update:model-value="(v) => (form.price = typeof v === 'string' ? v : String(v ?? ''))"
-          />
-        </div>
-        <div class="membership-editor-form__row">
-          <div class="duration-group">
-            <VaCounter
-              v-model="durationCounterModel"
-              class="membership-duration-counter"
-              :label="t('directories.memberships.fields.durationValue')"
-              :disabled="isTrialDuration"
-              manual-input
-              :clearable="!isTrialDuration"
-              clear-value=""
-              :max="999"
-              :step="1"
-              buttons
-              rounded
-            />
-            <VaSelect
-              :model-value="form.durationUnit"
-              :label="t('directories.memberships.fields.durationUnit')"
-              :options="durationUnitOptions"
-              value-by="value"
-              text-by="text"
-              @update:model-value="onDurationUnitChange"
-            />
+    <VaModal
+      v-model="open"
+      hide-default-actions
+      no-padding
+      max-width="min(92vw, 640px)"
+      class="membership-editor-modal-shell"
+    >
+      <template #header />
+      <form class="membership-editor" @submit.prevent="save">
+        <header class="membership-editor__header">
+          <div class="membership-editor__lead">
+            <div class="membership-editor__icon" aria-hidden="true">
+              <VaIcon name="card_membership" size="22px" />
+            </div>
+            <div class="membership-editor__head-copy">
+              <h3 class="membership-editor__title">
+                {{ editingId ? t('directories.memberships.editTitle') : t('directories.memberships.createTitle') }}
+              </h3>
+              <p class="membership-editor__summary" :class="{ 'membership-editor__summary--active': hasDurationValue }">
+                {{ durationSummary }}
+              </p>
+            </div>
           </div>
-        </div>
-        <div class="preset-block">
-          <span class="preset-block__label">{{ t('directories.memberships.presetsLabel') }}</span>
-          <div class="preset-row">
-            <VaButton
-              v-for="preset in presets"
-              :key="preset.label"
-              size="small"
-              preset="secondary"
-              @click.prevent="applyPreset(preset.value, preset.unit)"
-            >
-              {{ preset.label }}
-            </VaButton>
-          </div>
-          <p
-            class="duration-hint"
-            :class="{ 'duration-hint--active': hasDurationValue }"
-            role="status"
+          <button
+            type="button"
+            class="membership-editor__close"
+            :disabled="saving"
+            :aria-label="t('common.cancel')"
+            @click="open = false"
           >
-            {{ durationSummary }}
-          </p>
+            <VaIcon name="close" size="22px" />
+          </button>
+        </header>
+
+        <div class="membership-editor__body">
+          <section class="membership-editor-card">
+            <div class="membership-editor-card__grid membership-editor-card__grid--2">
+              <VaInput
+                :model-value="form.name"
+                :label="t('directories.memberships.fields.name')"
+                @update:model-value="(v) => (form.name = typeof v === 'string' ? v : '')"
+              />
+              <VaInput
+                :model-value="form.price"
+                :label="t('directories.memberships.fields.price')"
+                type="number"
+                min="0"
+                step="0.01"
+                @update:model-value="(v) => (form.price = typeof v === 'string' ? v : String(v ?? ''))"
+              />
+            </div>
+          </section>
+
+          <section class="membership-editor-card">
+            <div class="membership-editor-card__section-head">
+              <span class="membership-editor-card__label">{{ t('directories.memberships.presetsLabel') }}</span>
+            </div>
+            <div class="membership-preset-row" role="group" :aria-label="t('directories.memberships.presetsLabel')">
+              <button
+                v-for="preset in presets"
+                :key="preset.label"
+                type="button"
+                class="membership-preset-chip"
+                :class="{ 'membership-preset-chip--active': isPresetActive(preset) }"
+                @click.prevent="applyPreset(preset.value, preset.unit)"
+              >
+                {{ preset.label }}
+              </button>
+            </div>
+            <div class="membership-editor-card__grid membership-editor-card__grid--2 membership-editor-card__grid--duration">
+              <VaCounter
+                v-model="durationCounterModel"
+                class="membership-duration-counter"
+                :label="t('directories.memberships.fields.durationValue')"
+                :disabled="isTrialDuration"
+                manual-input
+                :clearable="!isTrialDuration"
+                clear-value=""
+                :max="999"
+                :step="1"
+                buttons
+                rounded
+              />
+              <VaSelect
+                :model-value="form.durationUnit"
+                :label="t('directories.memberships.fields.durationUnit')"
+                :options="durationUnitOptions"
+                value-by="value"
+                text-by="text"
+                @update:model-value="onDurationUnitChange"
+              />
+            </div>
+          </section>
+
+          <section class="membership-editor-card">
+            <VaTextarea
+              :model-value="form.description"
+              :label="t('directories.memberships.fields.description')"
+              :min-rows="2"
+              :max-rows="4"
+              @update:model-value="(v) => (form.description = typeof v === 'string' ? v : '')"
+            />
+            <div class="membership-status-field">
+              <span class="membership-status-field__label">{{ t('directories.memberships.fields.isActive') }}</span>
+              <div
+                class="membership-status-segment"
+                role="group"
+                :aria-label="t('directories.memberships.fields.isActive')"
+              >
+                <button
+                  type="button"
+                  class="membership-status-segment__btn"
+                  :class="{ 'membership-status-segment__btn--active': form.isActive }"
+                  @click="form.isActive = true"
+                >
+                  {{ t('directories.memberships.activeYes') }}
+                </button>
+                <button
+                  type="button"
+                  class="membership-status-segment__btn"
+                  :class="{ 'membership-status-segment__btn--active': !form.isActive }"
+                  @click="form.isActive = false"
+                >
+                  {{ t('directories.memberships.activeNo') }}
+                </button>
+              </div>
+            </div>
+          </section>
         </div>
-        <VaTextarea
-          :model-value="form.description"
-          :label="t('directories.memberships.fields.description')"
-          :min-rows="2"
-          :max-rows="4"
-          @update:model-value="(v) => (form.description = typeof v === 'string' ? v : '')"
-        />
-        <div class="app-modal-actions">
-          <VaButton preset="secondary" :disabled="saving" @click="open = false">{{ t('common.cancel') }}</VaButton>
-          <VaButton type="submit" :disabled="!canSubmit" :loading="saving">{{ t('users.save') }}</VaButton>
-        </div>
+
+        <footer class="membership-editor__footer">
+          <VaButton preset="secondary" icon="close" :disabled="saving" @click="open = false">
+            {{ t('common.cancel') }}
+          </VaButton>
+          <VaButton type="submit" icon="save" :disabled="!canSubmit" :loading="saving">
+            {{ t('users.save') }}
+          </VaButton>
+        </footer>
       </form>
     </VaModal>
 
@@ -383,30 +462,181 @@ void loadItems()
 </template>
 
 <style scoped>
-.membership-editor-modal__title {
+.membership-editor {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.membership-editor__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.9rem 1rem 0.8rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--app-border) 78%, transparent);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--app-accent) 5%, var(--app-surface)) 0%,
+    var(--app-surface) 100%
+  );
+}
+
+.membership-editor__lead {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  min-width: 0;
+}
+
+.membership-editor__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--app-accent) 14%, var(--app-surface));
+  color: var(--app-accent);
+  flex-shrink: 0;
+}
+
+.membership-editor__head-copy {
+  min-width: 0;
+}
+
+.membership-editor__title {
   margin: 0;
-  font-size: 1.15rem;
+  font-size: 1.05rem;
   font-weight: 700;
   line-height: 1.3;
 }
 
-.membership-editor-form {
-  display: grid;
-  gap: 0.75rem;
-  padding: 0.15rem 0.1rem 0.25rem;
+.membership-editor__summary {
+  margin: 0.22rem 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  color: var(--app-muted);
 }
 
-.membership-editor-form__row {
+.membership-editor__summary--active {
+  color: color-mix(in srgb, var(--app-text) 78%, var(--app-accent));
+  font-weight: 600;
+}
+
+.membership-editor__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--app-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.membership-editor__close:hover:not(:disabled) {
+  color: var(--app-text);
+  background: color-mix(in srgb, var(--app-surface) 86%, var(--app-border) 14%);
+}
+
+.membership-editor__close:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--app-accent) 55%, transparent);
+  outline-offset: 2px;
+}
+
+.membership-editor__body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+}
+
+.membership-editor-card {
+  display: grid;
+  gap: 0.7rem;
+  padding: 0.8rem 0.85rem;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--app-border) 84%, transparent);
+  background: color-mix(in srgb, var(--app-surface) 98%, white 2%);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--app-text) 4%, transparent);
+}
+
+.membership-editor-card__section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.membership-editor-card__label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--app-muted);
+}
+
+.membership-editor-card__grid {
+  display: grid;
   gap: 0.75rem;
 }
 
-.duration-group {
-  display: grid;
+.membership-editor-card__grid--2 {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 0.75rem;
-  grid-column: 1 / -1;
+}
+
+.membership-editor-card__grid--duration {
+  margin-top: 0.15rem;
+}
+
+.membership-preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.membership-preset-chip {
+  padding: 0.38rem 0.72rem;
+  border: 1px solid color-mix(in srgb, var(--app-border) 88%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-surface) 96%, var(--app-text) 4%);
+  color: color-mix(in srgb, var(--app-text) 68%, var(--app-muted));
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.membership-preset-chip:hover:not(.membership-preset-chip--active) {
+  color: var(--app-text);
+  border-color: color-mix(in srgb, var(--app-accent) 24%, transparent);
+  background: color-mix(in srgb, var(--app-surface) 88%, var(--app-accent) 12%);
+}
+
+.membership-preset-chip--active {
+  color: #fff;
+  border-color: color-mix(in srgb, var(--app-accent) 62%, black 38%);
+  background: linear-gradient(
+    165deg,
+    color-mix(in srgb, var(--app-accent) 90%, white 10%) 0%,
+    color-mix(in srgb, var(--app-accent) 76%, black 24%) 100%
+  );
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--app-accent) 28%, transparent);
+}
+
+.membership-preset-chip:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--app-accent) 55%, transparent);
+  outline-offset: 2px;
 }
 
 .membership-duration-counter {
@@ -418,44 +648,111 @@ void loadItems()
   width: 100%;
 }
 
-.preset-block {
+.membership-status-field {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
-  padding: 0.45rem 0 0.1rem;
-  border-top: 1px solid color-mix(in srgb, var(--app-border) 88%, transparent);
 }
 
-.preset-block__label {
-  font-size: 0.72rem;
+.membership-status-field__label {
+  font-size: 0.68rem;
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--app-muted);
 }
 
-.preset-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
+.membership-status-segment {
+  display: inline-flex;
+  align-self: flex-start;
+  min-height: 2.15rem;
+  padding: 0.2rem;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--app-border) 92%, transparent);
+  background: color-mix(in srgb, var(--app-text) 3%, var(--app-surface));
 }
 
-.duration-hint {
-  margin: 0.15rem 0 0;
+.membership-status-segment__btn {
+  min-width: 6.5rem;
+  min-height: calc(2.15rem - 0.4rem);
+  padding: 0.35rem 0.85rem;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: color-mix(in srgb, var(--app-text) 68%, var(--app-muted));
+  font: inherit;
   font-size: 0.8125rem;
-  line-height: 1.4;
-  color: var(--app-muted);
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease,
+    box-shadow 0.15s ease;
 }
 
-.duration-hint--active {
+.membership-status-segment__btn:hover:not(.membership-status-segment__btn--active) {
+  background: color-mix(in srgb, var(--app-text) 5%, transparent);
   color: var(--app-text);
-  font-weight: 500;
+}
+
+.membership-status-segment__btn--active {
+  color: #fff;
+  background: linear-gradient(
+    165deg,
+    color-mix(in srgb, var(--app-accent) 88%, white 12%) 0%,
+    color-mix(in srgb, var(--app-accent) 74%, black 26%) 100%
+  );
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--app-accent) 28%, transparent);
+}
+
+.membership-status-segment__btn:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--app-accent) 55%, transparent);
+  outline-offset: 2px;
+}
+
+.membership-editor__footer {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem 0.9rem;
+  border-top: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
+  background: color-mix(in srgb, var(--app-text) 2.5%, var(--app-surface));
+}
+
+.membership-editor__footer :deep(.va-button) {
+  min-height: 2.35rem;
+  min-width: 7.5rem;
+}
+
+.membership-editor__footer :deep(.va-button[type='submit']) {
+  min-width: 8.5rem;
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--app-accent) 24%, transparent);
 }
 
 @media (max-width: 860px) {
-  .membership-editor-form__row,
-  .duration-group {
+  .membership-editor-card__grid--2,
+  .membership-editor-card__grid--duration {
     grid-template-columns: 1fr;
+  }
+
+  .membership-status-segment {
+    width: 100%;
+  }
+
+  .membership-status-segment__btn {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .membership-editor__footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .membership-editor__footer :deep(.va-button) {
+    width: 100%;
+    min-width: 0;
   }
 }
 </style>

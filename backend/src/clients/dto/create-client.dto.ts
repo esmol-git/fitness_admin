@@ -54,6 +54,15 @@ export class CreateClientDto {
   @IsOptional()
   @IsString()
   @MaxLength(255)
+  passportIssuedBy?: string;
+
+  @IsOptional()
+  @IsDateString()
+  passportIssuedAt?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
   address?: string;
 
   @IsOptional()

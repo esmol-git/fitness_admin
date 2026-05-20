@@ -2,6 +2,7 @@ import { ConflictException, Injectable, NotFoundException } from '@nestjs/common
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateMembershipCatalogItemDto } from './dto/create-membership-catalog-item.dto';
+import { ListMembershipCatalogQueryDto } from './dto/list-membership-catalog-query.dto';
 import { UpdateMembershipCatalogItemDto } from './dto/update-membership-catalog-item.dto';
 
 @Injectable()
@@ -12,10 +13,10 @@ export class MembershipCatalogService {
     membershipNotFound: { code: 'MEMBERSHIP_NOT_FOUND', message: 'Membership not found' },
   } as const;
 
-  findAll() {
+  findAll(query?: ListMembershipCatalogQueryDto) {
     return this.prisma.membershipCatalog.findMany({
-      where: { isActive: true },
-      orderBy: [{ name: 'asc' }],
+      where: query?.activeOnly === true ? { isActive: true } : undefined,
+      orderBy: [{ isActive: 'desc' }, { name: 'asc' }],
     });
   }
 
@@ -28,6 +29,7 @@ export class MembershipCatalogService {
           durationValue: dto.durationValue ?? null,
           durationUnit: dto.durationUnit ?? null,
           description: this.nullable(dto.description),
+          isActive: dto.isActive ?? true,
         },
       });
     } catch (error: unknown) {
@@ -51,10 +53,6 @@ export class MembershipCatalogService {
       where: { id },
       data: { isActive: false },
     });
-    await this.prisma.client.updateMany({
-      where: { membershipType: id },
-      data: { membershipType: null },
-    });
     return { ok: true };
   }
 
@@ -65,7 +63,7 @@ export class MembershipCatalogService {
     });
     if (!existing) throw new NotFoundException(this.errors.membershipNotFound);
     try {
-      return await this.prisma.membershipCatalog.update({
+      const updated = await this.prisma.membershipCatalog.update({
         where: { id },
         data: {
           ...(dto.name !== undefined ? { name: dto.name.trim() } : {}),
@@ -81,8 +79,10 @@ export class MembershipCatalogService {
           ...(dto.description !== undefined
             ? { description: this.nullable(dto.description) }
             : {}),
+          ...(dto.isActive !== undefined ? { isActive: dto.isActive } : {}),
         },
       });
+      return updated;
     } catch (error: unknown) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&

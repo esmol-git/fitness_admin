@@ -15,6 +15,8 @@ export interface ClientRow {
   managerId: string | null
   managerName?: string | null
   membershipType: string | null
+  /** Название позиции справочника абонементов (в т.ч. для неактивных), подставляется в GET /clients */
+  membershipCatalogName?: string | null
   contractNumber: string | null
   contractStartDate: string | null
   contractEndDate: string | null
@@ -23,6 +25,8 @@ export interface ClientRow {
   effectiveContractEndDate?: string | null
   paymentDate: string | null
   passport: string | null
+  passportIssuedBy: string | null
+  passportIssuedAt: string | null
   address: string | null
   notes: string | null
   cardNumber: string | null
@@ -45,6 +49,8 @@ export interface ClientForm {
   status: ClientStatus
   email: string
   passport: string
+  passportIssuedBy: string
+  passportIssuedAt: string
   address: string
   notes: string
   contractNumber: string

@@ -46,6 +46,7 @@ describe('parseClientsListRouteQuery', () => {
       sortBy: 'lastVisitAt',
       sortOrder: 'desc',
       editClientId: '',
+      editClientTab: 'general',
     })
   })
 
@@ -73,7 +74,20 @@ describe('parseClientsListRouteQuery', () => {
   it('parses edit client id', () => {
     const p = parseClientsListRouteQuery({ edit: 'clxyz123' })
     expect(p.editClientId).toBe('clxyz123')
+    expect(p.editClientTab).toBe('general')
     expect(buildClientsListRouteQuery({ ...minimalClientsQueryState(), editClientId: 'abc' }).edit).toBe('abc')
+  })
+
+  it('parses edit tab when client card is open', () => {
+    const p = parseClientsListRouteQuery({ edit: 'clxyz123', editTab: 'visits' })
+    expect(p.editClientTab).toBe('visits')
+    expect(
+      buildClientsListRouteQuery({
+        ...minimalClientsQueryState(),
+        editClientId: 'abc',
+        editClientTab: 'payments',
+      }),
+    ).toMatchObject({ edit: 'abc', editTab: 'payments' })
   })
 
   it('parses gym visit overdue filter', () => {
@@ -101,6 +115,7 @@ function minimalClientsQueryState() {
     sortBy: 'lastVisitAt' as const,
     sortOrder: 'desc' as const,
     editClientId: '',
+    editClientTab: 'general' as const,
   }
 }
 
@@ -122,6 +137,7 @@ describe('buildClientsListRouteQuery', () => {
         sortBy: 'lastVisitAt',
         sortOrder: 'desc',
         editClientId: '',
+        editClientTab: 'general',
       }),
     ).toEqual({})
   })
@@ -142,6 +158,7 @@ describe('buildClientsListRouteQuery', () => {
       sortBy: 'createdAt',
       sortOrder: 'desc',
       editClientId: '',
+      editClientTab: 'general',
     })
     expect(q.status).toBe('ACTIVE')
     expect(q.sort).toBe('createdAt:desc')
@@ -153,5 +170,31 @@ describe('routeQueryEquals', () => {
     expect(routeQueryEquals({ a: '1' }, { a: '1' })).toBe(true)
     expect(routeQueryEquals({ a: '1' }, {})).toBe(false)
     expect(routeQueryEquals({}, { b: [''] })).toBe(true)
+  })
+})
+
+describe('scanner modal url sync', () => {
+  it('parseScannerModalRouteQuery reads open flag and code', async () => {
+    const { parseScannerModalRouteQuery, buildScannerModalRouteQuery } = await import(
+      '@/composables/useScannerModalUrlSync'
+    )
+    expect(parseScannerModalRouteQuery({ scanner: '1', scanCode: 'ABC123' })).toEqual({
+      shouldOpen: true,
+      code: 'ABC123',
+    })
+    expect(parseScannerModalRouteQuery({})).toEqual({
+      shouldOpen: false,
+      code: '',
+    })
+    expect(
+      buildScannerModalRouteQuery({ fcStatus: 'ACTIVE' }, { open: true, code: '  X1  ' }),
+    ).toEqual({
+      fcStatus: 'ACTIVE',
+      scanner: '1',
+      scanCode: 'X1',
+    })
+    expect(buildScannerModalRouteQuery({ scanner: '1', scanCode: 'old' }, { open: false, code: '' })).toEqual(
+      {},
+    )
   })
 })

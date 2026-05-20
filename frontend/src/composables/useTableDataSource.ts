@@ -18,10 +18,18 @@ interface UseTableDataSourceOptions<T, Q> {
   minLoadingMs?: number
 }
 
+function serializeTableQuery<Q>(query: Q): string {
+  return JSON.stringify(query)
+}
+
 export function useTableDataSource<T, Q>(options: UseTableDataSourceOptions<T, Q>) {
   let requestSeq = 0
+  let lastFetchedQueryKey: string | null = null
 
-  async function reload() {
+  async function reload(force = false) {
+    const queryKey = serializeTableQuery(options.query.value)
+    if (!force && queryKey === lastFetchedQueryKey) return
+
     const currentSeq = ++requestSeq
     const startedAt = Date.now()
     options.loading.value = true
@@ -30,6 +38,7 @@ export function useTableDataSource<T, Q>(options: UseTableDataSourceOptions<T, Q
       const payload = await options.fetcher(options.query.value)
       if (currentSeq !== requestSeq) return
       options.setResult(payload)
+      lastFetchedQueryKey = queryKey
     } catch (error: unknown) {
       if (currentSeq !== requestSeq) return
       if (options.error && options.mapError) {
@@ -53,7 +62,7 @@ export function useTableDataSource<T, Q>(options: UseTableDataSourceOptions<T, Q
     () => {
       void reload()
     },
-    { immediate: options.immediate ?? true },
+    { immediate: options.immediate ?? true, deep: true },
   )
 
   return {

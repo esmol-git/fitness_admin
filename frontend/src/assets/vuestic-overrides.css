@@ -43,6 +43,66 @@
   padding: var(--app-modal-padding);
 }
 
+/*
+  Карточка клиента: диалог по высоте контента.
+  Скролл — у .client-edit-modal-scroll внутри формы; футер с кнопками остаётся снаружи.
+*/
+.clients-editor-modal .va-modal__dialog {
+  height: auto;
+  max-height: calc(100dvh - 2rem);
+  overflow: hidden;
+}
+
+.clients-editor-modal .va-modal__inner {
+  overflow: visible;
+  max-height: none;
+}
+
+.clients-editor-modal .va-modal__inner > .va-modal__message {
+  overflow: visible;
+  margin-bottom: 0;
+}
+
+/*
+  Модалка «Данные для договора»: как у редактора клиента — высота по контенту,
+  скролл у .contract-create-modal__scroll, футер с кнопками снаружи.
+*/
+.contract-create-modal-shell .va-modal__dialog {
+  height: auto;
+  max-height: calc(100dvh - 2rem);
+  overflow: hidden;
+}
+
+.contract-create-modal-shell .va-modal__inner {
+  overflow: visible;
+  max-height: none;
+}
+
+.contract-create-modal-shell .va-modal__inner > .va-modal__message {
+  overflow: visible;
+  margin-bottom: 0;
+}
+
+.membership-editor-modal-shell .va-modal__inner {
+  overflow: visible;
+}
+
+.membership-editor-modal-shell .va-modal__inner > .va-modal__message {
+  overflow: visible;
+  margin-bottom: 0;
+  padding: 0;
+}
+
+.scanner-modal-shell .va-modal__inner {
+  overflow: visible;
+}
+
+.scanner-modal-shell .va-modal__inner > .va-modal__message {
+  overflow: visible;
+  margin-bottom: 0;
+  padding: 0;
+}
+
 /* Пустой слот #header не оставляет полосу */
 .va-modal--fixed-layout .va-modal__header:empty {
   display: none;
@@ -162,7 +222,12 @@
   }
 
   /* Скролл контента модалки клиента на iOS */
-  .clients-editor-modal.va-modal--fixed-layout .va-modal__inner > .va-modal__message {
+  .clients-editor-modal .client-edit-modal-scroll {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+  }
+
+  .contract-create-modal-shell .contract-create-modal__scroll {
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
   }

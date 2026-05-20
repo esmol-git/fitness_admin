@@ -6,7 +6,7 @@ import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
 import { PrismaService } from './../src/prisma/prisma.service';
 
-describe('AppController (e2e)', () => {
+describe('App (e2e)', () => {
   let app: INestApplication<App>;
 
   beforeEach(async () => {
@@ -18,6 +18,9 @@ describe('AppController (e2e)', () => {
         $connect: () => Promise.resolve(),
         $disconnect: () => Promise.resolve(),
         $on: () => undefined,
+        $transaction: jest.fn(),
+        client: { findUnique: jest.fn() },
+        payment: { findMany: jest.fn().mockResolvedValue([]) },
       })
       .compile();
 
@@ -34,14 +37,27 @@ describe('AppController (e2e)', () => {
     await app.init();
   });
 
-  it('/api (GET)', () => {
+  afterEach(async () => {
+    await app.close();
+  });
+
+  it('GET /api is public', () => {
     return request(app.getHttpServer())
       .get('/api')
       .expect(200)
       .expect({ message: 'Hello World!' });
   });
 
-  afterEach(async () => {
-    await app.close();
+  it('GET /api/health/live is public', async () => {
+    const res = await request(app.getHttpServer()).get('/api/health/live').expect(200);
+    expect(res.body).toEqual(expect.objectContaining({ ok: true }));
+  });
+
+  it('GET /api/payments requires authentication', () => {
+    return request(app.getHttpServer()).get('/api/payments').expect(401);
+  });
+
+  it('POST /api/auth/login is public (validation error without body)', () => {
+    return request(app.getHttpServer()).post('/api/auth/login').send({}).expect(400);
   });
 });

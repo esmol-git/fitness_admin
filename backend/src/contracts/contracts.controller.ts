@@ -16,8 +16,8 @@ import {
 import { Role } from '@prisma/client';
 import { CurrentUser, type AuthUser } from '../auth/decorators/current-user.decorator';
 import { Roles } from '../auth/decorators/roles.decorator';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
+import { ActivateContractDto } from './dto/activate-contract.dto';
 import { CancelContractDto } from './dto/cancel-contract.dto';
 import { FreezeContractDto } from './dto/freeze-contract.dto';
 import { GenerateContractDto } from './dto/generate-contract.dto';
@@ -25,7 +25,7 @@ import { ListContractsQueryDto } from './dto/list-contracts-query.dto';
 import { ContractsService } from './contracts.service';
 
 @Controller('contracts')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(RolesGuard)
 export class ContractsController {
   constructor(private readonly contracts: ContractsService) {}
 
@@ -119,12 +119,6 @@ export class ContractsController {
     };
   }
 
-  @Patch(':contractId/status')
-  @Roles(Role.ADMIN, Role.MANAGER, Role.RECEPTIONIST)
-  updateStatus(@Param('contractId') contractId: string, @Body() dto: { status: string }) {
-    return this.contracts.updateStatus(contractId, dto.status);
-  }
-
   @Patch(':contractId/pause')
   @Roles(Role.ADMIN, Role.MANAGER, Role.RECEPTIONIST)
   pause(
@@ -139,6 +133,16 @@ export class ContractsController {
   @Roles(Role.ADMIN, Role.MANAGER, Role.RECEPTIONIST)
   resume(@Param('contractId') contractId: string) {
     return this.contracts.resume(contractId);
+  }
+
+  @Patch(':contractId/activate')
+  @Roles(Role.ADMIN, Role.MANAGER, Role.RECEPTIONIST)
+  activate(
+    @CurrentUser() user: AuthUser,
+    @Param('contractId') contractId: string,
+    @Body() dto: ActivateContractDto,
+  ) {
+    return this.contracts.activate(contractId, dto, user.id);
   }
 
   @Patch(':contractId/terminate')

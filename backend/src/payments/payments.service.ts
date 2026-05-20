@@ -1,9 +1,11 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { PaymentOperationType, PaymentStatus, Prisma } from '@prisma/client';
+import { PaymentChannel, PaymentOperationType, PaymentStatus, Prisma } from '@prisma/client';
 import { RequestContextService } from '../common/request-context.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreatePaymentDto } from './dto/create-payment.dto';
 import { ListPaymentsQueryDto } from './dto/list-payments-query.dto';
+
+type Tx = Prisma.TransactionClient;
 
 @Injectable()
 export class PaymentsService {
@@ -29,17 +31,18 @@ export class PaymentsService {
   } as const;
 
   private async assertPaidSaleFitsContractBalance(
+    tx: Tx,
     clientId: string,
     contractDocumentId: string,
     additionalAmount: Prisma.Decimal,
   ) {
-    const contract = await this.prisma.contractDocument.findFirst({
+    const contract = await tx.contractDocument.findFirst({
       where: { id: contractDocumentId, clientId },
       select: { servicePrice: true },
     });
     if (!contract?.servicePrice) return;
     const [paidAgg, refundedAgg] = await Promise.all([
-      this.prisma.payment.aggregate({
+      tx.payment.aggregate({
         where: {
           contractDocumentId,
           operationType: PaymentOperationType.SALE,
@@ -47,7 +50,7 @@ export class PaymentsService {
         },
         _sum: { amount: true },
       }),
-      this.prisma.payment.aggregate({
+      tx.payment.aggregate({
         where: {
           contractDocumentId,
           operationType: PaymentOperationType.REFUND,
@@ -81,38 +84,40 @@ export class PaymentsService {
     }
 
     const status = dto.status ?? PaymentStatus.PENDING;
-    if (dto.contractDocumentId && status === PaymentStatus.PAID) {
-      await this.assertPaidSaleFitsContractBalance(
-        dto.clientId,
-        dto.contractDocumentId,
-        new Prisma.Decimal(Number(dto.amount).toFixed(2)),
-      );
-    }
+    const amount = new Prisma.Decimal(Number(dto.amount).toFixed(2));
 
-    const created = await this.prisma.payment.create({
-      data: {
-        clientId: dto.clientId,
-        contractDocumentId: dto.contractDocumentId,
-        amount: new Prisma.Decimal(dto.amount),
-        paidAt: dto.paidAt ? new Date(dto.paidAt) : new Date(),
-        status: dto.status ?? PaymentStatus.PENDING,
-        operationType: 'SALE',
-        comment: dto.comment?.trim() || null,
-        processedById: actorId,
-      },
-      select: {
-        id: true,
-        clientId: true,
-        contractDocumentId: true,
-        amount: true,
-        paidAt: true,
-        status: true,
-        operationType: true,
-        refundMethod: true,
-        comment: true,
-        processedBy: { select: { id: true, firstName: true, lastName: true } },
-      },
+    const created = await this.prisma.$transaction(async (tx) => {
+      if (dto.contractDocumentId && status === PaymentStatus.PAID) {
+        await this.assertPaidSaleFitsContractBalance(tx, dto.clientId, dto.contractDocumentId, amount);
+      }
+      return tx.payment.create({
+        data: {
+          clientId: dto.clientId,
+          contractDocumentId: dto.contractDocumentId,
+          amount,
+          paidAt: dto.paidAt ? new Date(dto.paidAt) : new Date(),
+          status,
+          operationType: 'SALE',
+          channel: dto.channel ?? PaymentChannel.CASH,
+          comment: dto.comment?.trim() || null,
+          processedById: actorId,
+        },
+        select: {
+          id: true,
+          clientId: true,
+          contractDocumentId: true,
+          amount: true,
+          paidAt: true,
+          status: true,
+          operationType: true,
+          channel: true,
+          refundMethod: true,
+          comment: true,
+          processedBy: { select: { id: true, firstName: true, lastName: true } },
+        },
+      });
     });
+
     this.logger.log(
       `AUDIT payment.create reqId=${this.requestContext.getRequestId()} actorId=${actorId} paymentId=${created.id} clientId=${dto.clientId} amount=${dto.amount}`,
     );
@@ -129,6 +134,7 @@ export class PaymentsService {
         paidAt: true,
         status: true,
         operationType: true,
+        channel: true,
         refundMethod: true,
         comment: true,
         contractDocumentId: true,
@@ -201,6 +207,7 @@ export class PaymentsService {
         paidAt: true,
         status: true,
         operationType: true,
+        channel: true,
         refundMethod: true,
         comment: true,
         contract: { select: { id: true, contractNumber: true, s3Url: true } },

@@ -41,6 +41,12 @@ enum RefundMethod {
   TRANSFER
 }
 
+/** Способ оплаты при поступлении (наличные / безнал). */
+enum PaymentChannel {
+  CASH
+  NON_CASH
+}
+
 enum ThemeMode {
   LIGHT
   DARK
@@ -82,6 +88,15 @@ enum VisitCloseReason {
   BLOCKED
 }
 
+/** Производный статус договора для фильтров и UI (синхронизируется cron + мутациями). */
+enum ContractDerivedStatus {
+  SAVED
+  ACTIVE
+  PAUSED
+  EXPIRED
+  CANCELLED
+}
+
 model ThemeSettings {
   id            String   @id @default(cuid())
   defaultPreset String   @default("blue")
@@ -117,6 +132,9 @@ model User {
   enteredVisitSessions VisitSession[] @relation("VisitEnteredBy")
   exitedVisitSessions  VisitSession[] @relation("VisitExitedBy")
   refreshTokens RefreshToken[]
+
+  @@index([role])
+  @@index([createdAt])
 }
 
 model RefreshToken {
@@ -128,6 +146,7 @@ model RefreshToken {
   createdAt DateTime @default(now())
 
   @@index([userId])
+  @@index([expiresAt])
 }
 
 model Client {
@@ -144,6 +163,8 @@ model Client {
   phone             String
   email             String?
   passport          String?
+  passportIssuedBy  String?
+  passportIssuedAt  DateTime?    @db.Date
   address           String?
   notes             String?
   contractNumber    String?      @unique
@@ -169,6 +190,10 @@ model Client {
 
   @@index([managerId])
   @@index([status])
+  @@index([lastName, firstName])
+  @@index([createdAt])
+  @@index([membershipType])
+  @@index([accessKey])
 }
 
 model VisitSession {
@@ -190,6 +215,9 @@ model VisitSession {
   @@index([clientId, enteredAt])
   @@index([exitedAt])
   @@index([lockerNumber, exitedAt])
+  @@index([status, enteredAt])
+  @@index([enteredAt])
+  @@index([clientId, status])
 }
 
 model ContractDocument {
@@ -197,6 +225,7 @@ model ContractDocument {
   clientId       String
   contractNumber String   @unique
   status         String   @default("DRAFT")
+  derivedStatus  ContractDerivedStatus @default(SAVED)
   contractDate   DateTime? @db.Date
   serviceStartDate DateTime? @db.Date
   serviceEndDate DateTime? @db.Date
@@ -212,6 +241,10 @@ model ContractDocument {
 
   @@index([clientId, createdAt])
   @@index([status, createdAt])
+  @@index([derivedStatus, createdAt])
+  @@index([clientId, derivedStatus])
+  @@index([serviceEndDate])
+  @@index([status, serviceEndDate])
 }
 
 model ContractFreeze {
@@ -228,6 +261,7 @@ model ContractFreeze {
   createdBy User?            @relation("ContractFreezeCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
 
   @@index([contractId, startDate, endDate])
+  @@index([endDate])
 }
 
 model MembershipCatalog {
@@ -240,6 +274,8 @@ model MembershipCatalog {
   isActive     Boolean  @default(true)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+
+  @@index([isActive, name])
 }
 
 model ClientTrainer {
@@ -264,6 +300,9 @@ model Membership {
   client      Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
   attendances Attendance[]
   payments    Payment[]
+
+  @@index([clientId])
+  @@index([status, endDate])
 }
 
 model GymClass {
@@ -308,6 +347,7 @@ model Payment {
   paidAt             DateTime      @default(now())
   status             PaymentStatus @default(PENDING)
   operationType      PaymentOperationType @default(SALE)
+  channel            PaymentChannel @default(CASH)
   refundMethod       RefundMethod?
   externalId         String?
   comment            String?
@@ -320,4 +360,6 @@ model Payment {
 
   @@index([clientId, paidAt])
   @@index([contractDocumentId, paidAt])
+  @@index([status, paidAt])
+  @@index([contractDocumentId, operationType, status])
 }

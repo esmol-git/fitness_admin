@@ -1,14 +1,32 @@
 import { randomUUID } from 'node:crypto';
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Prisma, VisitSessionStatus, type Client, type ClientStatus } from '@prisma/client';
+import { Prisma, VisitSessionStatus, ContractDerivedStatus, type Client, type ClientStatus } from '@prisma/client';
 import { ContractsService } from '../contracts/contracts.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { CreateClientDto } from './dto/create-client.dto';
 import { PaginationDto } from './dto/pagination.dto';
 import { UpdateClientDto } from './dto/update-client.dto';
-import { utcCalendarDayMs, utcTodayCalendarDayMs } from '../common/utc-calendar-day';
+import { utcTodayCalendarDayMs } from '../common/utc-calendar-day';
+
+const CLIENT_LIST_SELECT = {
+  id: true,
+  firstName: true,
+  lastName: true,
+  middleName: true,
+  phone: true,
+  status: true,
+  gender: true,
+  birthDate: true,
+  managerId: true,
+  membershipType: true,
+  contractStartDate: true,
+  contractEndDate: true,
+  photoUrl: true,
+} satisfies Prisma.ClientSelect;
+
+type ClientListRow = Prisma.ClientGetPayload<{ select: typeof CLIENT_LIST_SELECT }>;
 
 @Injectable()
 export class ClientsService {
@@ -87,38 +105,15 @@ export class ClientsService {
     return now;
   }
 
-  private deriveContractStatus(currentStatus: string, serviceStartDate?: Date | null, serviceEndDate?: Date | null) {
-    if (currentStatus === 'DRAFT') return 'SAVED';
-    if (currentStatus === 'CANCELLED') return 'CANCELLED';
-    const today = utcTodayCalendarDayMs();
-    if (currentStatus === 'EXPIRED') {
-      const endExpired = serviceEndDate ? utcCalendarDayMs(new Date(serviceEndDate)) : null;
-      if (endExpired !== null && endExpired >= today) return 'ACTIVE';
-      return 'EXPIRED';
-    }
-    const start = serviceStartDate ? utcCalendarDayMs(new Date(serviceStartDate)) : null;
-    const end = serviceEndDate ? utcCalendarDayMs(new Date(serviceEndDate)) : null;
-    if (end !== null && end < today) return 'EXPIRED';
-    if (currentStatus === 'PAUSED') return 'PAUSED';
-    if (currentStatus === 'SIGNED') return 'ACTIVE';
-    if (start !== null && start > today) return 'SAVED';
-    return 'ACTIVE';
-  }
-
   private deriveClientStatusFromContracts(
-    contracts: Array<{ status: string; serviceStartDate: Date | null; serviceEndDate: Date | null }>,
+    contracts: Array<{ derivedStatus: ContractDerivedStatus }>,
     currentClientStatus?: ClientStatus,
   ): ClientStatus {
     if (currentClientStatus === 'BLOCKED') return 'BLOCKED';
     if (contracts.length === 0) return 'INACTIVE';
-    const hasActive = contracts.some(
-      (contract) => this.deriveContractStatus(contract.status, contract.serviceStartDate, contract.serviceEndDate) === 'ACTIVE',
-    );
-    if (hasActive) return 'ACTIVE';
-    const hasPaused = contracts.some(
-      (contract) => this.deriveContractStatus(contract.status, contract.serviceStartDate, contract.serviceEndDate) === 'PAUSED',
-    );
-    return hasPaused ? 'PAUSED' : 'INACTIVE';
+    if (contracts.some((c) => c.derivedStatus === ContractDerivedStatus.ACTIVE)) return 'ACTIVE';
+    if (contracts.some((c) => c.derivedStatus === ContractDerivedStatus.PAUSED)) return 'PAUSED';
+    return 'INACTIVE';
   }
 
   private toDateOnlyString(d: Date | null | undefined): string | null {
@@ -135,17 +130,18 @@ export class ClientsService {
   private pickListContractServiceWindow(
     contracts: Array<{
       id: string;
-      status: string;
+      derivedStatus: ContractDerivedStatus;
       serviceStartDate: Date | null;
       serviceEndDate: Date | null;
       createdAt: Date;
     }>,
   ): { start: Date | null; end: Date | null } | null {
-    const byPhase = (phase: 'ACTIVE' | 'PAUSED') =>
-      contracts.filter(
-        (c) => this.deriveContractStatus(c.status, c.serviceStartDate, c.serviceEndDate) === phase,
-      );
-    const pool = byPhase('ACTIVE').length > 0 ? byPhase('ACTIVE') : byPhase('PAUSED');
+    const byPhase = (phase: ContractDerivedStatus) =>
+      contracts.filter((c) => c.derivedStatus === phase);
+    const pool =
+      byPhase(ContractDerivedStatus.ACTIVE).length > 0
+        ? byPhase(ContractDerivedStatus.ACTIVE)
+        : byPhase(ContractDerivedStatus.PAUSED);
     if (pool.length === 0) return null;
     let best = pool[0]!;
     let bestCreated = best.createdAt.getTime();
@@ -348,7 +344,7 @@ export class ClientsService {
     const skip = (page - 1) * limit;
     const where = this.buildFindAllWhere(query);
 
-    let items: Client[];
+    let items: ClientListRow[];
     let total: number;
 
     if (query.sortBy === 'inGym') {
@@ -383,7 +379,10 @@ export class ClientsService {
       if (ids.length === 0) {
         items = [];
       } else {
-        const unordered = await this.prisma.client.findMany({ where: { id: { in: ids } } });
+        const unordered = await this.prisma.client.findMany({
+          where: { id: { in: ids } },
+          select: CLIENT_LIST_SELECT,
+        });
         const orderMap = new Map(ids.map((id, index) => [id, index]));
         items = [...unordered].sort((a, b) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0));
       }
@@ -419,7 +418,10 @@ export class ClientsService {
       if (ids.length === 0) {
         items = [];
       } else {
-        const unordered = await this.prisma.client.findMany({ where: { id: { in: ids } } });
+        const unordered = await this.prisma.client.findMany({
+          where: { id: { in: ids } },
+          select: CLIENT_LIST_SELECT,
+        });
         const orderMap = new Map(ids.map((id, index) => [id, index]));
         items = [...unordered].sort((a, b) => (orderMap.get(a.id) ?? 0) - (orderMap.get(b.id) ?? 0));
       }
@@ -430,6 +432,7 @@ export class ClientsService {
           skip,
           take: limit,
           orderBy: this.resolveClientListOrderBy(query),
+          select: CLIENT_LIST_SELECT,
         }),
         this.prisma.client.count({ where }),
       ]);
@@ -443,7 +446,7 @@ export class ClientsService {
         select: {
           id: true,
           clientId: true,
-          status: true,
+          derivedStatus: true,
           serviceStartDate: true,
           serviceEndDate: true,
           createdAt: true,
@@ -469,7 +472,7 @@ export class ClientsService {
         Array<{
           id: string;
           clientId: string;
-          status: string;
+          derivedStatus: ContractDerivedStatus;
           serviceStartDate: Date | null;
           serviceEndDate: Date | null;
           createdAt: Date;
@@ -482,7 +485,6 @@ export class ClientsService {
       }
       const openVisitByClient = this.pickClientOpenVisitStatus(openVisitRows);
       const latestVisitByClient = new Map(latestVisitRows.map((row) => [row.clientId, row.enteredAt]));
-      const updates: Array<Promise<unknown>> = [];
       for (const item of items) {
         const openSt = openVisitByClient.get(item.id);
         const row = item as typeof item & {
@@ -493,34 +495,49 @@ export class ClientsService {
         row.inGym = openSt === VisitSessionStatus.IN_GYM;
         row.openVisitStatus = openSt ?? null;
         row.lastVisitAt = latestVisitByClient.get(item.id) ?? null;
-        const next = this.deriveClientStatusFromContracts(byClient.get(item.id) ?? [], item.status);
-        if (item.status !== next) {
-          item.status = next;
-          updates.push(
-            this.prisma.client.update({
-              where: { id: item.id },
-              data: { status: next },
-              select: { id: true },
-            }),
+        if (item.status !== 'BLOCKED') {
+          const displayStatus = this.deriveClientStatusFromContracts(
+            byClient.get(item.id) ?? [],
+            item.status,
           );
+          item.status = displayStatus;
         }
-      }
-      if (updates.length > 0) await Promise.all(updates);
-
-      for (const item of items) {
         const contracts = byClient.get(item.id) ?? [];
         const picked = this.pickListContractServiceWindow(contracts);
-        const row = item as Client & {
+        const contractRow = item as Client & {
           effectiveContractStartDate?: string | null;
           effectiveContractEndDate?: string | null;
         };
         if (picked?.end) {
-          row.effectiveContractEndDate = this.toDateOnlyString(picked.end);
-          row.effectiveContractStartDate =
+          contractRow.effectiveContractEndDate = this.toDateOnlyString(picked.end);
+          contractRow.effectiveContractStartDate =
             this.toDateOnlyString(picked.start) ?? this.toDateOnlyString(item.contractStartDate);
         } else {
-          row.effectiveContractStartDate = this.toDateOnlyString(item.contractStartDate);
-          row.effectiveContractEndDate = this.toDateOnlyString(item.contractEndDate);
+          contractRow.effectiveContractStartDate = this.toDateOnlyString(item.contractStartDate);
+          contractRow.effectiveContractEndDate = this.toDateOnlyString(item.contractEndDate);
+        }
+      }
+    }
+
+    if (items.length > 0) {
+      const catalogIds = [
+        ...new Set(
+          items
+            .map((i) => i.membershipType)
+            .filter((id): id is string => Boolean(id?.trim())),
+        ),
+      ];
+      if (catalogIds.length > 0) {
+        const catalogRows = await this.prisma.membershipCatalog.findMany({
+          where: { id: { in: catalogIds } },
+          select: { id: true, name: true },
+        });
+        const nameById = new Map(catalogRows.map((c) => [c.id, c.name]));
+        for (const item of items) {
+          const id = item.membershipType?.trim();
+          if (!id) continue;
+          const row = item as typeof item & { membershipCatalogName?: string | null };
+          row.membershipCatalogName = nameById.get(id) ?? null;
         }
       }
     }
@@ -760,6 +777,8 @@ export class ClientsService {
       status: 'INACTIVE',
       email: this.nullable(dto.email),
       passport: this.nullable(dto.passport),
+      passportIssuedBy: this.nullable(dto.passportIssuedBy),
+      passportIssuedAt: this.parseDate(dto.passportIssuedAt),
       address: this.nullable(dto.address),
       notes: this.nullable(dto.notes),
       manager: { connect: { id: actorId } },
@@ -788,6 +807,8 @@ export class ClientsService {
     if (dto.gender !== undefined) data.gender = dto.gender;
     if (dto.email !== undefined) data.email = this.nullable(dto.email);
     if (dto.passport !== undefined) data.passport = this.nullable(dto.passport);
+    if (dto.passportIssuedBy !== undefined) data.passportIssuedBy = this.nullable(dto.passportIssuedBy);
+    if (dto.passportIssuedAt !== undefined) data.passportIssuedAt = this.parseDate(dto.passportIssuedAt);
     if (dto.address !== undefined) data.address = this.nullable(dto.address);
     if (dto.notes !== undefined) data.notes = this.nullable(dto.notes);
     data.manager = { connect: { id: actorId } };

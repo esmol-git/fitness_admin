@@ -8,6 +8,8 @@ import type { TableSortOrder } from '@/types/table'
 
 type SortOrder = TableSortOrder
 
+export type ClientEditTab = 'general' | 'payments' | 'visits' | 'history'
+
 export type ClientsListFilters = {
   status?: ClientRow['status'] | ''
   inGym?: 'IN_GYM' | 'OUT_GYM' | 'VISIT_OVERDUE' | ''
@@ -35,6 +37,8 @@ export type ParsedClientsListQuery = {
   sortOrder: SortOrder
   /** Открыть карточку клиента по id (query `edit`). */
   editClientId: string
+  /** Активная вкладка модалки клиента (query `editTab`, только при открытой карточке). */
+  editClientTab: ClientEditTab
 }
 
 const DEFAULT_SORT_BY = 'lastVisitAt'
@@ -53,6 +57,11 @@ const VALID_CLIENTS_SORT_FIELDS = [
 function isValidClientsSort(field: string, order: string): order is 'asc' | 'desc' {
   if (order !== 'asc' && order !== 'desc') return false
   return (VALID_CLIENTS_SORT_FIELDS as readonly string[]).includes(field)
+}
+
+function parseEditClientTab(raw: string | undefined): ClientEditTab {
+  if (raw === 'payments' || raw === 'visits' || raw === 'history') return raw
+  return 'general'
 }
 
 export function parseClientsListRouteQuery(q: LocationQuery): ParsedClientsListQuery {
@@ -102,6 +111,7 @@ export function parseClientsListRouteQuery(q: LocationQuery): ParsedClientsListQ
   const editRaw = (raw.edit ?? '').trim()
   const editClientId =
     editRaw && editRaw.length <= 64 && /^[a-zA-Z0-9_-]+$/.test(editRaw) ? editRaw : ''
+  const editClientTab = editClientId ? parseEditClientTab(raw.editTab) : 'general'
 
   return {
     search,
@@ -118,6 +128,7 @@ export function parseClientsListRouteQuery(q: LocationQuery): ParsedClientsListQ
     sortBy,
     sortOrder,
     editClientId,
+    editClientTab,
   }
 }
 
@@ -136,6 +147,7 @@ export function buildClientsListRouteQuery(state: {
   sortBy: string | null
   sortOrder: SortOrder
   editClientId: string
+  editClientTab: ClientEditTab
 }): Record<string, string> {
   const out: Record<string, string> = {}
   const s = state.search.trim()
@@ -155,7 +167,12 @@ export function buildClientsListRouteQuery(state: {
   if (!defaultSort && state.sortBy && state.sortOrder) {
     out.sort = `${state.sortBy}:${state.sortOrder}`
   }
-  if (state.editClientId.trim()) out.edit = state.editClientId.trim()
+  if (state.editClientId.trim()) {
+    out.edit = state.editClientId.trim()
+    if (state.editClientTab !== 'general') {
+      out.editTab = state.editClientTab
+    }
+  }
   return out
 }
 
@@ -169,6 +186,7 @@ function stateMatchesParsed(
     sortBy: Ref<string | null>
     sortOrder: Ref<SortOrder>
     editClientId: Ref<string>
+    editClientTab: Ref<ClientEditTab>
   },
 ): boolean {
   return (
@@ -185,7 +203,8 @@ function stateMatchesParsed(
     ctx.limit.value === p.limit &&
     ctx.sortBy.value === p.sortBy &&
     ctx.sortOrder.value === p.sortOrder &&
-    ctx.editClientId.value === p.editClientId
+    ctx.editClientId.value === p.editClientId &&
+    ctx.editClientTab.value === p.editClientTab
   )
 }
 
@@ -201,6 +220,7 @@ export function useClientsListUrlSync(
     sortOrder: Ref<SortOrder>
     syncSearchImmediate: (v: string) => void
     editClientId: Ref<string>
+    editClientTab: Ref<ClientEditTab>
   },
 ) {
   const syncingFromRoute = ref(false)
@@ -210,6 +230,7 @@ export function useClientsListUrlSync(
     if (stateMatchesParsed(p, ctx)) return
     syncingFromRoute.value = true
     ctx.editClientId.value = p.editClientId
+    ctx.editClientTab.value = p.editClientTab
     ctx.limit.value = p.limit
     ctx.syncSearchImmediate(p.search)
     ctx.filters.value = {
@@ -256,6 +277,7 @@ export function useClientsListUrlSync(
       ctx.sortBy,
       ctx.sortOrder,
       ctx.editClientId,
+      ctx.editClientTab,
     ],
     () => {
       if (syncingFromRoute.value) return
@@ -274,6 +296,7 @@ export function useClientsListUrlSync(
         sortBy: ctx.sortBy.value,
         sortOrder: ctx.sortOrder.value,
         editClientId: ctx.editClientId.value,
+        editClientTab: ctx.editClientTab.value,
       })
       if (routeQueryEquals(next, route.query)) return
       syncingFromRoute.value = true

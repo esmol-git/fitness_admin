@@ -1,4 +1,4 @@
-import { PaymentStatus } from '@prisma/client';
+import { PaymentChannel, PaymentStatus } from '@prisma/client';
 import { IsDateString, IsEnum, IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator';
 
 export class CreatePaymentDto {
@@ -20,6 +20,10 @@ export class CreatePaymentDto {
   @IsOptional()
   @IsEnum(PaymentStatus)
   status?: PaymentStatus;
+
+  @IsOptional()
+  @IsEnum(PaymentChannel)
+  channel?: PaymentChannel;
 
   @IsOptional()
   @IsString()

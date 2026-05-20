@@ -57,6 +57,15 @@ export class UpdateClientDto {
   @IsOptional()
   @IsString()
   @MaxLength(255)
+  passportIssuedBy?: string | null;
+
+  @IsOptional()
+  @IsDateString()
+  passportIssuedAt?: string | null;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(255)
   address?: string | null;
 
   @IsOptional()

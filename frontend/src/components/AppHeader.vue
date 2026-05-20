@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { RouterLink, useRouter } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { useAppPreferencesStore } from '@/stores/appPreferences'
 import { useAuthStore } from '@/stores/auth'
 import { useUiStore } from '@/stores/ui'
 import { useToast } from 'vuestic-ui'
 import { resolveApiErrorMessage } from '@/composables/useApiErrorMap'
+import { useScannerModalUrlSync } from '@/composables/useScannerModalUrlSync'
+import StatusBadge from '@/components/ui/StatusBadge.vue'
 import { api } from '@/utils/api'
 import { clientPhotoDisplayUrl } from '@/utils/clientPhotoUrl'
 import axios from 'axios'
@@ -18,6 +20,7 @@ const props = withDefaults(
 )
 
 const { t } = useI18n()
+const route = useRoute()
 const router = useRouter()
 const prefs = useAppPreferencesStore()
 const auth = useAuthStore()
@@ -42,6 +45,8 @@ const scannerHint = ref<string | null>(null)
 const scannerModalRef = ref<HTMLElement | null>(null)
 const scannerLoading = ref(false)
 const scannerLockerNumber = ref('')
+const scannerLockerInputRef = ref<HTMLInputElement | null>(null)
+const SCANNER_LOCKER_MAX_LEN = 4
 const scannerClientCard = ref<{
   id: string
   fullName: string
@@ -109,10 +114,62 @@ const scannerClientEntryNotAllowed = computed(
   () => Boolean(scannerClientCard.value && scannerClientCard.value.status !== 'ACTIVE'),
 )
 
-/** Незакрытая сессия визита: в зале — выход или принудительное закрытие; просрочена — только принудительное закрытие. */
+/** Незакрытая сессия: IN_GYM — обычный выход; OVERDUE (после 00:00) — выход через «ключ сдан / не сдан». */
 const scannerHasOpenVisit = computed(
   () => scannerVisitStatus.value === 'IN_GYM' || scannerVisitStatus.value === 'OVERDUE',
 )
+
+function scannerClientStatusTone(status: string): 'success' | 'warning' | 'danger' | 'info' | 'neutral' {
+  if (status === 'ACTIVE') return 'success'
+  if (status === 'PAUSED') return 'warning'
+  if (status === 'BLOCKED') return 'danger'
+  return 'neutral'
+}
+
+const scannerVisitBadgeLabel = computed(() => {
+  if (scannerHasOpenVisit.value) {
+    if (scannerVisitStatus.value === 'OVERDUE') {
+      return t('header.scannerOverdueWithLocker', { locker: scannerCurrentLocker.value || '—' })
+    }
+    return t('header.scannerInGymWithLocker', { locker: scannerCurrentLocker.value || '—' })
+  }
+  return t('header.scannerNotInGymLabel')
+})
+
+const scannerVisitBadgeTone = computed((): 'success' | 'warning' | 'info' => {
+  if (scannerVisitStatus.value === 'IN_GYM') return 'success'
+  if (scannerVisitStatus.value === 'OVERDUE') return 'warning'
+  return 'info'
+})
+
+const showScannerBottomHint = computed(() => {
+  if (scannerHintTone.value === 'searching' || scannerHintTone.value === 'notFound' || scannerHintTone.value === 'error') {
+    return true
+  }
+  if (scannerClientCard.value) {
+    if (scannerHasOpenVisit.value && scannerHint.value) return true
+    if (scannerClientEntryNotAllowed.value && scannerHint.value) return true
+    return false
+  }
+  return Boolean(scannerHint.value) || scannerHintTone.value === 'default'
+})
+
+function onScannerLockerNativeInput(event: Event) {
+  const el = event.target as HTMLInputElement
+  const next = el.value.replace(/\D/g, '').slice(0, SCANNER_LOCKER_MAX_LEN)
+  scannerLockerNumber.value = next
+  if (el.value !== next) el.value = next
+}
+
+function onScannerLockerKeydown(event: KeyboardEvent) {
+  if (event.ctrlKey || event.metaKey || event.altKey) return
+  const key = event.key
+  if (key === 'Backspace' || key === 'Delete' || key === 'Tab' || key === 'Enter' || key.startsWith('Arrow')) {
+    return
+  }
+  if (/^\d$/.test(key)) return
+  event.preventDefault()
+}
 
 function focusScannerInput() {
   const root = scannerModalRef.value
@@ -124,13 +181,11 @@ function focusScannerInput() {
 
 /** Поле шкафчика монтируется по v-if — после успешного lookup активного клиента вне зала. */
 function focusScannerLockerInput() {
-  const root = scannerModalRef.value
-  if (!root) return
-  const input = root.querySelector(
-    '.scanner-modal__locker-field input',
-  ) as HTMLInputElement | null
-  input?.focus()
-  input?.select()
+  void nextTick(() => {
+    const input = scannerLockerInputRef.value
+    input?.focus()
+    input?.select()
+  })
 }
 
 function openScannerModal() {
@@ -207,7 +262,9 @@ async function onScannerSubmit() {
     scannerClientCard.value = payload.client
     scannerVisitStatus.value = payload.openSession?.status ?? null
     scannerCurrentLocker.value = payload.openSession?.lockerNumber ?? null
-    scannerLockerNumber.value = payload.openSession?.lockerNumber ?? ''
+    scannerLockerNumber.value = (payload.openSession?.lockerNumber ?? '')
+      .replace(/\D/g, '')
+      .slice(0, SCANNER_LOCKER_MAX_LEN)
     scannerHintTone.value = 'default'
     if (payload.inGym) {
       scannerHint.value = t('header.scannerClientInGym')
@@ -219,8 +276,8 @@ async function onScannerSubmit() {
     } else if (payload.client.status !== 'ACTIVE') {
       scannerHint.value = t('header.scannerInactiveLookupHint')
     } else {
-      scannerHintTone.value = 'callout'
-      scannerHint.value = t('header.scannerClientNotInGym')
+      scannerHint.value = null
+      scannerHintTone.value = 'default'
     }
     focusLockerAfterLookup = !payload.openSession && payload.client.status === 'ACTIVE'
   } catch (error: unknown) {
@@ -303,7 +360,7 @@ async function scannerForceClose(reason: 'LOST_KEY' | 'FOUND_LATER' | 'ADMIN_COR
   scannerLoading.value = true
   try {
     await api.post('/visits/force-close', { code, reason })
-    notify({ color: 'success', message: t('header.scannerForceCloseSuccess') })
+    notify({ color: 'success', message: t('header.scannerCheckOutSuccess') })
     refreshRegistriesAfterVisitMutation()
     closeScannerModal()
   } catch (error: unknown) {
@@ -377,6 +434,47 @@ watch(
     await onScannerSubmit()
   },
 )
+
+useScannerModalUrlSync(route, router, {
+  compact: computed(() => props.compact),
+  scannerOpen,
+  scannerInputValue,
+  isRouteSyncBlocked: () => scannerLoading.value,
+  applyFromRoute: async (parsed) => {
+    if (!parsed.shouldOpen) {
+      if (scannerOpen.value) {
+        scannerOpen.value = false
+        scannerLoading.value = false
+      }
+      return
+    }
+
+    const nextCode = parsed.code
+    const codeChanged = nextCode !== scannerInputValue.value.trim()
+    const needsLookup =
+      Boolean(nextCode) &&
+      !scannerLoading.value &&
+      (!scannerClientCard.value || codeChanged)
+
+    scannerHint.value = null
+    scannerHintTone.value = 'default'
+    if (codeChanged) {
+      clearScannerResolvedState()
+      scannerInputValue.value = nextCode
+    }
+
+    if (!scannerOpen.value) {
+      scannerOpen.value = true
+    } else if (needsLookup) {
+      await nextTick()
+      focusScannerInput()
+    }
+
+    if (needsLookup) {
+      await onScannerSubmit()
+    }
+  },
+})
 
 const clockDate = computed(() => {
   const raw = new Intl.DateTimeFormat(prefs.locale, {
@@ -464,13 +562,10 @@ const clockTime = computed(() =>
             preset="secondary"
             color="primary"
             class="header-scan-btn"
-            :class="{ 'header-scan-btn--icon-only': isMobileNav }"
-            :size="isMobileNav ? 'medium' : 'small'"
+            size="medium"
             :aria-label="t('header.scanClient')"
             @click="openScannerModal"
-          >
-            <span v-if="!isMobileNav">{{ t('header.scanClient') }}</span>
-          </VaButton>
+          />
         </div>
       </template>
     </VaNavbar>
@@ -481,33 +576,32 @@ const clockTime = computed(() =>
       no-padding
       no-outside-dismiss
       max-width="min(96vw, 540px)"
+      class="scanner-modal-shell"
     >
-      <div ref="scannerModalRef" class="scanner-modal scanner-modal--sheet">
-        <header class="scanner-modal__header scanner-modal__header--hero">
-          <div class="scanner-modal__hero">
-            <div class="scanner-modal__hero-icon" aria-hidden="true">
+      <div ref="scannerModalRef" class="scanner-modal">
+        <header class="scanner-modal__header">
+          <div class="scanner-modal__lead">
+            <div class="scanner-modal__icon" aria-hidden="true">
               <VaIcon name="qr_code_scanner" size="22px" />
             </div>
-            <div class="scanner-modal__title-wrap">
+            <div class="scanner-modal__head-copy">
               <h3 class="scanner-modal__title">{{ t('header.scannerTitle') }}</h3>
               <p class="scanner-modal__subtitle">{{ t('header.scannerSubtitle') }}</p>
             </div>
           </div>
-          <VaButton
-            icon="close"
-            size="small"
-            preset="plain"
-            color="secondary"
-            class="scanner-modal__close-fab"
+          <button
+            type="button"
+            class="scanner-modal__close"
             :aria-label="t('header.closeScanner')"
             @click="closeScannerModal"
-          />
+          >
+            <VaIcon name="close" size="22px" />
+          </button>
         </header>
 
-        <form class="scanner-modal__body" @submit.prevent="onScannerSubmit">
-          <div class="scanner-modal__column">
-          <div
-            class="scanner-modal__code-wrap"
+        <form id="scanner-lookup-form" class="scanner-modal__body" @submit.prevent="onScannerSubmit">
+          <section
+            class="scanner-modal__card scanner-modal__code-wrap"
             :class="{
               'scanner-modal__code-wrap--not-found': scannerHintTone === 'notFound',
               'scanner-modal__code-wrap--locked': Boolean(scannerClientCard),
@@ -523,22 +617,22 @@ const clockTime = computed(() =>
               @keydown.enter.prevent="onScannerSubmit"
               @update:model-value="onScannerCodeInput"
             />
-          </div>
+          </section>
           <div
             v-if="scannerClientCard"
-            class="scanner-client-card"
+            class="scanner-pass-card"
             :class="{
-              'scanner-client-card--entry-blocked': scannerClientEntryNotAllowed,
-              'scanner-client-card--in-gym':
+              'scanner-pass-card--entry-blocked': scannerClientEntryNotAllowed,
+              'scanner-pass-card--in-gym':
                 scannerVisitStatus === 'IN_GYM' && !scannerClientEntryNotAllowed,
-              'scanner-client-card--overdue-visit':
+              'scanner-pass-card--overdue-visit':
                 scannerVisitStatus === 'OVERDUE' && !scannerClientEntryNotAllowed,
             }"
             role="group"
           >
             <div
               v-if="scannerClientEntryNotAllowed"
-              class="scanner-client-card__alert"
+              class="scanner-pass-card__banner scanner-pass-card__banner--danger"
               role="status"
             >
               {{
@@ -547,137 +641,134 @@ const clockTime = computed(() =>
                   : t('header.scannerInactiveClientBanner')
               }}
             </div>
-            <VaAlert
+            <div
               v-if="scannerClientCard.contractUnpaid"
-              color="warning"
-              border="left"
-              outline
-              class="scanner-client-card__unpaid-alert"
+              class="scanner-pass-card__banner scanner-pass-card__banner--warning"
               role="alert"
             >
-              <span class="scanner-client-card__unpaid-alert-text">{{
+              {{
                 t('header.scannerContractUnpaidBanner', {
                   number: scannerClientCard.contractUnpaid.contractNumber,
                   balance: scannerClientCard.contractUnpaid.balanceDue,
                 })
-              }}</span>
-            </VaAlert>
-            <div class="scanner-client-card__stack">
-              <div class="scanner-client-card__avatar" aria-hidden="true">
-                <img
-                  v-if="scannerPhotoShowImg"
-                  class="scanner-client-card__avatar-img"
-                  :src="scannerClientPhotoSrc"
-                  alt=""
-                  @error="onScannerPhotoError"
-                />
-                <VaIcon
-                  v-else
-                  name="person"
-                  class="scanner-client-card__avatar-placeholder"
-                  size="56px"
-                />
+              }}
+            </div>
+
+            <div class="scanner-pass-card__main">
+              <div class="scanner-pass-card__photo-wrap">
+                <div class="scanner-pass-card__photo" aria-hidden="true">
+                  <img
+                    v-if="scannerPhotoShowImg"
+                    class="scanner-pass-card__photo-img"
+                    :src="scannerClientPhotoSrc"
+                    alt=""
+                    @error="onScannerPhotoError"
+                  />
+                  <VaIcon v-else name="person" class="scanner-pass-card__photo-placeholder" size="72px" />
+                </div>
               </div>
-              <div class="scanner-client-card__body">
-                <div class="scanner-client-card__headline">
-                  <div class="scanner-client-card__name">{{ scannerClientCard.fullName }}</div>
+
+              <div class="scanner-pass-card__info">
+                <div class="scanner-pass-card__name-row">
+                  <h4 class="scanner-pass-card__name">{{ scannerClientCard.fullName }}</h4>
                   <VaButton
                     type="button"
                     preset="plain"
                     color="primary"
-                    size="small"
+                    size="medium"
                     icon="open_in_new"
-                    class="scanner-client-card__profile-btn"
+                    class="scanner-pass-card__profile-btn"
                     :aria-label="t('header.openClientProfile')"
                     :title="t('header.openClientProfile')"
                     @click.stop="goToClientProfile"
                   />
                 </div>
-                <div class="scanner-client-card__meta">
-                  <span>{{ scannerClientCard.phone }}</span>
-                  <span class="scanner-client-card__meta-sep">·</span>
-                  <span
-                    class="scanner-client-card__status"
-                    :class="{ 'scanner-client-card__status--danger': scannerClientEntryNotAllowed }"
-                    >{{ t(`clients.status.${scannerClientCard.status}`) }}</span
-                  >
-                </div>
-                <div
-                  class="scanner-client-card__state"
-                  :class="{
-                    'scanner-client-card__state--in': scannerVisitStatus === 'IN_GYM',
-                    'scanner-client-card__state--overdue': scannerVisitStatus === 'OVERDUE',
-                  }"
-                >
-                  <template v-if="scannerHasOpenVisit">
-                    {{
-                      scannerVisitStatus === 'OVERDUE'
-                        ? t('header.scannerOverdueWithLocker', { locker: scannerCurrentLocker || '—' })
-                        : t('header.scannerInGymWithLocker', { locker: scannerCurrentLocker || '—' })
-                    }}
-                  </template>
-                  <template v-else>{{ t('header.scannerNotInGymLabel') }}</template>
+                <div class="scanner-pass-card__phone">{{ scannerClientCard.phone }}</div>
+                <div class="scanner-pass-card__badges">
+                  <StatusBadge
+                    :label="t(`clients.status.${scannerClientCard.status}`)"
+                    :tone="scannerClientStatusTone(scannerClientCard.status)"
+                  />
+                  <StatusBadge :label="scannerVisitBadgeLabel" :tone="scannerVisitBadgeTone" />
                 </div>
               </div>
             </div>
-            <div v-if="!scannerHasOpenVisit && !scannerClientEntryNotAllowed" class="scanner-client-card__locker">
-              <VaInput
-                v-model="scannerLockerNumber"
-                class="scanner-modal__locker-field"
-                :label="t('header.scannerLockerLabel')"
-                :disabled="scannerLoading"
-              />
+
+            <div
+              v-if="!scannerHasOpenVisit && !scannerClientEntryNotAllowed"
+              class="scanner-pass-card__locker"
+            >
+              <label class="scanner-locker-field">
+                <span class="scanner-locker-field__label">{{ t('header.scannerLockerLabel') }}</span>
+                <input
+                  ref="scannerLockerInputRef"
+                  :value="scannerLockerNumber"
+                  class="scanner-locker-field__input"
+                  type="text"
+                  inputmode="numeric"
+                  maxlength="4"
+                  autocomplete="off"
+                  :disabled="scannerLoading"
+                  @input="onScannerLockerNativeInput"
+                  @keydown="onScannerLockerKeydown"
+                  @keydown.enter.prevent="scannerCheckIn"
+                />
+              </label>
             </div>
           </div>
-          <div class="scanner-modal__bottom">
-            <div
-              class="scanner-modal__hint"
-              :class="{
-                'scanner-modal__hint--not-found': scannerHintTone === 'notFound',
-                'scanner-modal__hint--error': scannerHintTone === 'error',
-                'scanner-modal__hint--callout': scannerHintTone === 'callout',
-              }"
-              role="status"
+          <div
+            v-if="showScannerBottomHint"
+            class="scanner-modal__hint"
+            :class="{
+              'scanner-modal__hint--not-found': scannerHintTone === 'notFound',
+              'scanner-modal__hint--error': scannerHintTone === 'error',
+              'scanner-modal__hint--callout': scannerHintTone === 'callout',
+            }"
+            role="status"
+          >
+            <VaIcon
+              v-if="scannerHintTone === 'notFound'"
+              name="person_off"
+              color="#b91c1c"
+              class="scanner-modal__hint-icon"
+              size="20px"
+            />
+            <VaIcon
+              v-else-if="scannerHintTone === 'error'"
+              name="error_outline"
+              color="#b91c1c"
+              class="scanner-modal__hint-icon"
+              size="20px"
+            />
+            <VaIcon
+              v-else-if="scannerHintTone === 'callout'"
+              name="pin_drop"
+              class="scanner-modal__hint-icon scanner-modal__hint-icon--callout"
+              size="20px"
+            />
+            <span class="scanner-modal__hint-text">{{ scannerHint ?? t('header.scannerHint') }}</span>
+          </div>
+          <div v-if="scannerClientCard" class="scanner-modal__another-wrap">
+            <VaButton
+              type="button"
+              preset="plain"
+              size="small"
+              color="primary"
+              icon="qr_code_scanner"
+              class="scanner-modal__another-btn"
+              @click="prepareAnotherScannerLookup"
             >
-              <VaIcon
-                v-if="scannerHintTone === 'notFound'"
-                name="person_off"
-                color="#b91c1c"
-                class="scanner-modal__hint-icon"
-                size="20px"
-              />
-              <VaIcon
-                v-else-if="scannerHintTone === 'error'"
-                name="error_outline"
-                color="#b91c1c"
-                class="scanner-modal__hint-icon"
-                size="20px"
-              />
-              <VaIcon
-                v-else-if="scannerHintTone === 'callout'"
-                name="pin_drop"
-                class="scanner-modal__hint-icon scanner-modal__hint-icon--callout"
-                size="20px"
-              />
-              <span class="scanner-modal__hint-text">{{ scannerHint ?? t('header.scannerHint') }}</span>
-            </div>
-            <div v-if="scannerClientCard" class="scanner-modal__another-wrap">
-              <VaButton
-                type="button"
-                preset="plain"
-                size="small"
-                color="primary"
-                icon="qr_code_scanner"
-                class="scanner-modal__another-btn"
-                @click="prepareAnotherScannerLookup"
-              >
-                {{ t('header.scannerAnotherCode') }}
-              </VaButton>
-            </div>
-            <div class="scanner-modal__actions">
+              {{ t('header.scannerAnotherCode') }}
+            </VaButton>
+          </div>
+        </form>
+
+        <footer class="scanner-modal__footer">
+          <div class="scanner-modal__actions">
             <VaButton
               v-if="!scannerClientCard"
               type="submit"
+              form="scanner-lookup-form"
               size="large"
               icon="search"
               color="primary"
@@ -715,7 +806,7 @@ const clockTime = computed(() =>
             </VaButton>
             <template v-if="scannerClientCard && scannerHasOpenVisit">
               <VaButton
-                v-if="scannerVisitStatus !== 'OVERDUE'"
+                v-if="scannerVisitStatus === 'IN_GYM'"
                 type="button"
                 size="large"
                 color="warning"
@@ -726,7 +817,7 @@ const clockTime = computed(() =>
               >
                 {{ t('header.scannerCheckOut') }}
               </VaButton>
-              <div class="scanner-modal__force-close-span">
+              <div v-if="scannerVisitStatus === 'OVERDUE'" class="scanner-modal__force-close-span">
                 <VaButton
                   type="button"
                   size="large"
@@ -753,9 +844,7 @@ const clockTime = computed(() =>
               </div>
             </template>
           </div>
-          </div>
-          </div>
-        </form>
+        </footer>
       </div>
     </VaModal>
   </div>
@@ -775,6 +864,10 @@ const clockTime = computed(() =>
   --va-navbar-padding-y: 0.45rem;
   --va-navbar-padding-x: 0.65rem;
   --va-navbar-height: auto;
+}
+
+.app-header :deep(.va-navbar__right) {
+  align-items: center;
 }
 
 @media (max-width: 960px) {
@@ -838,33 +931,46 @@ const clockTime = computed(() =>
 .header-tools {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: center;
+  align-self: center;
   min-width: 0;
 }
 
 .header-scan-btn {
-  --va-button-sm-height: 2rem;
-}
-
-.header-scan-btn--icon-only {
-  --va-button-md-height: 3rem;
-  --va-button-md-width: 3rem;
-  min-width: 3rem !important;
-  min-height: 3rem !important;
-  padding-left: 0 !important;
-  padding-right: 0 !important;
+  --va-button-md-height: 3.1rem;
+  --va-button-md-width: 3.1rem;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  min-width: 3.1rem !important;
+  min-height: 3.1rem !important;
+  width: 3.1rem !important;
+  height: 3.1rem !important;
+  padding: 0 !important;
   border-radius: 14px !important;
 }
 
-.header-scan-btn--icon-only :deep(.va-button__content) {
-  gap: 0;
+.header-scan-btn :deep(.va-button__content) {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 100% !important;
+  height: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  gap: 0 !important;
 }
 
-.header-scan-btn--icon-only :deep(.material-icons),
-.header-scan-btn--icon-only :deep(.va-icon) {
-  font-size: 1.75rem !important;
-  width: 1.75rem !important;
-  height: 1.75rem !important;
+.header-scan-btn :deep(.material-icons),
+.header-scan-btn :deep(.va-icon) {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  font-size: 2rem !important;
+  width: 2rem !important;
+  height: 2rem !important;
+  line-height: 1 !important;
+  margin: 0 !important;
 }
 
 .header-clock-wrap {
@@ -922,129 +1028,133 @@ const clockTime = computed(() =>
 .scanner-modal {
   display: flex;
   flex-direction: column;
-  overflow: visible;
-}
-
-.scanner-modal--sheet {
-  border-radius: 18px;
+  min-height: 0;
   overflow: hidden;
   background: var(--app-surface);
-  box-shadow: 0 12px 40px rgba(15, 23, 42, 0.1);
 }
 
 .scanner-modal__header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 0.45rem;
-  padding: 0.65rem 0.85rem 0.55rem;
-  border-bottom: 1px solid var(--app-border);
-}
-
-.scanner-modal__header--hero {
-  border-bottom: none;
-  padding: 0.65rem 0.85rem 0.55rem;
+  gap: 0.75rem;
+  padding: 0.9rem 1rem 0.8rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--app-border) 78%, transparent);
   background: linear-gradient(
-    125deg,
-    color-mix(in srgb, var(--va-primary) 14%, transparent) 0%,
-    color-mix(in srgb, var(--va-primary) 4%, transparent) 55%,
+    180deg,
+    color-mix(in srgb, var(--app-accent) 5%, var(--app-surface)) 0%,
     var(--app-surface) 100%
   );
 }
 
-.scanner-modal__hero {
+.scanner-modal__lead {
   display: flex;
   align-items: flex-start;
-  gap: 0.6rem;
+  gap: 0.7rem;
   min-width: 0;
-  flex: 1;
-  padding-right: 0.2rem;
 }
 
-.scanner-modal__hero-icon {
-  flex-shrink: 0;
+.scanner-modal__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 2.5rem;
   height: 2.5rem;
   border-radius: 12px;
-  display: flex;
+  background: color-mix(in srgb, var(--app-accent) 14%, var(--app-surface));
+  color: var(--app-accent);
+  flex-shrink: 0;
+}
+
+.scanner-modal__head-copy {
+  min-width: 0;
+}
+
+.scanner-modal__close {
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: color-mix(in srgb, var(--va-primary) 20%, var(--app-surface));
-  color: var(--va-primary);
-  box-shadow: 0 1px 0 color-mix(in srgb, var(--va-primary) 25%, transparent);
-}
-
-.scanner-modal__close-fab {
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--app-muted);
+  cursor: pointer;
   flex-shrink: 0;
-  margin-top: -0.1rem;
 }
 
-.scanner-modal__title-wrap {
-  min-width: 0;
+.scanner-modal__close:hover {
+  color: var(--app-text);
+  background: color-mix(in srgb, var(--app-surface) 86%, var(--app-border) 14%);
+}
+
+.scanner-modal__close:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--app-accent) 55%, transparent);
+  outline-offset: 2px;
 }
 
 .scanner-modal__title {
   margin: 0;
-  font-size: 1rem;
+  font-size: 1.05rem;
   font-weight: 700;
   color: var(--app-text);
-  line-height: 1.25;
+  line-height: 1.3;
 }
 
 .scanner-modal__subtitle {
-  margin: 0.12rem 0 0;
-  font-size: 0.78rem;
+  margin: 0.2rem 0 0;
+  font-size: 0.8125rem;
   color: var(--app-muted);
-  line-height: 1.35;
+  line-height: 1.4;
 }
 
 .scanner-modal__body {
-  padding: 0.4rem 0.65rem 0.5rem;
   display: flex;
   flex-direction: column;
-  align-items: stretch;
-  width: 100%;
-  box-sizing: border-box;
-  overflow: visible;
-  background: linear-gradient(180deg, var(--app-surface) 0%, color-mix(in srgb, var(--app-surface) 96%, var(--app-muted) 4%) 100%);
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
-.scanner-modal__column {
-  width: 100%;
-  max-width: 100%;
-  margin: 0 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 0.38rem;
-  min-width: 0;
+.scanner-modal__card {
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--app-accent) 16%, var(--app-border));
+  background: color-mix(in srgb, var(--app-surface) 98%, white 2%);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--app-text) 4%, transparent);
 }
 
-.scanner-modal__body :deep(.va-input-wrapper) {
+.scanner-modal__body :deep(.scanner-modal__code-wrap .va-input-wrapper) {
   width: 100%;
   display: block;
   margin-bottom: 0;
 }
 
 .scanner-modal__body :deep(.va-input-wrapper__field) {
-  min-height: 2.35rem;
+  min-height: 2.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 .scanner-modal__code-wrap {
   width: 100%;
   box-sizing: border-box;
-  border-radius: 12px;
+  padding: 0.75rem 0.85rem 0.7rem;
   transition:
     box-shadow 0.15s ease,
-    background-color 0.15s ease;
+    background-color 0.15s ease,
+    border-color 0.15s ease;
 }
 
 .scanner-modal__code-wrap--not-found {
-  padding: 0.65rem 0.75rem 0.55rem;
-  background: rgba(220, 38, 38, 0.08);
-  box-shadow: 0 0 0 2px #dc2626;
+  border-color: color-mix(in srgb, var(--va-danger) 52%, var(--app-border));
+  background: color-mix(in srgb, var(--va-danger) 6%, var(--app-surface));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--va-danger) 18%, transparent);
 }
 
-/* Одна рамка снаружи: убираем стандартную обводку VaInput (фиолетовый контур). */
 .scanner-modal__code-wrap--not-found :deep(.va-input-wrapper) {
   --va-input-wrapper-border-width: 0;
   --va-input-wrapper-background-opacity: 0;
@@ -1066,29 +1176,30 @@ const clockTime = computed(() =>
 .scanner-modal__code-wrap--locked :deep(.va-input-wrapper__field) {
   cursor: default;
   user-select: all;
-  background: color-mix(in srgb, var(--app-muted) 10%, var(--app-surface, #fff));
+  background: color-mix(in srgb, var(--app-muted) 8%, var(--app-surface));
   color: var(--app-text);
-  font-weight: 600;
-  letter-spacing: 0.02em;
+  font-weight: 700;
 }
 
-.scanner-modal__bottom {
-  display: flex;
-  flex-direction: column;
-  gap: 0.32rem;
-  flex-shrink: 0;
-  width: 100%;
+.scanner-modal__footer {
+  padding: 0.75rem 1rem 0.9rem;
+  border-top: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
+  background: color-mix(in srgb, var(--app-text) 2.5%, var(--app-surface));
 }
 
 .scanner-modal__hint {
   width: 100%;
   box-sizing: border-box;
-  font-size: 0.8rem;
+  font-size: 0.8125rem;
   color: var(--app-muted);
   min-height: 0;
   display: flex;
   align-items: flex-start;
-  gap: 0.4rem;
+  gap: 0.45rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--app-text) 3%, var(--app-surface));
+  border: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
 }
 
 .scanner-modal__hint-text {
@@ -1148,195 +1259,197 @@ const clockTime = computed(() =>
   color: #fde047;
 }
 
-.scanner-client-card {
+.scanner-pass-card {
   width: 100%;
   box-sizing: border-box;
-  border: 1px solid var(--app-border);
-  border-radius: 12px;
-  padding: 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--app-border) 92%, transparent);
+  border-radius: 14px;
+  padding: 0.85rem;
   display: flex;
   flex-direction: column;
-  gap: 0.45rem;
-  transition:
-    border-color 0.15s ease,
-    box-shadow 0.15s ease,
-    background-color 0.15s ease;
-  background: var(--app-surface);
+  gap: 0.75rem;
+  background: color-mix(in srgb, var(--app-surface) 98%, var(--app-bg-end));
 }
 
-.scanner-client-card--in-gym {
-  border-color: color-mix(in srgb, var(--va-success) 35%, var(--app-border));
-  border-left-width: 4px;
-  border-left-color: var(--va-success);
-  box-shadow: 0 6px 22px rgba(22, 101, 52, 0.1);
+.scanner-pass-card--in-gym {
+  border-color: color-mix(in srgb, var(--va-success) 34%, var(--app-border));
+  background: color-mix(in srgb, var(--va-success) 5%, var(--app-surface));
 }
 
-.scanner-client-card--overdue-visit {
-  border-color: color-mix(in srgb, #ea580c 38%, var(--app-border));
-  border-left-width: 4px;
-  border-left-color: #ea580c;
-  box-shadow: 0 6px 22px rgba(234, 88, 12, 0.12);
+.scanner-pass-card--overdue-visit {
+  border-color: color-mix(in srgb, #ea580c 34%, var(--app-border));
+  background: color-mix(in srgb, #ea580c 5%, var(--app-surface));
 }
 
-.scanner-client-card--entry-blocked {
-  border: 2px solid #dc2626;
-  background: rgba(220, 38, 38, 0.07);
-  box-shadow: 0 0 0 1px rgba(220, 38, 38, 0.2);
+.scanner-pass-card--entry-blocked {
+  border-color: color-mix(in srgb, var(--va-danger) 42%, var(--app-border));
+  background: color-mix(in srgb, var(--va-danger) 5%, var(--app-surface));
 }
 
-/* Светлый текст на насыщенном фоне — тёмно-красный (#991b1b) на rgba(..., 0.16) на тёмной карте не читался. */
-.scanner-client-card__alert {
-  margin: -0.05rem -0.2rem 0.1rem;
-  padding: 0.35rem 0.45rem;
-  border-radius: 7px;
-  font-size: 0.76rem;
-  font-weight: 700;
-  line-height: 1.35;
-  color: #fff5f5;
-  background: linear-gradient(
-    135deg,
-    color-mix(in srgb, #b91c1c 58%, var(--app-surface)) 0%,
-    color-mix(in srgb, #991b1b 52%, var(--app-surface)) 100%
-  );
-  border: 1px solid rgba(248, 113, 113, 0.45);
-  box-shadow: 0 1px 8px rgba(0, 0, 0, 0.22);
+.scanner-pass-card__banner {
+  padding: 0.55rem 0.7rem;
+  border-radius: 10px;
+  font-size: 0.84rem;
+  font-weight: 600;
+  line-height: 1.4;
 }
 
-.scanner-client-card__stack {
+.scanner-pass-card__banner--danger {
+  color: color-mix(in srgb, var(--va-danger) 82%, var(--app-text));
+  background: color-mix(in srgb, var(--va-danger) 8%, var(--app-surface));
+  border: 1px solid color-mix(in srgb, var(--va-danger) 24%, var(--app-border));
+}
+
+.scanner-pass-card__banner--warning {
+  color: color-mix(in srgb, #b45309 84%, var(--app-text));
+  background: color-mix(in srgb, var(--va-warning) 8%, var(--app-surface));
+  border: 1px solid color-mix(in srgb, var(--va-warning) 24%, var(--app-border));
+}
+
+.scanner-pass-card__main {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 0.5rem;
+  gap: 0.85rem;
   min-width: 0;
 }
 
-.scanner-client-card__unpaid-alert {
-  width: 100%;
-  box-sizing: border-box;
-  margin: 0 0 0.35rem;
+.scanner-pass-card__photo-wrap {
+  display: flex;
+  justify-content: center;
 }
 
-.scanner-client-card__unpaid-alert-text {
-  display: block;
-  font-size: 0.92rem;
-  font-weight: 700;
-  line-height: 1.45;
-}
-
-.scanner-client-card__unpaid-alert :deep(.va-alert__content) {
-  padding-top: 0.55rem;
-  padding-bottom: 0.55rem;
-}
-
-/* Квадрат 300×300 без лишней серой рамки снаружи. */
-.scanner-client-card__avatar {
-  box-sizing: border-box;
-  width: min(300px, 100%);
-  aspect-ratio: 1;
-  max-width: 300px;
-  max-height: 300px;
-  flex-shrink: 0;
-  border-radius: 10px;
+.scanner-pass-card__photo {
+  width: min(100%, 15.5rem);
+  aspect-ratio: 4 / 5;
+  max-height: 18.5rem;
+  border-radius: 14px;
   overflow: hidden;
-  background: var(--app-surface);
-  border: 1px solid var(--app-border);
-  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.06);
+  border: 1px solid color-mix(in srgb, var(--app-border) 88%, transparent);
+  background: color-mix(in srgb, var(--app-text) 4%, var(--app-surface));
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--app-text) 8%, transparent);
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-.scanner-client-card__avatar-img {
+.scanner-pass-card__photo-img {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
 }
 
-.scanner-client-card__avatar-placeholder {
-  color: color-mix(in srgb, var(--app-muted) 50%, var(--app-text));
-  opacity: 0.75;
+.scanner-pass-card__photo-placeholder {
+  color: color-mix(in srgb, var(--app-muted) 58%, var(--app-text));
 }
 
-.scanner-client-card__body {
+.scanner-pass-card__info {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.28rem;
-  min-width: 0;
-  width: 100%;
-  align-self: stretch;
-  padding: 0 0.1rem 0.05rem;
+  align-items: center;
+  text-align: center;
+  gap: 0.4rem;
 }
 
-.scanner-client-card__headline {
+.scanner-pass-card__name-row {
   display: flex;
   align-items: flex-start;
-  justify-content: space-between;
-  gap: 0.4rem;
+  justify-content: center;
+  gap: 0.35rem;
+  width: 100%;
   min-width: 0;
 }
 
-.scanner-client-card__name {
-  flex: 1;
+.scanner-pass-card__name {
+  margin: 0;
+  flex: 1 1 auto;
   min-width: 0;
   font-size: 1.02rem;
   font-weight: 700;
   line-height: 1.28;
-  letter-spacing: -0.01em;
+  color: var(--app-text);
 }
 
-.scanner-client-card__profile-btn {
+.scanner-pass-card__profile-btn {
   flex-shrink: 0;
   margin: -0.2rem -0.15rem 0 0;
-  opacity: 0.92;
+  min-width: 2.5rem !important;
+  min-height: 2.5rem !important;
 }
 
-.scanner-client-card__profile-btn:hover {
-  opacity: 1;
+.scanner-pass-card__profile-btn :deep(.va-icon),
+.scanner-pass-card__profile-btn :deep(.material-icons) {
+  font-size: 1.45rem !important;
 }
 
-.scanner-client-card__locker {
-  width: 100%;
-}
-
-.scanner-client-card__meta {
-  font-size: 0.8125rem;
-  color: var(--app-muted);
-  display: flex;
-  align-items: center;
-  gap: 0.3rem;
-  flex-wrap: wrap;
-}
-
-.scanner-client-card__meta-sep {
-  opacity: 0.45;
-  user-select: none;
-}
-
-.scanner-client-card__status--danger {
-  color: #b91c1c;
-  font-weight: 700;
-}
-
-.scanner-client-card__state {
-  font-size: 0.8125rem;
-  font-weight: 600;
-  color: #fb923c;
+.scanner-pass-card__phone {
+  font-size: 0.88rem;
+  color: color-mix(in srgb, var(--app-text) 62%, transparent);
   line-height: 1.35;
-  margin-top: 0.08rem;
-  padding: 0.28rem 0.4rem;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--app-muted) 12%, var(--app-surface));
 }
 
-.scanner-client-card__state--in {
-  color: #166534;
-  background: color-mix(in srgb, var(--va-success) 12%, var(--app-surface));
+.scanner-pass-card__badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.4rem;
+  margin-top: 0.15rem;
 }
 
-.scanner-client-card__state--overdue {
-  color: #c2410c;
-  background: color-mix(in srgb, #ea580c 10%, var(--app-surface));
+.scanner-pass-card__locker {
+  display: flex;
+  justify-content: center;
+  padding-top: 0.75rem;
+  border-top: 1px solid color-mix(in srgb, var(--app-border) 88%, transparent);
+}
+
+.scanner-locker-field {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0;
+}
+
+.scanner-locker-field__label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--va-secondary, #6b7280);
+  text-align: center;
+  line-height: 1.25;
+}
+
+.scanner-locker-field__input {
+  box-sizing: border-box;
+  width: 6.75rem;
+  height: var(--app-control-height, 2.75rem);
+  margin: 0;
+  padding: 0 0.45rem;
+  border: 1px solid color-mix(in srgb, var(--app-border) 92%, transparent);
+  border-radius: 10px;
+  background: var(--app-surface);
+  color: var(--app-text);
+  text-align: center;
+  font: inherit;
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  font-variant-numeric: tabular-nums;
+}
+
+.scanner-locker-field__input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--va-primary) 72%, var(--app-border));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--va-primary) 16%, transparent);
+}
+
+.scanner-locker-field__input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .scanner-modal__another-wrap {
@@ -1358,7 +1471,6 @@ const clockTime = computed(() =>
   width: 100%;
   gap: 0.55rem;
   align-items: stretch;
-  padding-top: 0.15rem;
 }
 
 .scanner-modal__action-span {
@@ -1369,19 +1481,23 @@ const clockTime = computed(() =>
   min-width: 0;
 }
 
-.scanner-modal__actions :deep(.va-button) {
+.scanner-modal__footer :deep(.va-button) {
   width: 100%;
   justify-content: center;
-  min-height: 3.35rem;
+  min-height: 2.75rem;
   padding-top: 0.5rem !important;
   padding-bottom: 0.5rem !important;
-  font-size: 0.97rem !important;
+  font-size: 0.9375rem !important;
   font-weight: 700 !important;
   border-radius: 12px !important;
   letter-spacing: 0.01em;
 }
 
-.scanner-modal__actions :deep(.va-button__content) {
+.scanner-modal__footer :deep(.va-button[type='submit']) {
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--app-accent) 26%, transparent);
+}
+
+.scanner-modal__footer :deep(.va-button__content) {
   gap: 0.5rem;
 }
 

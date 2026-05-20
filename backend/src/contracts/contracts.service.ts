@@ -6,20 +6,41 @@ import {
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  OnModuleInit,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
-import { ClientStatus, PaymentOperationType, PaymentStatus, Prisma, RefundMethod } from '@prisma/client';
+import {
+  ClientStatus,
+  ContractDerivedStatus,
+  PaymentChannel,
+  PaymentOperationType,
+  PaymentStatus,
+  Prisma,
+  RefundMethod,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RequestContextService } from '../common/request-context.service';
-import { utcCalendarDayMs, utcTodayCalendarDayMs } from '../common/utc-calendar-day';
+import {
+  addCalendarDurationUtc,
+  diffDaysInclusiveUtc,
+  isoYmdFromUtcDate,
+  utcCalendarDayMs,
+  utcDateFromIsoYmd,
+  utcTodayCalendarDayMs,
+  utcTodayStartDate,
+} from '../common/utc-calendar-day';
+import {
+  deriveContractDerivedStatus,
+} from '../common/contract-derived-status';
 import { StorageService } from '../storage/storage.service';
 import { PDFDocument, PDFDropdown, PDFOptionList, PDFTextField } from 'pdf-lib';
 import puppeteer from 'puppeteer-core';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { ActivateContractDto } from './dto/activate-contract.dto';
 import { CancelContractDto } from './dto/cancel-contract.dto';
 import { FreezeContractDto } from './dto/freeze-contract.dto';
 import { GenerateContractDto } from './dto/generate-contract.dto';
@@ -49,23 +70,42 @@ function escapeHtml(value: string): string {
 }
 
 @Injectable()
-export class ContractsService {
+export class ContractsService implements OnModuleInit {
   private readonly logger = new Logger(ContractsService.name);
-  private static readonly FREEZE_MIN_DAYS = 7;
-  private static readonly FREEZE_MAX_DAYS = 30;
+  private static readonly FREEZE_MIN_DAYS = 1;
   private readonly errors = {
     invalidDateFilter: { code: 'INVALID_DATE_FILTER', message: 'Invalid date filter' },
     invalidDateRange: { code: 'INVALID_DATE_RANGE', message: 'Invalid date range' },
-    unsupportedContractStatus: { code: 'UNSUPPORTED_CONTRACT_STATUS', message: 'Unsupported contract status' },
     cannotPauseFinished: { code: 'CANNOT_PAUSE_FINISHED_CONTRACT', message: 'Cannot pause finished contract' },
     onlyPausedCanResume: { code: 'ONLY_PAUSED_CAN_RESUME', message: 'Only paused contract can be resumed' },
     activeContractExists: { code: 'ACTIVE_CONTRACT_EXISTS', message: 'Active contract already exists for this client' },
+    activeMembershipBlocksActivate: {
+      code: 'ACTIVE_MEMBERSHIP_BLOCKS_ACTIVATE',
+      message: 'The next contract can start only after the current membership has ended (pause does not count as ended)',
+    },
+    onlySavedCanActivate: {
+      code: 'ONLY_SAVED_CAN_ACTIVATE',
+      message: 'Only a pending contract can be started',
+    },
+    serviceStartRequired: {
+      code: 'SERVICE_START_REQUIRED',
+      message: 'Service start date is required to activate the contract',
+    },
+    serviceEndRequired: {
+      code: 'SERVICE_END_REQUIRED',
+      message: 'Service end date could not be determined from membership duration',
+    },
     contractNumberExists: { code: 'CONTRACT_NUMBER_EXISTS', message: 'Contract number already exists' },
     contractNumberRequired: { code: 'CONTRACT_NUMBER_REQUIRED', message: 'Contract number is required' },
     servicePriceRequired: { code: 'SERVICE_PRICE_REQUIRED', message: 'Service price is required' },
+    paymentAmountRequired: { code: 'PAYMENT_AMOUNT_REQUIRED', message: 'Payment amount is required' },
+    paymentAmountExceedsPrice: {
+      code: 'PAYMENT_AMOUNT_EXCEEDS_PRICE',
+      message: 'Payment amount cannot exceed service price',
+    },
     serviceDateRangeInvalid: { code: 'SERVICE_DATE_RANGE_INVALID', message: 'Service end date must be after service start date' },
     freezeOutOfRange: { code: 'FREEZE_OUT_OF_CONTRACT_RANGE', message: 'Freeze must be within contract dates' },
-    freezeDurationInvalid: { code: 'FREEZE_DURATION_INVALID', message: 'Freeze duration is outside allowed limits' },
+    freezeDurationInvalid: { code: 'FREEZE_DURATION_INVALID', message: 'Freeze duration must be at least 1 day' },
     freezeOverlaps: { code: 'FREEZE_OVERLAPS', message: 'Freeze overlaps existing freeze period' },
     onlyActiveCanFreeze: { code: 'ONLY_ACTIVE_CAN_FREEZE', message: 'Only active contract can be frozen' },
     refundExceedsPaid: { code: 'REFUND_LIMIT_EXCEEDED', message: 'Refund exceeds paid amount' },
@@ -91,11 +131,26 @@ export class ContractsService {
     private readonly requestContext: RequestContextService,
   ) {}
 
+  onModuleInit() {
+    void this.runStartupStatusSync().catch((err) => {
+      this.logger.error('Startup contracts statuses sync failed', err);
+    });
+  }
+
+  /** После деплоя / рестарта: даты и derivedStatus без массового refresh Client.status. */
+  private async runStartupStatusSync() {
+    await this.ensureCalendarDayContractState();
+    await this.syncDerivedStatuses();
+  }
+
+  /** Истечение по датам и окончание заморозок — без полного пересчёта derivedStatus. */
+  private async ensureCalendarDayContractState() {
+    await this.syncExpiredFreezes();
+    await this.syncExpiredContracts();
+  }
+
   private toDate(value?: string) {
-    if (!value) return null;
-    const parsed = new Date(value);
-    if (Number.isNaN(parsed.getTime())) return null;
-    return parsed;
+    return utcDateFromIsoYmd(value);
   }
 
   private toPrice(value?: string) {
@@ -146,76 +201,145 @@ export class ContractsService {
     return map;
   }
 
-  private resolveFirstContractPayment(
+  private resolveContractSigningPayment(
     dto: GenerateContractDto,
     servicePrice: Prisma.Decimal,
   ): {
     paymentAmount: Prisma.Decimal;
     paymentPlan: 'FULL' | 'INSTALLMENT_FLEXIBLE' | 'INSTALLMENT_EQUAL';
     installmentCount: number | undefined;
+    channel: PaymentChannel;
   } {
-    const raw = dto.paymentPlan;
-    const isInstallment = raw === 'INSTALLMENT_FLEXIBLE' || raw === 'INSTALLMENT_EQUAL';
-    if (!isInstallment) {
-      return { paymentAmount: servicePrice, paymentPlan: 'FULL', installmentCount: undefined };
-    }
-    if (raw === 'INSTALLMENT_EQUAL') {
-      const c = dto.installmentCount;
-      if (c == null || !Number.isInteger(c) || c < 2 || c > 120) {
-        throw new BadRequestException(this.errors.installmentCountInvalid);
+    const rawPlan = dto.paymentPlan;
+    const isLegacyInstallment = rawPlan === 'INSTALLMENT_FLEXIBLE' || rawPlan === 'INSTALLMENT_EQUAL';
+    if (isLegacyInstallment && !dto.paymentAmount?.trim() && dto.initialPaymentAmount?.trim()) {
+      const initialParsed = this.toPrice(dto.initialPaymentAmount);
+      if (!initialParsed) {
+        throw new BadRequestException(this.errors.paymentAmountRequired);
       }
+      if (initialParsed.lte(0) || initialParsed.gt(servicePrice)) {
+        throw new BadRequestException(this.errors.paymentAmountExceedsPrice);
+      }
+      if (rawPlan === 'INSTALLMENT_EQUAL') {
+        const c = dto.installmentCount;
+        if (c == null || !Number.isInteger(c) || c < 2 || c > 120) {
+          throw new BadRequestException(this.errors.installmentCountInvalid);
+        }
+      }
+      const channel =
+        dto.paymentChannel === 'NON_CASH' ? PaymentChannel.NON_CASH : PaymentChannel.CASH;
+      const plan = initialParsed.equals(servicePrice) ? 'FULL' : (rawPlan ?? 'INSTALLMENT_FLEXIBLE');
+      return {
+        paymentAmount: initialParsed,
+        paymentPlan: plan,
+        installmentCount: rawPlan === 'INSTALLMENT_EQUAL' ? dto.installmentCount : undefined,
+        channel,
+      };
     }
-    const initialParsed = this.toPrice(dto.initialPaymentAmount);
-    if (!initialParsed) {
-      throw new BadRequestException(this.errors.installmentInitialRequired);
+
+    const parsed = this.toPrice(dto.paymentAmount ?? dto.initialPaymentAmount);
+    if (!parsed || parsed.lte(0)) {
+      throw new BadRequestException(this.errors.paymentAmountRequired);
     }
-    if (initialParsed.lte(0) || initialParsed.gt(servicePrice)) {
-      throw new BadRequestException(this.errors.installmentInitialInvalid);
+    if (parsed.gt(servicePrice)) {
+      throw new BadRequestException(this.errors.paymentAmountExceedsPrice);
     }
-    if (initialParsed.equals(servicePrice)) {
-      return { paymentAmount: servicePrice, paymentPlan: 'FULL', installmentCount: undefined };
-    }
+    const channel = dto.paymentChannel === 'NON_CASH' ? PaymentChannel.NON_CASH : PaymentChannel.CASH;
+    const paymentPlan = parsed.equals(servicePrice) ? 'FULL' : 'INSTALLMENT_FLEXIBLE';
     return {
-      paymentAmount: initialParsed,
-      paymentPlan: raw,
-      installmentCount: raw === 'INSTALLMENT_EQUAL' ? dto.installmentCount : undefined,
+      paymentAmount: parsed,
+      paymentPlan,
+      installmentCount: undefined,
+      channel,
     };
   }
 
   private getTodayStart(): Date {
-    const now = new Date();
-    now.setHours(0, 0, 0, 0);
-    return now;
+    return utcTodayStartDate();
   }
 
   private diffDaysInclusive(startDate: Date, endDate: Date): number {
-    const start = new Date(startDate);
-    const end = new Date(endDate);
-    start.setHours(0, 0, 0, 0);
-    end.setHours(0, 0, 0, 0);
-    return Math.floor((end.getTime() - start.getTime()) / 86400000) + 1;
+    return diffDaysInclusiveUtc(startDate, endDate);
+  }
+
+  /** Конец периода услуги по сроку абонемента (как на фронте при оформлении договора). */
+  private calculateServiceEndDate(
+    serviceStartDate: Date,
+    durationValue: number | null | undefined,
+    durationUnit: string | null | undefined,
+  ): Date | null {
+    return addCalendarDurationUtc(serviceStartDate, durationValue, durationUnit);
+  }
+
+  private async resolveServiceEndDateFromCatalog(
+    serviceStartDate: Date,
+    payload: Record<string, unknown> | null,
+  ): Promise<Date | null> {
+    const serviceName = typeof payload?.serviceName === 'string' ? payload.serviceName.trim() : '';
+    if (!serviceName) return null;
+    const catalog = await this.prisma.membershipCatalog.findFirst({
+      // Не фильтруем по isActive: у клиента уже может быть договор на эту услугу — срок должен считаться до конца,
+      // даже если шаблон убрали из выбора для новых клиентов.
+      where: { name: serviceName },
+      select: { durationValue: true, durationUnit: true },
+    });
+    if (!catalog?.durationValue || !catalog.durationUnit) return null;
+    return this.calculateServiceEndDate(
+      serviceStartDate,
+      catalog.durationValue,
+      catalog.durationUnit,
+    );
   }
 
   private deriveContractStatus(
     currentStatus: string,
     serviceStartDate?: Date | null,
     serviceEndDate?: Date | null,
-  ): string {
-    if (currentStatus === 'DRAFT') return 'SAVED';
-    if (currentStatus === 'CANCELLED') return 'CANCELLED';
-    const today = utcTodayCalendarDayMs();
-    if (currentStatus === 'EXPIRED') {
-      const endExpired = serviceEndDate ? utcCalendarDayMs(new Date(serviceEndDate)) : null;
-      if (endExpired !== null && endExpired >= today) return 'ACTIVE';
-      return 'EXPIRED';
-    }
-    const start = serviceStartDate ? utcCalendarDayMs(new Date(serviceStartDate)) : null;
-    const end = serviceEndDate ? utcCalendarDayMs(new Date(serviceEndDate)) : null;
-    if (end !== null && end < today) return 'EXPIRED';
-    if (currentStatus === 'PAUSED') return 'PAUSED';
-    if (currentStatus === 'SIGNED') return 'ACTIVE';
-    if (start !== null && start > today) return 'SAVED';
-    return 'ACTIVE';
+  ): ContractDerivedStatus {
+    return deriveContractDerivedStatus(currentStatus, serviceStartDate, serviceEndDate);
+  }
+
+  /** Пересчитать derivedStatus по датам (после cron истечения / смены календарного дня). */
+  private async syncDerivedStatuses() {
+    const rows = await this.prisma.contractDocument.findMany({
+      select: {
+        id: true,
+        status: true,
+        serviceStartDate: true,
+        serviceEndDate: true,
+        derivedStatus: true,
+      },
+    });
+    const updates = rows.flatMap((row) => {
+      const next = deriveContractDerivedStatus(row.status, row.serviceStartDate, row.serviceEndDate);
+      return next === row.derivedStatus ? [] : [{ id: row.id, derivedStatus: next }];
+    });
+    if (updates.length === 0) return;
+    await this.prisma.$transaction(
+      updates.map(({ id, derivedStatus }) =>
+        this.prisma.contractDocument.update({
+          where: { id },
+          data: { derivedStatus },
+        }),
+      ),
+    );
+  }
+
+  private wouldContractBeActive(
+    serviceStartDate?: Date | null,
+    serviceEndDate?: Date | null,
+  ): boolean {
+    return this.deriveContractStatus('ACTIVE', serviceStartDate ?? null, serviceEndDate ?? null) === 'ACTIVE';
+  }
+
+  private async clientHasBlockingMembership(clientId: string): Promise<boolean> {
+    const count = await this.prisma.contractDocument.count({
+      where: {
+        clientId,
+        derivedStatus: { in: [ContractDerivedStatus.ACTIVE, ContractDerivedStatus.PAUSED] },
+      },
+    });
+    return count > 0;
   }
 
   private async syncExpiredContracts() {
@@ -225,7 +349,7 @@ export class ContractsService {
         status: { in: ['ACTIVE', 'SAVED'] },
         serviceEndDate: { lt: startOfToday },
       },
-      data: { status: 'EXPIRED' },
+      data: { status: 'EXPIRED', derivedStatus: ContractDerivedStatus.EXPIRED },
     });
   }
 
@@ -237,19 +361,30 @@ export class ContractsService {
       distinct: ['contractId'],
     });
     if (ended.length === 0) return;
-    for (const row of ended) {
-      const contract = await this.prisma.contractDocument.findUnique({
-        where: { id: row.contractId },
-        select: { id: true, clientId: true, status: true, serviceStartDate: true, serviceEndDate: true },
-      });
-      if (!contract || contract.status !== 'PAUSED') continue;
-      const nextStatus = this.deriveContractStatus('ACTIVE', contract.serviceStartDate, contract.serviceEndDate);
-      await this.prisma.contractDocument.update({
-        where: { id: contract.id },
-        data: { status: nextStatus },
-      });
-      await this.refreshClientStatus(contract.clientId);
-    }
+
+    const contractIds = ended.map((row) => row.contractId);
+    const pausedContracts = await this.prisma.contractDocument.findMany({
+      where: { id: { in: contractIds }, status: 'PAUSED' },
+      select: { id: true, clientId: true, serviceStartDate: true, serviceEndDate: true },
+    });
+    if (pausedContracts.length === 0) return;
+
+    const clientIdsToRefresh = new Set<string>();
+    await this.prisma.$transaction(
+      pausedContracts.map((contract) => {
+        const nextDerived = deriveContractDerivedStatus(
+          'ACTIVE',
+          contract.serviceStartDate,
+          contract.serviceEndDate,
+        );
+        clientIdsToRefresh.add(contract.clientId);
+        return this.prisma.contractDocument.update({
+          where: { id: contract.id },
+          data: { status: nextDerived, derivedStatus: nextDerived },
+        });
+      }),
+    );
+    await Promise.all([...clientIdsToRefresh].map((clientId) => this.refreshClientStatus(clientId)));
   }
 
   private async refreshAllClientStatuses() {
@@ -267,6 +402,7 @@ export class ContractsService {
     this.logger.log('Starting nightly contracts/client statuses sync');
     await this.syncExpiredFreezes();
     await this.syncExpiredContracts();
+    await this.syncDerivedStatuses();
     await this.refreshAllClientStatuses();
     this.logger.log('Nightly contracts/client statuses sync completed');
   }
@@ -275,6 +411,7 @@ export class ContractsService {
     this.logger.log('Starting manual contracts/client statuses sync');
     await this.syncExpiredFreezes();
     await this.syncExpiredContracts();
+    await this.syncDerivedStatuses();
     await this.refreshAllClientStatuses();
     this.logger.log('Manual contracts/client statuses sync completed');
     return { ok: true };
@@ -282,26 +419,13 @@ export class ContractsService {
 
   /**
    * Отчёты: число клиентов с хотя бы одним договором в производном статусе ACTIVE.
-   * Не опирается только на `Client.status` (может не успеть обновиться без cron).
    */
   async countClientsWithDerivedActiveContract(): Promise<number> {
-    await this.syncExpiredContracts();
-    await this.syncExpiredFreezes();
-    const rows = await this.prisma.contractDocument.findMany({
-      select: {
-        clientId: true,
-        status: true,
-        serviceStartDate: true,
-        serviceEndDate: true,
-      },
+    const groups = await this.prisma.contractDocument.groupBy({
+      by: ['clientId'],
+      where: { derivedStatus: ContractDerivedStatus.ACTIVE },
     });
-    const clientIds = new Set<string>();
-    for (const row of rows) {
-      if (this.deriveContractStatus(row.status, row.serviceStartDate, row.serviceEndDate) === 'ACTIVE') {
-        clientIds.add(row.clientId);
-      }
-    }
-    return clientIds.size;
+    return groups.length;
   }
 
   /**
@@ -311,21 +435,20 @@ export class ContractsService {
   async getContractsDerivedDistribution(): Promise<
     { status: 'ACTIVE' | 'EXPIRED' | 'CANCELLED' | 'PENDING'; value: number }[]
   > {
-    await this.syncExpiredContracts();
-    await this.syncExpiredFreezes();
-    const rows = await this.prisma.contractDocument.findMany({
-      select: { status: true, serviceStartDate: true, serviceEndDate: true },
+    const groups = await this.prisma.contractDocument.groupBy({
+      by: ['derivedStatus'],
+      _count: { _all: true },
     });
     let active = 0;
     let expired = 0;
     let cancelled = 0;
     let pending = 0;
-    for (const row of rows) {
-      const d = this.deriveContractStatus(row.status, row.serviceStartDate, row.serviceEndDate);
-      if (d === 'ACTIVE') active++;
-      else if (d === 'EXPIRED') expired++;
-      else if (d === 'CANCELLED') cancelled++;
-      else pending++;
+    for (const row of groups) {
+      const n = row._count._all;
+      if (row.derivedStatus === ContractDerivedStatus.ACTIVE) active += n;
+      else if (row.derivedStatus === ContractDerivedStatus.EXPIRED) expired += n;
+      else if (row.derivedStatus === ContractDerivedStatus.CANCELLED) cancelled += n;
+      else pending += n;
     }
     return [
       { status: 'ACTIVE', value: active },
@@ -335,9 +458,12 @@ export class ContractsService {
     ];
   }
 
-  private async canCreateContractForClient(clientId: string, contractNumber?: string) {
-    await this.syncExpiredFreezes();
-    await this.syncExpiredContracts();
+  private async canCreateContractForClient(
+    clientId: string,
+    contractNumber?: string,
+    opts?: { serviceStartDate?: Date | null; serviceEndDate?: Date | null },
+  ) {
+    await this.ensureCalendarDayContractState();
     const normalizedNumber = (contractNumber ?? '').trim();
     if (!normalizedNumber) {
       return { ok: false as const, reason: 'CONTRACT_NUMBER_REQUIRED' as const };
@@ -349,22 +475,31 @@ export class ContractsService {
     if (duplicateByNumber) {
       return { ok: false as const, reason: 'CONTRACT_NUMBER_EXISTS' as const };
     }
-    const clientContracts = await this.prisma.contractDocument.findMany({
-      where: { clientId },
-      select: { status: true, serviceStartDate: true, serviceEndDate: true },
-    });
-    const hasActive = clientContracts.some(
-      (contract) =>
-        this.deriveContractStatus(contract.status, contract.serviceStartDate, contract.serviceEndDate) === 'ACTIVE',
-    );
-    if (hasActive) {
+    const wouldBeActive = this.wouldContractBeActive(opts?.serviceStartDate ?? null, opts?.serviceEndDate ?? null);
+    if (wouldBeActive && (await this.clientHasBlockingMembership(clientId))) {
       return { ok: false as const, reason: 'ACTIVE_CONTRACT_EXISTS' as const };
     }
     return { ok: true as const };
   }
 
+  /**
+   * Проверка перед открытием формы договора: только номер (уникальность).
+   * Ограничение «один ACTIVE» — при сохранении с датами, не здесь.
+   */
   async canGenerateForClient(clientId: string, contractNumber?: string) {
-    return this.canCreateContractForClient(clientId, contractNumber);
+    await this.ensureCalendarDayContractState();
+    const normalizedNumber = (contractNumber ?? '').trim();
+    if (!normalizedNumber) {
+      return { ok: false as const, reason: 'CONTRACT_NUMBER_REQUIRED' as const };
+    }
+    const duplicateByNumber = await this.prisma.contractDocument.findFirst({
+      where: { contractNumber: normalizedNumber },
+      select: { id: true },
+    });
+    if (duplicateByNumber) {
+      return { ok: false as const, reason: 'CONTRACT_NUMBER_EXISTS' as const };
+    }
+    return { ok: true as const };
   }
 
   private async refreshClientStatus(clientId: string, tx?: Prisma.TransactionClient) {
@@ -390,20 +525,19 @@ export class ContractsService {
       select: {
         id: true,
         contractNumber: true,
-        status: true,
+        derivedStatus: true,
         serviceStartDate: true,
         serviceEndDate: true,
         createdAt: true,
       },
     });
-    const derived = (c: (typeof contracts)[number]) =>
-      this.deriveContractStatus(c.status, c.serviceStartDate, c.serviceEndDate);
-    const hasActive = contracts.some((c) => derived(c) === 'ACTIVE');
-    const hasPaused = contracts.some((c) => derived(c) === 'PAUSED');
+    const hasActive = contracts.some((c) => c.derivedStatus === ContractDerivedStatus.ACTIVE);
+    const hasPaused = contracts.some((c) => c.derivedStatus === ContractDerivedStatus.PAUSED);
     const status: ClientStatus = hasActive ? 'ACTIVE' : hasPaused ? 'PAUSED' : 'INACTIVE';
 
-    const pool = contracts.filter((c) => derived(c) === 'ACTIVE');
-    const phasePool = pool.length > 0 ? pool : contracts.filter((c) => derived(c) === 'PAUSED');
+    const pool = contracts.filter((c) => c.derivedStatus === ContractDerivedStatus.ACTIVE);
+    const phasePool =
+      pool.length > 0 ? pool : contracts.filter((c) => c.derivedStatus === ContractDerivedStatus.PAUSED);
     let contractNumber: string | null = null;
     let contractStartDate: Date | null = null;
     let contractEndDate: Date | null = null;
@@ -639,15 +773,14 @@ export class ContractsService {
   }
 
   async listClientContracts(clientId: string) {
-    await this.syncExpiredFreezes();
-    await this.syncExpiredContracts();
+    await this.ensureCalendarDayContractState();
     const rows = await this.prisma.contractDocument.findMany({
       where: { clientId },
       orderBy: { createdAt: 'desc' },
       select: {
         id: true,
         contractNumber: true,
-        status: true,
+        derivedStatus: true,
         contractDate: true,
         serviceStartDate: true,
         serviceEndDate: true,
@@ -656,7 +789,7 @@ export class ContractsService {
         createdAt: true,
         payload: true,
         freezes: {
-          select: { endDate: true },
+          select: { endDate: true, durationDays: true },
           orderBy: { endDate: 'desc' },
           take: 1,
         },
@@ -694,17 +827,21 @@ export class ContractsService {
           .dividedBy(installmentCount)
           .toFixed(2);
       }
+      const serviceName =
+        typeof payloadObj?.serviceName === 'string' ? payloadObj.serviceName.trim() : null;
       const { payload: _p, ...rest } = row;
       return {
         ...rest,
-        status: this.deriveContractStatus(row.status, row.serviceStartDate, row.serviceEndDate),
+        status: row.derivedStatus,
         pauseUntil: row.freezes[0]?.endDate ?? null,
+        pauseDurationDays: row.freezes[0]?.durationDays ?? null,
         paidTotal,
         balanceDue,
         fullyPaid,
         paymentPlan,
         installmentCount,
         suggestedEqualPayment,
+        serviceName: serviceName || null,
       };
     });
   }
@@ -771,8 +908,7 @@ export class ContractsService {
     from?: string;
     to?: string;
   }) {
-    await this.syncExpiredFreezes();
-    await this.syncExpiredContracts();
+    await this.ensureCalendarDayContractState();
     const fromDate = filters?.from ? this.toDate(filters.from) : null;
     const toDate = filters?.to ? this.toDate(filters.to) : null;
     if ((filters?.from && !fromDate) || (filters?.to && !toDate)) {
@@ -784,6 +920,9 @@ export class ContractsService {
     const rows = await this.prisma.contractDocument.findMany({
       where: {
         clientId: filters?.clientId || undefined,
+        derivedStatus: filters?.status
+          ? (filters.status as ContractDerivedStatus)
+          : undefined,
         createdAt:
           filters?.from || filters?.to
             ? {
@@ -797,7 +936,7 @@ export class ContractsService {
         id: true,
         clientId: true,
         contractNumber: true,
-        status: true,
+        derivedStatus: true,
         contractDate: true,
         serviceStartDate: true,
         serviceEndDate: true,
@@ -807,31 +946,10 @@ export class ContractsService {
         client: { select: { id: true, firstName: true, lastName: true, middleName: true, phone: true } },
       },
     });
-    const normalized = rows.map((row) => ({
+    return rows.map((row) => ({
       ...row,
-      status: this.deriveContractStatus(row.status, row.serviceStartDate, row.serviceEndDate),
+      status: row.derivedStatus,
     }));
-    if (!filters?.status) return normalized;
-    return normalized.filter((row) => row.status === filters.status);
-  }
-
-  async updateStatus(contractId: string, status: string) {
-    const existing = await this.prisma.contractDocument.findUnique({
-      where: { id: contractId },
-      select: { id: true, clientId: true },
-    });
-    if (!existing) throw new NotFoundException('Contract not found');
-    const allowed = ['SAVED', 'ACTIVE', 'PAUSED', 'EXPIRED', 'CANCELLED'];
-    if (!allowed.includes(status)) {
-      throw new BadRequestException(this.errors.unsupportedContractStatus);
-    }
-    const updated = await this.prisma.contractDocument.update({
-      where: { id: contractId },
-      data: { status },
-      select: { id: true, status: true },
-    });
-    await this.refreshClientStatus(existing.clientId);
-    return updated;
   }
 
   async pause(contractId: string, dto: FreezeContractDto = {}, actorId: string) {
@@ -873,7 +991,7 @@ export class ContractsService {
     startDate.setHours(0, 0, 0, 0);
     endDate.setHours(0, 0, 0, 0);
     const durationDays = this.diffDaysInclusive(startDate, endDate);
-    if (durationDays < ContractsService.FREEZE_MIN_DAYS || durationDays > ContractsService.FREEZE_MAX_DAYS) {
+    if (durationDays < ContractsService.FREEZE_MIN_DAYS) {
       throw new BadRequestException(this.errors.freezeDurationInvalid);
     }
     const contractStart = existing.serviceStartDate ? new Date(existing.serviceStartDate) : null;
@@ -908,7 +1026,7 @@ export class ContractsService {
       });
       return tx.contractDocument.update({
         where: { id: contractId },
-        data: { status: 'PAUSED' },
+        data: { status: 'PAUSED', derivedStatus: ContractDerivedStatus.PAUSED },
         select: { id: true, status: true },
       });
     });
@@ -929,11 +1047,12 @@ export class ContractsService {
     if (existing.status !== 'PAUSED') {
       throw new BadRequestException(this.errors.onlyPausedCanResume);
     }
-    const nextStatus = this.deriveContractStatus('ACTIVE', existing.serviceStartDate, existing.serviceEndDate);
+    const nextDerived = this.deriveContractStatus('ACTIVE', existing.serviceStartDate, existing.serviceEndDate);
     const updated = await this.prisma.contractDocument.update({
       where: { id: contractId },
       data: {
-        status: nextStatus,
+        status: nextDerived,
+        derivedStatus: nextDerived,
       },
       select: { id: true, status: true },
     });
@@ -944,6 +1063,93 @@ export class ContractsService {
     return updated;
   }
 
+  /**
+   * Запуск ожидающего договора: менеджер задаёт дату начала услуги (и при необходимости конец).
+   * Допускается только один ACTIVE/PAUSED на клиента.
+   */
+  async activate(contractId: string, dto: ActivateContractDto, actorId: string) {
+    await this.ensureCalendarDayContractState();
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.contractDocument.findUnique({
+        where: { id: contractId },
+        select: {
+          id: true,
+          clientId: true,
+          status: true,
+          derivedStatus: true,
+          serviceStartDate: true,
+          serviceEndDate: true,
+          payload: true,
+        },
+      });
+      if (!existing) throw new NotFoundException('Contract not found');
+      if (existing.derivedStatus !== ContractDerivedStatus.SAVED) {
+        throw new BadRequestException(this.errors.onlySavedCanActivate);
+      }
+      const serviceStartDate = this.toDate(dto.serviceStartDate);
+      if (!serviceStartDate) {
+        throw new BadRequestException(this.errors.serviceStartRequired);
+      }
+      const payload = existing.payload as Record<string, unknown> | null;
+      let serviceEndDate = this.toDate(dto.serviceEndDate) ?? existing.serviceEndDate;
+      if (!serviceEndDate) {
+        const fromPayload = payload?.serviceEndDate;
+        if (typeof fromPayload === 'string') {
+          serviceEndDate = this.toDate(fromPayload);
+        }
+      }
+      if (!serviceEndDate) {
+        serviceEndDate = await this.resolveServiceEndDateFromCatalog(serviceStartDate, payload);
+      }
+      if (!serviceEndDate) {
+        throw new BadRequestException(this.errors.serviceEndRequired);
+      }
+      if (serviceEndDate && serviceEndDate < serviceStartDate) {
+        throw new BadRequestException(this.errors.serviceDateRangeInvalid);
+      }
+      const blockingCount = await tx.contractDocument.count({
+        where: {
+          clientId: existing.clientId,
+          NOT: { id: contractId },
+          derivedStatus: { in: [ContractDerivedStatus.ACTIVE, ContractDerivedStatus.PAUSED] },
+        },
+      });
+      if (blockingCount > 0) {
+        throw new BadRequestException(this.errors.activeMembershipBlocksActivate);
+      }
+      const nextDerived = this.deriveContractStatus('ACTIVE', serviceStartDate, serviceEndDate);
+      const payloadObj = (existing.payload as Record<string, unknown> | null) ?? {};
+      const nextPayload: Record<string, unknown> = {
+        ...payloadObj,
+        serviceStartDate: dto.serviceStartDate,
+        ...(serviceEndDate ? { serviceEndDate: isoYmdFromUtcDate(serviceEndDate) } : {}),
+      };
+      return tx.contractDocument.update({
+        where: { id: contractId },
+        data: {
+          serviceStartDate,
+          serviceEndDate,
+          status: nextDerived,
+          derivedStatus: nextDerived,
+          payload: nextPayload as object,
+        },
+        select: { id: true, status: true, serviceStartDate: true, serviceEndDate: true, clientId: true },
+      });
+    });
+
+    await this.refreshClientStatus(updated.clientId);
+    this.logger.warn(
+      `AUDIT contract.activate reqId=${this.requestContext.getRequestId()} actorId=${actorId} contractId=${contractId} clientId=${updated.clientId}`,
+    );
+    return {
+      id: updated.id,
+      status: updated.status,
+      serviceStartDate: updated.serviceStartDate,
+      serviceEndDate: updated.serviceEndDate,
+    };
+  }
+
   async terminate(contractId: string) {
     const existing = await this.prisma.contractDocument.findUnique({
       where: { id: contractId },
@@ -952,7 +1158,7 @@ export class ContractsService {
     if (!existing) throw new NotFoundException('Contract not found');
     const updated = await this.prisma.contractDocument.update({
       where: { id: contractId },
-      data: { status: 'CANCELLED' },
+      data: { status: 'CANCELLED', derivedStatus: ContractDerivedStatus.CANCELLED },
       select: { id: true, status: true },
     });
     await this.refreshClientStatus(existing.clientId);
@@ -972,31 +1178,32 @@ export class ContractsService {
     if (refundAmount.gt(0) && !dto.refundMethod) {
       throw new BadRequestException(this.errors.refundMethodRequired);
     }
-    const [paidAgg, refundedAgg] = await this.prisma.$transaction([
-      this.prisma.payment.aggregate({
-        where: {
-          contractDocumentId: contractId,
-          operationType: PaymentOperationType.SALE,
-          status: PaymentStatus.PAID,
-        },
-        _sum: { amount: true },
-      }),
-      this.prisma.payment.aggregate({
-        where: {
-          contractDocumentId: contractId,
-          operationType: PaymentOperationType.REFUND,
-          status: PaymentStatus.REFUNDED,
-        },
-        _sum: { amount: true },
-      }),
-    ]);
-    const totalPaid = paidAgg._sum.amount ?? new Prisma.Decimal(0);
-    const totalRefunded = refundedAgg._sum.amount ?? new Prisma.Decimal(0);
-    if (totalRefunded.plus(refundAmount).gt(totalPaid)) {
-      throw new BadRequestException(this.errors.refundExceedsPaid);
-    }
 
     await this.prisma.$transaction(async (tx) => {
+      const [paidAgg, refundedAgg] = await Promise.all([
+        tx.payment.aggregate({
+          where: {
+            contractDocumentId: contractId,
+            operationType: PaymentOperationType.SALE,
+            status: PaymentStatus.PAID,
+          },
+          _sum: { amount: true },
+        }),
+        tx.payment.aggregate({
+          where: {
+            contractDocumentId: contractId,
+            operationType: PaymentOperationType.REFUND,
+            status: PaymentStatus.REFUNDED,
+          },
+          _sum: { amount: true },
+        }),
+      ]);
+      const totalPaid = paidAgg._sum.amount ?? new Prisma.Decimal(0);
+      const totalRefunded = refundedAgg._sum.amount ?? new Prisma.Decimal(0);
+      if (totalRefunded.plus(refundAmount).gt(totalPaid)) {
+        throw new BadRequestException(this.errors.refundExceedsPaid);
+      }
+
       if (refundAmount.gt(0)) {
         await tx.payment.create({
           data: {
@@ -1014,7 +1221,7 @@ export class ContractsService {
       }
       await tx.contractDocument.update({
         where: { id: contractId },
-        data: { status: 'CANCELLED' },
+        data: { status: 'CANCELLED', derivedStatus: ContractDerivedStatus.CANCELLED },
       });
       await this.refreshClientStatus(existing.clientId, tx);
     });
@@ -1072,6 +1279,8 @@ export class ContractsService {
         email: true,
         address: true,
         passport: true,
+        passportIssuedBy: true,
+        passportIssuedAt: true,
         contractNumber: true,
         contractStartDate: true,
         contractEndDate: true,
@@ -1090,6 +1299,8 @@ export class ContractsService {
       email: client.email ?? undefined,
       address: client.address ?? undefined,
       passportNumber: client.passport ?? undefined,
+      passportIssuedBy: client.passportIssuedBy ?? undefined,
+      passportIssuedAt: client.passportIssuedAt?.toISOString(),
       contractNumber: client.contractNumber ?? undefined,
       contractDate: client.paymentDate?.toISOString() ?? new Date().toISOString(),
       serviceStartDate: client.contractStartDate?.toISOString(),
@@ -1121,7 +1332,12 @@ export class ContractsService {
     });
     if (!client) throw new NotFoundException('Client not found');
 
-    const guard = await this.canCreateContractForClient(clientId, dto.contractNumber);
+    const serviceStartDate = this.toDate(dto.serviceStartDate);
+    const serviceEndDate = this.toDate(dto.serviceEndDate);
+    const guard = await this.canCreateContractForClient(clientId, dto.contractNumber, {
+      serviceStartDate,
+      serviceEndDate,
+    });
     if (!guard.ok) {
       if (guard.reason === 'ACTIVE_CONTRACT_EXISTS') {
         throw new BadRequestException(this.errors.activeContractExists);
@@ -1137,19 +1353,24 @@ export class ContractsService {
       throw new BadRequestException(this.errors.servicePriceRequired);
     }
 
-    const { paymentAmount, paymentPlan, installmentCount } = this.resolveFirstContractPayment(dto, servicePrice);
+    const { paymentAmount, paymentPlan, installmentCount, channel } = this.resolveContractSigningPayment(
+      dto,
+      servicePrice,
+    );
     const persistDto: GenerateContractDto = {
       ...dto,
       paymentPlan,
       installmentCount,
+      paymentAmount: paymentAmount.toFixed(2),
+      paymentChannel: channel === PaymentChannel.NON_CASH ? 'NON_CASH' : 'CASH',
     };
 
-    const serviceStartDate = this.toDate(dto.serviceStartDate);
-    const serviceEndDate = this.toDate(dto.serviceEndDate);
     if (serviceStartDate && serviceEndDate && serviceEndDate < serviceStartDate) {
       throw new BadRequestException(this.errors.serviceDateRangeInvalid);
     }
-    const initialStatus = this.deriveContractStatus('ACTIVE', serviceStartDate, serviceEndDate);
+    const initialDerived = serviceStartDate
+      ? this.deriveContractStatus('ACTIVE', serviceStartDate, serviceEndDate)
+      : ContractDerivedStatus.SAVED;
     const pdfBytes = await this.generate(dto);
     let created: { id: string; contractNumber: string; createdAt: Date };
     try {
@@ -1158,7 +1379,8 @@ export class ContractsService {
           data: {
             clientId,
             contractNumber: dto.contractNumber ?? '',
-            status: initialStatus,
+            status: initialDerived,
+            derivedStatus: initialDerived,
             contractDate: this.toDate(dto.contractDate),
             serviceStartDate,
             serviceEndDate,
@@ -1170,8 +1392,8 @@ export class ContractsService {
 
         const paymentComment =
           paymentPlan === 'FULL'
-            ? 'Auto payment on contract save'
-            : `Installment first payment (${paymentPlan})`;
+            ? 'Оплата при заключении договора'
+            : `Первый платёж (остаток по договору)`;
         await tx.payment.create({
           data: {
             clientId,
@@ -1179,6 +1401,7 @@ export class ContractsService {
             amount: paymentAmount,
             status: PaymentStatus.PAID,
             operationType: PaymentOperationType.SALE,
+            channel,
             paidAt: new Date(),
             processedById: actorId,
             comment: paymentComment,

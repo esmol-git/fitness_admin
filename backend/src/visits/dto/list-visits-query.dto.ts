@@ -14,6 +14,11 @@ export type ListVisitsSortBy = (typeof LIST_VISITS_SORT_BY)[number];
 export class ListVisitsQueryDto {
   @IsOptional()
   @IsString()
+  @MaxLength(64)
+  clientId?: string;
+
+  @IsOptional()
+  @IsString()
   @MaxLength(120)
   search?: string;
 

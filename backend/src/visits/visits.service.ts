@@ -143,35 +143,50 @@ export class VisitsService {
     const locker = this.normalizeLocker(lockerNumber);
     if (!locker) throw new BadRequestException(this.errors.lockerRequired);
 
-    const [alreadyOpen, lockerOpen] = await this.prisma.$transaction([
-      this.prisma.visitSession.findFirst({
-        where: { clientId: client.id, exitedAt: null },
-        select: { id: true, lockerNumber: true, enteredAt: true, status: true },
-      }),
-      this.prisma.visitSession.findFirst({
-        where: { lockerNumber: locker, exitedAt: null },
-        select: { id: true, clientId: true },
-      }),
-    ]);
-    if (alreadyOpen) {
-      throw new BadRequestException({
-        ...this.errors.alreadyInGym,
-        openSession: alreadyOpen,
-      });
-    }
-    if (lockerOpen) throw new BadRequestException(this.errors.lockerBusy);
+    let session: { id: string; lockerNumber: string; enteredAt: Date };
+    try {
+      session = await this.prisma.$transaction(async (tx) => {
+        const alreadyOpen = await tx.visitSession.findFirst({
+          where: { clientId: client.id, exitedAt: null },
+          select: { id: true, lockerNumber: true, enteredAt: true, status: true },
+        });
+        if (alreadyOpen) {
+          throw new BadRequestException({
+            ...this.errors.alreadyInGym,
+            openSession: alreadyOpen,
+          });
+        }
+        const lockerOpen = await tx.visitSession.findFirst({
+          where: { lockerNumber: locker, exitedAt: null },
+          select: { id: true, clientId: true },
+        });
+        if (lockerOpen) throw new BadRequestException(this.errors.lockerBusy);
 
-    const enteredAt = new Date();
-    const session = await this.prisma.visitSession.create({
-      data: {
-        clientId: client.id,
-        lockerNumber: locker,
-        enteredAt,
-        status: VisitSessionStatus.IN_GYM,
-        enteredById: actorId,
-      },
-      select: { id: true, lockerNumber: true, enteredAt: true },
-    });
+        const enteredAt = new Date();
+        return tx.visitSession.create({
+          data: {
+            clientId: client.id,
+            lockerNumber: locker,
+            enteredAt,
+            status: VisitSessionStatus.IN_GYM,
+            enteredById: actorId,
+          },
+          select: { id: true, lockerNumber: true, enteredAt: true },
+        });
+      });
+    } catch (error: unknown) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        const target = error.meta?.target;
+        const fields = Array.isArray(target) ? target.map(String) : [];
+        if (fields.includes('clientId')) {
+          throw new BadRequestException(this.errors.alreadyInGym);
+        }
+        if (fields.includes('lockerNumber')) {
+          throw new BadRequestException(this.errors.lockerBusy);
+        }
+      }
+      throw error;
+    }
 
     this.logger.log(
       `AUDIT visit.check_in reqId=${this.requestContext.getRequestId()} actorId=${actorId} clientId=${client.id} sessionId=${session.id} locker=${session.lockerNumber}`,
@@ -267,13 +282,19 @@ export class VisitsService {
     const skip = (page - 1) * limit;
     const search = filters.search?.trim();
     const from = filters.from ? new Date(filters.from) : null;
-    const to = filters.to ? new Date(filters.to) : null;
+    let to: Date | null = null;
+    if (filters.to) {
+      to = new Date(filters.to);
+      to.setHours(23, 59, 59, 999);
+    }
+    const clientId = filters.clientId?.trim();
     const state =
       filters.state === 'IN_GYM' || filters.state === 'LEFT' || filters.state === 'OVERDUE' || filters.state === 'FORCE_CLOSED'
         ? filters.state
         : undefined;
 
     const where: Prisma.VisitSessionWhereInput = {
+      clientId: clientId || undefined,
       enteredAt:
         from || to
           ? {

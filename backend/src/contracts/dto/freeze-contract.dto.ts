@@ -1,10 +1,11 @@
 import { Transform } from 'class-transformer';
-import { IsDateString, IsIn, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import { IsDateString, IsInt, IsOptional, IsString, Min } from 'class-validator';
 
 export class FreezeContractDto {
   @IsOptional()
   @Transform(({ value }) => (value === '' ? undefined : value))
-  @IsIn([7, 14, 30])
+  @IsInt()
+  @Min(1)
   durationDays?: number;
 
   @IsOptional()

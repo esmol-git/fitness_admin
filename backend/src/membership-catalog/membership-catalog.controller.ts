@@ -1,14 +1,14 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { Role } from '@prisma/client';
 import { Roles } from '../auth/decorators/roles.decorator';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { CreateMembershipCatalogItemDto } from './dto/create-membership-catalog-item.dto';
+import { ListMembershipCatalogQueryDto } from './dto/list-membership-catalog-query.dto';
 import { UpdateMembershipCatalogItemDto } from './dto/update-membership-catalog-item.dto';
 import { MembershipCatalogService } from './membership-catalog.service';
 
 @Controller('membership-catalog')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(RolesGuard)
 export class MembershipCatalogController {
   constructor(
     private readonly membershipCatalogService: MembershipCatalogService,
@@ -16,8 +16,8 @@ export class MembershipCatalogController {
 
   @Get()
   @Roles(Role.ADMIN, Role.MANAGER, Role.RECEPTIONIST, Role.TRAINER)
-  findAll() {
-    return this.membershipCatalogService.findAll();
+  findAll(@Query() query: ListMembershipCatalogQueryDto) {
+    return this.membershipCatalogService.findAll(query);
   }
 
   @Post()

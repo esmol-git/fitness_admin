@@ -1,5 +1,5 @@
 import { MembershipDurationUnit } from '@prisma/client';
-import { IsEnum, IsInt, IsNumber, IsOptional, IsString, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { IsBoolean, IsEnum, IsInt, IsNumber, IsOptional, IsString, Max, MaxLength, Min, MinLength } from 'class-validator';
 
 export class CreateMembershipCatalogItemDto {
   @IsString()
@@ -26,4 +26,8 @@ export class CreateMembershipCatalogItemDto {
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
   price?: number;
+
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
 }

@@ -26,6 +26,21 @@ export function formatIsoDate(value: unknown): string {
   return `${y}-${m}-${d}`
 }
 
+/** VaDateInput с ISO-строкой в model-value отдаёт toISOString() — берём локальную календарную дату. */
+export function pickerValueToIsoYmd(value: unknown): string {
+  if (!value) return ''
+  if (value instanceof Date) {
+    return formatIsoDate(value)
+  }
+  if (typeof value === 'string') {
+    const s = value.trim()
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
+    const parsed = new Date(s)
+    if (!Number.isNaN(parsed.getTime())) return formatIsoDate(parsed)
+  }
+  return ''
+}
+
 export function toDateValue(value: string): Date | undefined {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined
   const [yy, mm, dd] = value.split('-').map((v) => Number(v))

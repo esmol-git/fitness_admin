@@ -9,7 +9,9 @@ import {
   parseClientStatusFilterValue,
 } from '@/config/clientsTable'
 import { TableActionIcon } from '@/config/tableActionIcons'
+import { DEFAULT_TABLE_PAGE_LIMIT } from '@/config/tablePagination'
 import AppDataTableShell from '@/components/ui/AppDataTableShell.vue'
+import ContractFreezeModal from '@/components/contracts/ContractFreezeModal.vue'
 import AppEmptyState from '@/components/ui/AppEmptyState.vue'
 import AppListFiltersToolbar from '@/components/ui/AppListFiltersToolbar.vue'
 import AppPageCard from '@/components/ui/AppPageCard.vue'
@@ -18,7 +20,9 @@ import StatusBadge from '@/components/ui/StatusBadge.vue'
 import AppTablePagerRow from '@/components/ui/AppTablePagerRow.vue'
 import ClientFormFields from '@/components/clients/ClientFormFields.vue'
 import ConfirmModal from '@/components/ui/ConfirmModal.vue'
-import { parseClientsListRouteQuery, useClientsListUrlSync } from '@/composables/useClientsListUrlSync'
+import { parseClientsListRouteQuery, useClientsListUrlSync, type ClientEditTab } from '@/composables/useClientsListUrlSync'
+import { fetchActiveMembershipCatalogOptions } from '@/composables/membershipCatalogCache'
+import { fetchManagerOptions } from '@/composables/managersCache'
 import { useCrudForm } from '@/composables/useCrudForm'
 import { resolveApiErrorMessage } from '@/composables/useApiErrorMap'
 import { useAuthStore } from '@/stores/auth'
@@ -33,7 +37,7 @@ import { api } from '@/utils/api'
 import { clientPhotoDisplayUrl } from '@/utils/clientPhotoUrl'
 import { getClientContractDaysLeft } from '@/utils/clientContractRemaining'
 import { meaningfulAlertText } from '@/utils/meaningfulAlertText'
-import { isoCalendarDateAtNowLocalTimeToUtcIso } from '@/utils/ruDateInput'
+import { isoCalendarDateAtNowLocalTimeToUtcIso, pickerValueToIsoYmd } from '@/utils/ruDateInput'
 
 const { t } = useI18n()
 const { init: notify } = useToast()
@@ -43,6 +47,7 @@ const ui = useUiStore()
 const auth = useAuthStore()
 const urlInit = parseClientsListRouteQuery(route.query)
 const editClientId = ref(urlInit.editClientId)
+const editClientTab = ref<ClientEditTab>(urlInit.editClientTab)
 
 const table = useTableState<
   ClientRow,
@@ -148,6 +153,8 @@ const createState = useCrudForm<ClientForm>(() => ({
   status: 'INACTIVE',
   email: '',
   passport: '',
+  passportIssuedBy: '',
+  passportIssuedAt: '',
   address: '',
   notes: '',
   contractNumber: '',
@@ -169,6 +176,8 @@ const editState = useCrudForm<ClientForm>(() => ({
   status: 'INACTIVE',
   email: '',
   passport: '',
+  passportIssuedBy: '',
+  passportIssuedAt: '',
   address: '',
   notes: '',
   contractNumber: '',
@@ -179,6 +188,10 @@ const editState = useCrudForm<ClientForm>(() => ({
   cardNumber: '',
   photoUrl: '',
 }))
+const editModalOpen = editState.open
+const createModalOpen = createState.open
+let editModalOpening = false
+let editClientUrlOpenRequest = 0
 
 const createModalErrorText = computed(() => meaningfulAlertText(createState.error.value))
 const editModalErrorText = computed(() => meaningfulAlertText(editState.error.value))
@@ -198,6 +211,7 @@ const editHeaderSnapshot = ref<{
   openVisitStatus: null,
 })
 const editPauseUntil = ref<string | null>(null)
+const editPauseDurationDays = ref<number | null>(null)
 const createInitialSnapshot = ref('')
 const editInitialSnapshot = ref('')
 const deleteOpen = ref(false)
@@ -236,6 +250,7 @@ const editContractsHistory = ref<
     serviceEndDate?: string | null
     contractDate?: string | null
     pauseUntil?: string | null
+    pauseDurationDays?: number | null
     s3Url?: string | null
     createdAt: string
     paidTotal?: string
@@ -244,6 +259,7 @@ const editContractsHistory = ref<
     paymentPlan?: string
     installmentCount?: number | null
     suggestedEqualPayment?: string | null
+    serviceName?: string | null
   }>
 >([])
 const editContractsLoading = ref(false)
@@ -253,24 +269,53 @@ const editPaymentsHistory = ref<
     amount: string | number
     paidAt: string
     status: string
+    channel?: 'CASH' | 'NON_CASH' | string | null
     comment?: string | null
     contractDocumentId?: string | null
     operationType?: string
     contract?: { id: string; contractNumber: string; s3Url?: string | null } | null
   }>
 >([])
+const editVisitsHistory = ref<
+  Array<{
+    id: string
+    lockerNumber: string
+    enteredAt: string
+    exitedAt: string | null
+    status: 'IN_GYM' | 'LEFT' | 'OVERDUE' | 'FORCE_CLOSED'
+    closeReason?: string | null
+    comment?: string | null
+    exitedBy?: { firstName?: string | null; lastName?: string | null; login?: string } | null
+  }>
+>([])
+const editVisitsLoading = ref(false)
+const editVisitsPage = ref(1)
+const editVisitsLimit = ref<number>(DEFAULT_TABLE_PAGE_LIMIT)
+const editVisitsTotal = ref(0)
+const editVisitsFrom = ref('')
+const editVisitsTo = ref('')
+const editVisitsRequestId = ref(0)
 const editPaymentsLoading = ref(false)
+/** В селекте «тип абонемента» показываем неактивный каталог, если он уже выбран у клиента. */
+const editMembershipExtraOption = ref<{ value: string; text: string } | null>(null)
 const addContractPaymentLoading = ref(false)
 const editHistoryRequestId = ref(0)
 const clientsRowMenuOpenId = ref<string | null>(null)
 const clientsRowMenuRow = ref<ClientRow | null>(null)
 const clientsRowMenuAnchorRect = ref<DOMRect | null>(null)
+const activateOpen = ref(false)
+const activateTargetId = ref<string | null>(null)
+const activateLoading = ref(false)
+const activateUiError = ref<string | null>(null)
+const activateForm = ref({ serviceStartDate: '', serviceEndDate: '' })
+const activateDuration = ref<{
+  durationValue: number | null
+  durationUnit: 'DAY' | 'WEEK' | 'MONTH' | 'TRIAL' | null
+} | null>(null)
+
 const freezeOpen = ref(false)
 const freezeLoading = ref(false)
 const freezeTargetId = ref<string | null>(null)
-const freezeMode = ref<'preset' | 'manual'>('preset')
-const freezePreset = ref<7 | 14 | 30>(7)
-const freezeForm = ref({ startDate: '', endDate: '', reason: '' })
 const freezeUiError = ref<string | null>(null)
 const cancelOpen = ref(false)
 const cancelLoading = ref(false)
@@ -360,8 +405,8 @@ function clientGymTableChip(row: Pick<ClientRow, 'inGym' | 'openVisitStatus'>) {
 
 const createPersonHeadline = computed(() => getPersonHeadline(createState.form.value))
 const createHeaderStatus = computed(() => createState.form.value.status)
-const hasCurrentContractForEdit = computed(() =>
-  editContractsHistory.value.some((item) => item.status === 'ACTIVE' || item.status === 'PAUSED'),
+const editClientBlocked = computed(
+  () => editHeaderSnapshot.value.status === 'BLOCKED' || editState.form.value.status === 'BLOCKED',
 )
 
 useClientsListUrlSync(route, router, {
@@ -373,6 +418,7 @@ useClientsListUrlSync(route, router, {
   sortOrder,
   syncSearchImmediate,
   editClientId,
+  editClientTab,
 })
 
 const onStatusFilter = createStringFilterHandler('status', (value) =>
@@ -486,7 +532,9 @@ const tableItems = computed(() =>
       fullName: `${item.lastName} ${[item.firstName, item.middleName].filter(Boolean).map((v) => `${String(v).charAt(0)}.`).join('')}`.trim(),
       age: item.birthDate ? getAgeValue(item.birthDate.slice(0, 10)) : null,
       membershipType:
-        memberships.value.find((membership) => membership.value === item.membershipType)?.text || '—',
+        item.membershipCatalogName?.trim() ||
+        memberships.value.find((membership) => membership.value === item.membershipType)?.text ||
+        '—',
       managerName:
         managers.value.find((m) => m.value === item.managerId)?.text || t('clients.noManager'),
       contractDaysText:
@@ -501,6 +549,15 @@ const tableItems = computed(() =>
 
 const hasClients = computed(() => tableItems.value.length > 0)
 const membershipOptions = computed(() => [{ value: '', text: '—' }, ...memberships.value])
+
+const membershipOptionsForEdit = computed(() => {
+  const base: Array<{ value: string; text: string }> = [{ value: '', text: '—' }, ...memberships.value]
+  const extra = editMembershipExtraOption.value
+  if (extra && !base.some((o) => o.value === extra.value)) {
+    return [...base, extra]
+  }
+  return base
+})
 const currentManagerName = computed(() => {
   const user = auth.user
   if (!user) return t('clients.noManager')
@@ -550,9 +607,15 @@ function formatRuDate(dateLike?: string | null) {
   return d.toLocaleDateString('ru-RU')
 }
 
-const editPauseUntilCompactLabel = computed(() =>
-  editPauseUntil.value ? `до ${formatRuDate(editPauseUntil.value)}` : '',
-)
+const editPauseUntilCompactLabel = computed(() => {
+  if (!editPauseUntil.value) return ''
+  const until = formatRuDate(editPauseUntil.value)
+  const days = editPauseDurationDays.value
+  if (typeof days === 'number' && Number.isFinite(days) && days > 0) {
+    return t('clients.pauseCompactWithDays', { until, days })
+  }
+  return t('clients.pauseCompactUntil', { until })
+})
 
 const editGymChip = computed(() => {
   const s = editHeaderSnapshot.value
@@ -594,6 +657,8 @@ function toPayload(form: ClientForm, includeContractFields = true) {
     status: form.status,
     email: form.email.trim() || undefined,
     passport: form.passport.trim() || undefined,
+    passportIssuedBy: form.passportIssuedBy.trim() || undefined,
+    passportIssuedAt: form.passportIssuedAt || undefined,
     address: form.address.trim() || undefined,
     notes: form.notes.trim() || undefined,
     membershipType: form.membershipType || undefined,
@@ -663,42 +728,113 @@ function regenerateEditContractNumber() {
   editState.form.value.contractNumber = generateContractNumber(new Date())
 }
 
-function openEdit(row: ClientRow) {
+function clearEditClientUrlState() {
+  if (editClientId.value) {
+    editClientId.value = ''
+    editClientTab.value = 'general'
+  }
+}
+
+function onEditModalVisibilityChange(open: boolean) {
+  if (open) {
+    editModalOpen.value = true
+    return
+  }
+  if (editModalOpening || !editModalOpen.value) return
+  requestCloseEdit()
+}
+
+async function openEditClientFromUrlId(clientId: string, options?: { preserveTab?: boolean }) {
+  const trimmed = clientId.trim()
+  if (!trimmed) return
+  if (editModalOpen.value && editingId.value === trimmed) return
+
+  const requestId = ++editClientUrlOpenRequest
+  try {
+    const { data } = await api.get<ClientRow>(`/clients/${trimmed}`)
+    if (requestId !== editClientUrlOpenRequest) return
+    await openEdit(data, { preserveTab: options?.preserveTab ?? true, syncUrl: false, skipFetch: true })
+  } catch {
+    if (requestId !== editClientUrlOpenRequest) return
+    notify({ color: 'danger', message: t('clients.loadFailed') })
+    if (editClientId.value === trimmed) clearEditClientUrlState()
+  }
+}
+
+async function openEdit(
+  row: ClientRow,
+  options?: { preserveTab?: boolean; syncUrl?: boolean; skipFetch?: boolean },
+) {
   editAttempted.value = false
   editPhotoDraftPending.value = false
   editingId.value = row.id
+  if (!options?.preserveTab) {
+    editClientTab.value = 'general'
+  }
+
+  let client = row
+  if (!options?.skipFetch) {
+    editModalOpening = true
+    try {
+      const { data } = await api.get<ClientRow>(`/clients/${row.id}`)
+      client = data
+    } catch {
+      notify({ color: 'danger', message: t('clients.loadFailed') })
+      editModalOpening = false
+      return
+    }
+  }
+
+  const catalogId = client.membershipType?.trim() || ''
+  editMembershipExtraOption.value = null
+  if (catalogId && !memberships.value.some((m) => m.value === catalogId)) {
+    editMembershipExtraOption.value = {
+      value: catalogId,
+      text: client.membershipCatalogName?.trim() || catalogId,
+    }
+  }
+  editModalOpening = true
   editState.openForm({
-    firstName: row.firstName || '',
-    lastName: row.lastName || '',
-    phone: row.phone || '',
-    middleName: row.middleName || '',
-    birthDate: row.birthDate ? row.birthDate.slice(0, 10) : '',
-    gender: row.gender || '',
-    status: row.status || 'ACTIVE',
-    email: row.email || '',
-    passport: row.passport || '',
-    address: row.address || '',
-    notes: row.notes || '',
-    contractNumber: row.contractNumber || '',
-    contractStartDate: toDateOnly(row.contractStartDate),
-    contractEndDate: toDateOnly(row.contractEndDate),
-    paymentDate: toDateOnly(row.paymentDate) || toDateOnly(row.contractStartDate) || toDateOnly(row.createdAt),
-    membershipType: ((row as ClientRow & { membershipTypeId?: string | null }).membershipTypeId || row.membershipType || ''),
-    cardNumber: row.cardNumber || '',
-    photoUrl: row.photoUrl || '',
+    firstName: client.firstName || '',
+    lastName: client.lastName || '',
+    phone: client.phone || '',
+    middleName: client.middleName || '',
+    birthDate: client.birthDate ? client.birthDate.slice(0, 10) : '',
+    gender: client.gender || '',
+    status: client.status || 'ACTIVE',
+    email: client.email || '',
+    passport: client.passport || '',
+    passportIssuedBy: client.passportIssuedBy || '',
+    passportIssuedAt: client.passportIssuedAt ? client.passportIssuedAt.slice(0, 10) : '',
+    address: client.address || '',
+    notes: client.notes || '',
+    contractNumber: client.contractNumber || '',
+    contractStartDate: toDateOnly(client.contractStartDate),
+    contractEndDate: toDateOnly(client.contractEndDate),
+    paymentDate: toDateOnly(client.paymentDate) || toDateOnly(client.contractStartDate) || toDateOnly(client.createdAt),
+    membershipType: catalogId,
+    cardNumber: client.cardNumber || '',
+    photoUrl: client.photoUrl || '',
+  })
+  void nextTick(() => {
+    editModalOpening = false
   })
   editHeaderSnapshot.value = {
     headline: getPersonHeadline(editState.form.value),
-    status: row.status || 'ACTIVE',
-    inGym: typeof row.inGym === 'boolean' ? row.inGym : null,
-    openVisitStatus: row.openVisitStatus ?? null,
+    status: client.status || 'ACTIVE',
+    inGym: typeof client.inGym === 'boolean' ? client.inGym : null,
+    openVisitStatus: client.openVisitStatus ?? null,
   }
   editInitialSnapshot.value = JSON.stringify(editState.form.value)
   editCardChecking.value = false
   editCardTaken.value = false
   const requestId = ++editHistoryRequestId.value
-  void Promise.all([loadEditContractsHistory(row.id, requestId), loadEditPaymentsHistory(row.id, requestId)])
+  resetEditVisitsHistoryState()
+  void Promise.all([loadEditContractsHistory(client.id, requestId), loadEditPaymentsHistory(client.id, requestId)])
   void nextTick(() => editFormRef.value?.resetPhotoDraft())
+  if (options?.syncUrl !== false) {
+    editClientId.value = client.id
+  }
 }
 
 function closeClientRowActionsMenu() {
@@ -707,9 +843,9 @@ function closeClientRowActionsMenu() {
   clientsRowMenuAnchorRect.value = null
 }
 
-/** Список: «Сгенерировать договор» только без действующего договора (ACTIVE совпадает с проверкой /can-generate на бэкенде). */
+/** Список: новый договор (в т.ч. очередной) — для всех, кроме заблокированных. */
 function clientRowShowsGenerateContract(row: ClientRow) {
-  return row.status !== 'BLOCKED' && row.status !== 'ACTIVE'
+  return row.status !== 'BLOCKED'
 }
 
 const clientsRowMenuLayerStyle = computed(() => {
@@ -786,7 +922,7 @@ function handleClientsTableRowClick(payload: ClientsTableRowClickPayload) {
   if (t.closest('.clients-gym-chip-trigger')) return
   if (t.closest('.clients-table-actions-cell')) return
   closeClientRowActionsMenu()
-  openEdit(payload.item as unknown as ClientRow)
+  void openEdit(payload.item as unknown as ClientRow)
 }
 
 function onDocumentPointerDownCloseRowMenu(ev: Event) {
@@ -807,22 +943,16 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', closeClientRowActionsMenu)
 })
 
-let consumingEditClientFromUrl = false
 watch(
   editClientId,
-  async (id) => {
+  (id) => {
     const trimmed = typeof id === 'string' ? id.trim() : ''
-    if (!trimmed || consumingEditClientFromUrl) return
-    consumingEditClientFromUrl = true
-    try {
-      const { data } = await api.get<ClientRow>(`/clients/${trimmed}`)
-      openEdit(data as ClientRow)
-    } catch {
-      notify({ color: 'danger', message: t('clients.loadFailed') })
-    } finally {
-      editClientId.value = ''
-      consumingEditClientFromUrl = false
+    if (!trimmed) {
+      if (editModalOpen.value) requestCloseEdit()
+      return
     }
+    if (editModalOpen.value && editingId.value === trimmed) return
+    void openEditClientFromUrlId(trimmed, { preserveTab: true })
   },
   { flush: 'post', immediate: true },
 )
@@ -845,7 +975,9 @@ function requestCloseEdit() {
     discardOpen.value = true
     return
   }
+  editClientUrlOpenRequest += 1
   editState.closeForm()
+  clearEditClientUrlState()
   void nextTick(() => editFormRef.value?.resetPhotoDraft())
 }
 
@@ -854,7 +986,9 @@ function discardChanges() {
     createState.closeForm()
     void nextTick(() => createFormRef.value?.resetPhotoDraft())
   } else if (discardTarget.value === 'edit') {
+    editClientUrlOpenRequest += 1
     editState.closeForm()
+    clearEditClientUrlState()
     void nextTick(() => editFormRef.value?.resetPhotoDraft())
   }
   discardOpen.value = false
@@ -864,14 +998,14 @@ function discardChanges() {
 async function openScannerTargetClient(id: string) {
   const existing = items.value.find((item) => item.id === id)
   if (existing) {
-    openEdit(existing)
+    await openEdit(existing)
     ui.setScannerTargetClientId(null)
     return
   }
 
   try {
-    const { data } = await api.get(`/clients/${id}`)
-    openEdit(data as ClientRow)
+    const { data } = await api.get<ClientRow>(`/clients/${id}`)
+    await openEdit(data, { skipFetch: true })
     ui.setScannerTargetClientId(null)
   } catch (error: unknown) {
     ui.setScannerTargetClientId(null)
@@ -949,7 +1083,9 @@ async function updateClient() {
       return
     }
     await api.patch(`/clients/${editingId.value}`, toPayload(editState.form.value, false))
+    editClientUrlOpenRequest += 1
     editState.closeForm()
+    clearEditClientUrlState()
     editInitialSnapshot.value = ''
     notify({ color: 'success', message: t('clients.updatedSuccess') })
     await clientsSource.reload()
@@ -997,6 +1133,9 @@ async function loadEditContractsHistory(clientId: string, requestId = editHistor
     editContractsHistory.value = Array.isArray(data) ? data : []
     const paused = editContractsHistory.value.find((item) => item.status === 'PAUSED' && item.pauseUntil)
     editPauseUntil.value = paused?.pauseUntil ?? null
+    const pd = paused?.pauseDurationDays
+    editPauseDurationDays.value =
+      typeof pd === 'number' && Number.isFinite(pd) && pd > 0 ? Math.floor(pd) : null
     const primaryDoc = pickPrimaryContractDocForEdit(editContractsHistory.value)
     if (editingId.value === clientId && requestId === editHistoryRequestId.value && primaryDoc) {
       const docNumber = primaryDoc.contractNumber?.trim()
@@ -1030,6 +1169,7 @@ async function loadEditContractsHistory(clientId: string, requestId = editHistor
     if (editingId.value !== clientId || requestId !== editHistoryRequestId.value) return
     editContractsHistory.value = []
     editPauseUntil.value = null
+    editPauseDurationDays.value = null
   } finally {
     if (requestId !== editHistoryRequestId.value) return
     editContractsLoading.value = false
@@ -1051,7 +1191,107 @@ async function loadEditPaymentsHistory(clientId: string, requestId = editHistory
   }
 }
 
-async function onAddContractPayment(payload: { contractDocumentId: string; amount: number; paidAt: string }) {
+function resetEditVisitsHistoryState() {
+  editVisitsHistory.value = []
+  editVisitsLoading.value = false
+  editVisitsPage.value = 1
+  editVisitsLimit.value = DEFAULT_TABLE_PAGE_LIMIT
+  editVisitsTotal.value = 0
+  editVisitsFrom.value = ''
+  editVisitsTo.value = ''
+  editVisitsRequestId.value += 1
+}
+
+async function loadEditVisitsHistory(clientId: string, requestId = editVisitsRequestId.value) {
+  editVisitsLoading.value = true
+  try {
+    const params: Record<string, string> = {
+      clientId,
+      page: String(editVisitsPage.value),
+      limit: String(editVisitsLimit.value),
+      sortBy: 'enteredAt',
+      sortOrder: 'desc',
+    }
+    if (editVisitsFrom.value.trim()) params.from = editVisitsFrom.value.trim().slice(0, 10)
+    if (editVisitsTo.value.trim()) params.to = editVisitsTo.value.trim().slice(0, 10)
+    const { data } = await api.get('/visits', { params })
+    if (editingId.value !== clientId || requestId !== editVisitsRequestId.value) return
+    if (Array.isArray(data)) {
+      editVisitsHistory.value = data
+      editVisitsTotal.value = data.length
+      return
+    }
+    const typed = data as {
+      items?: typeof editVisitsHistory.value
+      meta?: { total?: number; page?: number; limit?: number }
+    }
+    editVisitsHistory.value = Array.isArray(typed.items) ? typed.items : []
+    editVisitsTotal.value = Number.isFinite(typed.meta?.total)
+      ? Number(typed.meta?.total)
+      : editVisitsHistory.value.length
+  } catch {
+    if (editingId.value !== clientId || requestId !== editVisitsRequestId.value) return
+    editVisitsHistory.value = []
+    editVisitsTotal.value = 0
+  } finally {
+    if (requestId !== editVisitsRequestId.value) return
+    editVisitsLoading.value = false
+  }
+}
+
+function onEditVisitsTabOpen() {
+  const clientId = editingId.value
+  if (!clientId) return
+  const requestId = editVisitsRequestId.value
+  void loadEditVisitsHistory(clientId, requestId)
+}
+
+function onEditVisitsPageChange(page: number) {
+  editVisitsPage.value = page
+  const clientId = editingId.value
+  if (!clientId) return
+  void loadEditVisitsHistory(clientId)
+}
+
+function onEditVisitsLimitChange(limit: number) {
+  editVisitsLimit.value = limit
+  editVisitsPage.value = 1
+  const clientId = editingId.value
+  if (!clientId) return
+  void loadEditVisitsHistory(clientId)
+}
+
+function onEditVisitsFromChange(from: string) {
+  editVisitsFrom.value = from
+  editVisitsPage.value = 1
+  const clientId = editingId.value
+  if (!clientId) return
+  void loadEditVisitsHistory(clientId)
+}
+
+function onEditVisitsToChange(to: string) {
+  editVisitsTo.value = to
+  editVisitsPage.value = 1
+  const clientId = editingId.value
+  if (!clientId) return
+  void loadEditVisitsHistory(clientId)
+}
+
+function onEditVisitsResetFilters() {
+  editVisitsFrom.value = ''
+  editVisitsTo.value = ''
+  editVisitsPage.value = 1
+  const clientId = editingId.value
+  if (!clientId) return
+  void loadEditVisitsHistory(clientId)
+}
+
+async function onAddContractPayment(payload: {
+  contractDocumentId: string
+  amount: number
+  paidAt: string
+  channel: 'CASH' | 'NON_CASH'
+}) {
   const clientId = editingId.value
   if (!clientId) return
   addContractPaymentLoading.value = true
@@ -1067,6 +1307,7 @@ async function onAddContractPayment(payload: { contractDocumentId: string; amoun
       amount: payload.amount,
       paidAt: paidAtForApi,
       status: 'PAID',
+      channel: payload.channel,
       comment: 'Contract installment payment',
     })
     notify({ color: 'success', message: t('clients.paymentCreated') })
@@ -1100,10 +1341,23 @@ async function generateContractForEditingClient() {
  * Проверка can-generate и переход на страницу договора с черновиком.
  * Без открытия модалки клиента — от таблицы вызывать с seed из строки.
  */
+function canGenerateFailMessage(reason?: string): string {
+  switch (reason) {
+    case 'CONTRACT_NUMBER_REQUIRED':
+      return t('clients.contractNumberRequired')
+    case 'CONTRACT_NUMBER_EXISTS':
+      return t('clients.contractNumberTaken')
+    case 'ACTIVE_CONTRACT_EXISTS':
+      return t('clients.activeContractAlreadyExists')
+    default:
+      return t('clients.contractGenerateFailed')
+  }
+}
+
 async function proceedGenerateContractNavigation(
   clientId: string,
   seedContractNumber: string,
-  options?: { syncContractNumberToEditForm?: boolean },
+  options?: { syncContractNumberToEditForm?: boolean; queueContract?: boolean },
 ) {
   let contractNumber = seedContractNumber.trim()
   if (!contractNumber) {
@@ -1112,21 +1366,33 @@ async function proceedGenerateContractNavigation(
       editState.form.value.contractNumber = contractNumber
     }
   }
+  if (options?.queueContract) {
+    await router.push({
+      name: 'contracts',
+      query: {
+        clientId,
+        newContract: '1',
+        contractNumber: contractNumber.trim(),
+        queueContract: '1',
+      },
+    })
+    return
+  }
+
   const maxAttempts = 8
   let canGenerate = false
   try {
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const { data } = await api.get<{ ok: boolean; reason?: string }>(
         `/contracts/client/${clientId}/can-generate`,
-        { params: { contractNumber: contractNumber || undefined } },
+        {
+          params: { contractNumber, _t: Date.now() },
+          headers: { 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+        },
       )
-      if (data?.ok) {
+      if (data?.ok === true) {
         canGenerate = true
         break
-      }
-      if (data?.reason === 'ACTIVE_CONTRACT_EXISTS') {
-        notify({ color: 'warning', message: t('clients.activeContractAlreadyExists') })
-        return
       }
       if (data?.reason === 'CONTRACT_NUMBER_EXISTS') {
         contractNumber = generateContractNumber(new Date())
@@ -1135,7 +1401,10 @@ async function proceedGenerateContractNavigation(
         }
         continue
       }
-      notify({ color: 'danger', message: t('clients.contractNumberRequired') })
+      notify({
+        color: 'warning',
+        message: canGenerateFailMessage(data?.reason),
+      })
       return
     }
     if (!canGenerate) {
@@ -1152,6 +1421,7 @@ async function proceedGenerateContractNavigation(
       clientId,
       newContract: '1',
       contractNumber: contractNumber.trim() || undefined,
+      ...(options?.queueContract ? { queueContract: '1' } : {}),
     },
   })
 }
@@ -1159,8 +1429,8 @@ async function proceedGenerateContractNavigation(
 async function generateContractFromTableRow(row: ClientRow) {
   contractGenerateLoadingId.value = row.id
   try {
-    const seed = (row.contractNumber ?? '').trim()
-    await proceedGenerateContractNavigation(row.id, seed)
+    const queueContract = row.status === 'ACTIVE' || row.status === 'PAUSED'
+    await proceedGenerateContractNavigation(row.id, generateContractNumber(new Date()), { queueContract })
   } finally {
     contractGenerateLoadingId.value = null
   }
@@ -1209,11 +1479,22 @@ async function saveAndGenerateContract() {
 
 async function proceedGenerateContractForEditingClient() {
   if (!editingId.value) return
-  if (!editState.form.value.contractNumber.trim()) {
-    regenerateEditContractNumber()
-  }
-  await proceedGenerateContractNavigation(editingId.value, editState.form.value.contractNumber, {
-    syncContractNumberToEditForm: true,
+  const queueContract =
+    editHeaderSnapshot.value.status === 'ACTIVE' ||
+    editHeaderSnapshot.value.status === 'PAUSED' ||
+    editContractsHistory.value.some((item) => item.status === 'ACTIVE' || item.status === 'PAUSED')
+  const hasAnyContract =
+    editContractsHistory.value.length > 0 ||
+    editHeaderSnapshot.value.status === 'ACTIVE' ||
+    editHeaderSnapshot.value.status === 'PAUSED'
+  // Номер в форме — у действующего договора; для нового (очередного) всегда новый CTR-…
+  const seed =
+    queueContract || hasAnyContract
+      ? generateContractNumber(new Date())
+      : editState.form.value.contractNumber.trim() || generateContractNumber(new Date())
+  await proceedGenerateContractNavigation(editingId.value, seed, {
+    syncContractNumberToEditForm: false,
+    queueContract,
   })
 }
 
@@ -1242,81 +1523,151 @@ async function openContractFromHistory(contractId: string) {
   }
 }
 
-async function refreshEditedClientStatus() {
-  if (!editingId.value) return
-  try {
-    const { data } = await api.get<{ status?: ClientStatus }>(`/clients/${editingId.value}`)
-    const nextStatus = data?.status
-    if (
-      !nextStatus ||
-      (nextStatus !== 'ACTIVE' &&
-        nextStatus !== 'PAUSED' &&
-        nextStatus !== 'INACTIVE' &&
-        nextStatus !== 'BLOCKED')
-    ) {
-      return
-    }
-    editState.form.value.status = nextStatus
+function applyEditedClientRowFromList(clientId: string) {
+  const row = items.value.find((item) => item.id === clientId)
+  if (!row) return
+  if (
+    row.status === 'ACTIVE' ||
+    row.status === 'PAUSED' ||
+    row.status === 'INACTIVE' ||
+    row.status === 'BLOCKED'
+  ) {
+    editState.form.value.status = row.status
     editHeaderSnapshot.value = {
       ...editHeaderSnapshot.value,
-      status: nextStatus,
+      status: row.status,
+      inGym: row.inGym ?? editHeaderSnapshot.value.inGym,
+      openVisitStatus: row.openVisitStatus ?? editHeaderSnapshot.value.openVisitStatus,
     }
-  } catch {
-    // keep current snapshot if fetch fails
   }
 }
 
 async function reloadEditedClientContractState() {
   if (!editingId.value) return
   const requestId = ++editHistoryRequestId.value
+  const clientId = editingId.value
   await Promise.all([
-    loadEditContractsHistory(editingId.value, requestId),
-    loadEditPaymentsHistory(editingId.value, requestId),
+    loadEditContractsHistory(clientId, requestId),
+    loadEditPaymentsHistory(clientId, requestId),
     clientsSource.reload(),
-    refreshEditedClientStatus(),
   ])
+  applyEditedClientRowFromList(clientId)
+}
+
+function resolveMembershipDurationForContract(item: { serviceName?: string | null }) {
+  const name = item.serviceName?.trim()
+  if (!name) return null
+  const matched = memberships.value.find((m) => m.text.trim() === name)
+  if (!matched?.durationValue || !matched.durationUnit) return null
+  return { durationValue: matched.durationValue, durationUnit: matched.durationUnit }
+}
+
+function syncActivateEndDate() {
+  const start = activateForm.value.serviceStartDate.trim()
+  if (!start || !activateDuration.value) {
+    activateForm.value.serviceEndDate = ''
+    return
+  }
+  activateForm.value.serviceEndDate = calculateEndDate(
+    start,
+    activateDuration.value.durationValue,
+    activateDuration.value.durationUnit,
+  )
+}
+
+function openActivateContractFromHistory(contractId: string) {
+  const hasBlocking = editContractsHistory.value.some(
+    (row) =>
+      row.id !== contractId && (row.status === 'ACTIVE' || row.status === 'PAUSED'),
+  )
+  if (hasBlocking) {
+    notify({ color: 'warning', message: t('contracts.activateBlockedActiveExists') })
+    return
+  }
+  const item = editContractsHistory.value.find((row) => row.id === contractId)
+  if (item?.status !== 'SAVED') {
+    notify({ color: 'warning', message: t('contracts.onlySavedCanActivate') })
+    return
+  }
+  activateTargetId.value = contractId
+  activateDuration.value = item ? resolveMembershipDurationForContract(item) : null
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  activateForm.value = {
+    serviceStartDate: today.toISOString().slice(0, 10),
+    serviceEndDate: '',
+  }
+  syncActivateEndDate()
+  activateUiError.value = null
+  activateOpen.value = true
+}
+
+watch(
+  () => activateForm.value.serviceStartDate,
+  () => {
+    if (activateOpen.value) syncActivateEndDate()
+  },
+)
+
+async function submitActivateFromHistory() {
+  if (!activateTargetId.value) return
+  if (!activateForm.value.serviceStartDate.trim()) {
+    activateUiError.value = t('contracts.serviceStartDate')
+    return
+  }
+  syncActivateEndDate()
+  if (!activateForm.value.serviceEndDate.trim()) {
+    activateUiError.value = t('clients.activateEndDateMissing')
+    return
+  }
+  activateLoading.value = true
+  activateUiError.value = null
+  try {
+    await api.patch(`/contracts/${activateTargetId.value}/activate`, {
+      serviceStartDate: activateForm.value.serviceStartDate,
+      serviceEndDate: activateForm.value.serviceEndDate.trim() || undefined,
+    })
+    activateOpen.value = false
+    activateTargetId.value = null
+    await reloadEditedClientContractState()
+  } catch (e: unknown) {
+    activateUiError.value = resolveApiErrorMessage(e, {
+      defaultMessage: t('contracts.statusUpdateFailed'),
+      byCode: {
+        ONLY_SAVED_CAN_ACTIVATE: t('contracts.onlySavedCanActivate'),
+        ACTIVE_MEMBERSHIP_BLOCKS_ACTIVATE: t('contracts.activateBlockedActiveExists'),
+        SERVICE_START_REQUIRED: t('contracts.serviceStartDate'),
+        SERVICE_END_REQUIRED: t('clients.activateEndDateMissing'),
+        SERVICE_DATE_RANGE_INVALID: t('contracts.saveFailed'),
+        ACTIVE_CONTRACT_EXISTS: t('clients.activeContractAlreadyExists'),
+      },
+    })
+  } finally {
+    activateLoading.value = false
+  }
 }
 
 async function pauseContractFromHistory(contractId: string) {
   freezeTargetId.value = contractId
-  freezeMode.value = 'preset'
-  freezePreset.value = 7
-  freezeForm.value = { startDate: '', endDate: '', reason: '' }
   freezeUiError.value = null
   freezeOpen.value = true
 }
 
-async function submitFreezeFromHistory() {
+async function submitFreezeFromHistory(payload: { startDate: string; endDate: string; reason: string }) {
   if (!freezeTargetId.value) return
   freezeLoading.value = true
   freezeUiError.value = null
   try {
-    if (freezeMode.value === 'preset') {
-      if (freezePresetOptions.value.length === 0) {
-        freezeUiError.value = t('contracts.freezeOutOfRange')
-        return
-      }
-      if (!freezePresetOptions.value.some((option) => option.value === freezePreset.value)) {
-        freezePreset.value = freezePresetOptions.value[0]!.value
-      }
-    }
-    const payload =
-      freezeMode.value === 'manual'
-        ? {
-            startDate: freezeForm.value.startDate || undefined,
-            endDate: freezeForm.value.endDate || undefined,
-            reason: freezeForm.value.reason.trim() || undefined,
-          }
-        : {
-            durationDays: freezePreset.value,
-            reason: freezeForm.value.reason.trim() || undefined,
-          }
-    await api.patch(`/contracts/${freezeTargetId.value}/pause`, payload)
+    await api.patch(`/contracts/${freezeTargetId.value}/pause`, {
+      startDate: payload.startDate,
+      endDate: payload.endDate,
+      reason: payload.reason || undefined,
+    })
     freezeOpen.value = false
     freezeTargetId.value = null
     await reloadEditedClientContractState()
   } catch (e: unknown) {
-    editState.error.value = resolveApiErrorMessage(e, {
+    freezeUiError.value = resolveApiErrorMessage(e, {
       defaultMessage: t('contracts.statusUpdateFailed'),
       byCode: {
         CANNOT_PAUSE_FINISHED_CONTRACT: t('contracts.statusUpdateFailed'),
@@ -1425,10 +1776,10 @@ async function confirmBlockClient() {
     blockOpen.value = false
     blockTarget.value = null
     notify({ color: 'success', message: t('clients.blockedSuccess') })
-    await clientsSource.reload()
     if (editingId.value === row.id) {
-      await refreshEditedClientStatus()
       await reloadEditedClientContractState()
+    } else {
+      await clientsSource.reload()
     }
   } catch (e: unknown) {
     notify({
@@ -1456,10 +1807,10 @@ async function confirmUnblockClient() {
     unblockOpen.value = false
     unblockTarget.value = null
     notify({ color: 'success', message: t('clients.unblockedSuccess') })
-    await clientsSource.reload()
     if (editingId.value === row.id) {
-      await refreshEditedClientStatus()
       await reloadEditedClientContractState()
+    } else {
+      await clientsSource.reload()
     }
   } catch (e: unknown) {
     notify({
@@ -1508,13 +1859,26 @@ watch(
       editingId.value = null
       editContractsHistory.value = []
       editPaymentsHistory.value = []
+      resetEditVisitsHistoryState()
+      editMembershipExtraOption.value = null
       editPauseUntil.value = null
+      editPauseDurationDays.value = null
       editState.resetForm()
       editState.error.value = null
       editInitialSnapshot.value = ''
       editCardChecking.value = false
       editCardTaken.value = false
+      clearEditClientUrlState()
     }
+  },
+)
+
+watch(
+  () => editState.form.value.membershipType,
+  (id) => {
+    const extra = editMembershipExtraOption.value
+    if (!extra) return
+    if (id !== extra.value) editMembershipExtraOption.value = null
   },
 )
 
@@ -1604,10 +1968,7 @@ function formatDateIso(date: Date) {
 }
 
 function toIsoDate(value: unknown) {
-  if (!value) return ''
-  if (typeof value === 'string') return value.slice(0, 10)
-  if (value instanceof Date && !Number.isNaN(value.getTime())) return formatDateIso(value)
-  return ''
+  return pickerValueToIsoYmd(value)
 }
 
 function isoToDate(value?: string) {
@@ -1725,51 +2086,8 @@ function applyAgePreset(preset: AgePreset) {
   patchFilters({ ageFrom: '36', ageTo: '99' })
 }
 
-function startOfDay(date: Date) {
-  const d = new Date(date)
-  d.setHours(0, 0, 0, 0)
-  return d
-}
-
-function diffDaysInclusive(startDate: Date, endDate: Date) {
-  const start = startOfDay(startDate).getTime()
-  const end = startOfDay(endDate).getTime()
-  return Math.floor((end - start) / 86400000) + 1
-}
-
 const freezeTargetContract = computed(() =>
   editContractsHistory.value.find((item) => item.id === freezeTargetId.value) ?? null,
-)
-
-const freezeAvailableDays = computed(() => {
-  const contract = freezeTargetContract.value
-  if (!contract?.serviceEndDate) return 0
-  const today = startOfDay(new Date())
-  const contractStart = contract.serviceStartDate ? startOfDay(new Date(contract.serviceStartDate)) : today
-  const contractEnd = startOfDay(new Date(contract.serviceEndDate))
-  const freezeStart = contractStart > today ? contractStart : today
-  if (Number.isNaN(contractEnd.getTime()) || contractEnd < freezeStart) return 0
-  return diffDaysInclusive(freezeStart, contractEnd)
-})
-
-const freezePresetOptions = computed(() => {
-  const available = freezeAvailableDays.value
-  return [
-    { value: 7 as const, text: t('contracts.freezePreset7') },
-    { value: 14 as const, text: t('contracts.freezePreset14') },
-    { value: 30 as const, text: t('contracts.freezePreset30') },
-  ].filter((option) => option.value <= available)
-})
-
-watch(
-  () => [freezeOpen.value, freezePresetOptions.value.length],
-  () => {
-    if (!freezeOpen.value || freezeMode.value !== 'preset') return
-    if (freezePresetOptions.value.length === 0) return
-    if (!freezePresetOptions.value.some((option) => option.value === freezePreset.value)) {
-      freezePreset.value = freezePresetOptions.value[0]!.value
-    }
-  },
 )
 
 function parseDateIso(value: string) {
@@ -1816,26 +2134,7 @@ function syncEndDateByMembership(form: ClientForm) {
 }
 
 async function loadMemberships() {
-  try {
-    const { data } = await api.get('/membership-catalog')
-    memberships.value = (
-      data as Array<{
-        id: string
-        name: string
-        price?: number | null
-        durationValue?: number | null
-        durationUnit?: 'DAY' | 'WEEK' | 'MONTH' | 'TRIAL' | null
-      }>
-    ).map((item) => ({
-      value: item.id,
-      text: item.name,
-      price: item.price == null ? null : Number(item.price),
-      durationValue: item.durationValue ?? null,
-      durationUnit: item.durationUnit ?? null,
-    }))
-  } catch {
-    memberships.value = []
-  }
+  memberships.value = await fetchActiveMembershipCatalogOptions()
 }
 
 watch(
@@ -1850,22 +2149,21 @@ watch(
 watch(
   () => ui.clientsTableRefreshTick,
   () => {
-    void clientsSource.reload()
+    void clientsSource.reload(true)
+  },
+)
+
+watch(
+  () => ui.visitsTableRefreshTick,
+  () => {
+    const clientId = editingId.value
+    if (!clientId) return
+    void loadEditVisitsHistory(clientId)
   },
 )
 
 void (async () => {
-  try {
-    const { data } = await api.get('/users', {
-      params: { page: 1, limit: 100, role: 'MANAGER', sortBy: 'login', sortOrder: 'asc' },
-    })
-    managers.value = (data.items as Array<{ id: string; firstName?: string; lastName?: string; login: string }>).map((u) => ({
-      value: u.id,
-      text: [u.lastName, u.firstName].filter(Boolean).join(' ').trim() || u.login,
-    }))
-  } catch {
-    managers.value = []
-  }
+  managers.value = await fetchManagerOptions()
   await loadMemberships()
 })()
 
@@ -1887,7 +2185,7 @@ watch(
   <div class="clients-view">
     <AppPageCard :title="t('clients.title')">
       <template #actions>
-        <VaButton preset="secondary" :disabled="loading" icon="refresh" @click="clientsSource.reload">
+        <VaButton preset="secondary" :disabled="loading" icon="refresh" @click="clientsSource.reload(true)">
           {{ t('common.refresh') }}
         </VaButton>
         <VaButton color="primary" :disabled="loading" icon="add" @click="openCreate">
@@ -2254,24 +2552,26 @@ watch(
           />
         </AppSectionCard>
         <div class="app-modal-actions clients-modal-actions">
-          <VaButton
-            type="button"
-            preset="secondary"
-            icon="close"
-            :aria-label="t('common.cancel')"
-            :disabled="createState.loading.value"
-            @click="requestCloseCreate"
-          >
-            <span class="clients-modal-action-label">{{ t('common.cancel') }}</span>
-          </VaButton>
-          <VaButton
-            type="submit"
-            icon="save"
-            :loading="createState.loading.value"
-            :aria-label="t('users.save')"
-          >
-            <span class="clients-modal-action-label">{{ t('users.save') }}</span>
-          </VaButton>
+          <div class="clients-modal-actions__end clients-modal-actions__end--only">
+            <VaButton
+              type="button"
+              preset="secondary"
+              icon="close"
+              :aria-label="t('common.cancel')"
+              :disabled="createState.loading.value"
+              @click="requestCloseCreate"
+            >
+              <span class="clients-modal-action-label">{{ t('common.cancel') }}</span>
+            </VaButton>
+            <VaButton
+              type="submit"
+              icon="save"
+              :loading="createState.loading.value"
+              :aria-label="t('users.save')"
+            >
+              <span class="clients-modal-action-label">{{ t('users.save') }}</span>
+            </VaButton>
+          </div>
         </div>
         <div
           v-if="createModalErrorText"
@@ -2285,19 +2585,19 @@ watch(
 
     <VaModal
       class="clients-editor-modal"
-      :model-value="editState.open.value"
+      :model-value="editModalOpen"
       hide-default-actions
-      fixed-layout
       :mobile-fullscreen="false"
       max-width="min(calc(100vw - 12px), 900px)"
-      @update:model-value="(v) => (v ? (editState.open.value = true) : requestCloseEdit())"
+      @update:model-value="onEditModalVisibilityChange"
     >
       <template #header />
       <form
-        class="app-modal-form app-modal-form--client-edit-scroll"
+        class="app-modal-form app-modal-form--client-edit"
         @submit.prevent="updateClient"
         @keydown="handleEditHotkeys"
       >
+        <div class="client-edit-modal-scroll">
         <AppSectionCard class="client-editor-card">
           <div class="person-header">
             <div class="person-headline-wrap">
@@ -2309,15 +2609,15 @@ watch(
               <span v-if="editPauseUntilCompactLabel" class="person-status-note">{{ editPauseUntilCompactLabel }}</span>
             </div>
           </div>
-          <div class="client-editor-form-body">
           <ClientFormFields
             ref="editFormRef"
             v-model="editState.form.value"
+            v-model:active-tab="editClientTab"
             :photo-upload-client-id="editingId"
             :is-create-mode="false"
             :attempted="editAttempted"
             :status-options="editorStatusOptions"
-            :membership-options="membershipOptions"
+            :membership-options="membershipOptionsForEdit"
             :current-manager-name="currentManagerName"
             :card-number-checking="editCardChecking"
             :card-number-taken="editCardTaken"
@@ -2325,47 +2625,65 @@ watch(
             :contract-history-loading="editContractsLoading"
             :payments-history="editPaymentsHistory"
             :payments-loading="editPaymentsLoading"
+            :visits-history="editVisitsHistory"
+            :visits-loading="editVisitsLoading"
+            :visits-page="editVisitsPage"
+            :visits-limit="editVisitsLimit"
+            :visits-total="editVisitsTotal"
+            :visits-from="editVisitsFrom"
+            :visits-to="editVisitsTo"
             :adding-contract-payment="addContractPaymentLoading"
             @generate-contract-number="regenerateEditContractNumber"
             @open-contract-history-item="openContractFromHistory"
+            @activate-contract-history-item="openActivateContractFromHistory"
             @pause-contract-history-item="pauseContractFromHistory"
             @resume-contract-history-item="resumeContractFromHistory"
             @terminate-contract-history-item="terminateContractFromHistory"
             @add-contract-payment="onAddContractPayment"
+            @visits-tab-open="onEditVisitsTabOpen"
+            @update:visits-page="onEditVisitsPageChange"
+            @update:visits-limit="onEditVisitsLimitChange"
+            @update:visits-from="onEditVisitsFromChange"
+            @update:visits-to="onEditVisitsToChange"
+            @visits-reset-filters="onEditVisitsResetFilters"
             @photo-draft-changed="onEditPhotoDraftChanged"
           />
-          </div>
         </AppSectionCard>
+        </div>
         <div class="app-modal-actions clients-modal-actions">
-          <VaButton
-            type="button"
-            preset="secondary"
-            :icon="TableActionIcon.viewDocument"
-            :aria-label="t('clients.generateContract')"
-            :disabled="editState.loading.value || !editingId || hasCurrentContractForEdit"
-            :title="hasCurrentContractForEdit ? t('clients.activeContractAlreadyExists') : ''"
-            @click="generateContractForEditingClient"
-          >
-            <span class="clients-modal-action-label">{{ t('clients.generateContract') }}</span>
-          </VaButton>
-          <VaButton
-            type="button"
-            preset="secondary"
-            icon="close"
-            :aria-label="t('common.cancel')"
-            :disabled="editState.loading.value"
-            @click="requestCloseEdit"
-          >
-            <span class="clients-modal-action-label">{{ t('common.cancel') }}</span>
-          </VaButton>
-          <VaButton
-            type="submit"
-            icon="save"
-            :loading="editState.loading.value"
-            :aria-label="t('users.save')"
-          >
-            <span class="clients-modal-action-label">{{ t('users.save') }}</span>
-          </VaButton>
+          <div class="clients-modal-actions__start">
+            <VaButton
+              type="button"
+              preset="secondary"
+              :icon="TableActionIcon.viewDocument"
+              :aria-label="t('clients.generateContract')"
+              :disabled="editState.loading.value || !editingId || editClientBlocked"
+              :title="editClientBlocked ? t('clients.blockedCannotGenerateContract') : ''"
+              @click="generateContractForEditingClient"
+            >
+              <span class="clients-modal-action-label">{{ t('clients.generateContract') }}</span>
+            </VaButton>
+          </div>
+          <div class="clients-modal-actions__end">
+            <VaButton
+              type="button"
+              preset="secondary"
+              icon="close"
+              :aria-label="t('common.cancel')"
+              :disabled="editState.loading.value"
+              @click="requestCloseEdit"
+            >
+              <span class="clients-modal-action-label">{{ t('common.cancel') }}</span>
+            </VaButton>
+            <VaButton
+              type="submit"
+              icon="save"
+              :loading="editState.loading.value"
+              :aria-label="t('users.save')"
+            >
+              <span class="clients-modal-action-label">{{ t('users.save') }}</span>
+            </VaButton>
+          </div>
         </div>
         <div
           v-if="editModalErrorText"
@@ -2429,65 +2747,43 @@ watch(
       @confirm="saveAndGenerateContract"
     />
 
-    <VaModal v-model="freezeOpen" hide-default-actions fixed-layout max-width="520px">
-      <h3 class="modal-title">{{ t('contracts.freezeTitle') }}</h3>
+    <VaModal v-model="activateOpen" hide-default-actions fixed-layout max-width="520px">
+      <h3 class="modal-title">{{ t('clients.activateContractTitle') }}</h3>
+      <p class="modal-hint">{{ t('clients.activateContractHint') }}</p>
       <div class="modal-grid">
-        <VaSelect
-          v-model="freezeMode"
-          :label="t('contracts.freezeMode')"
-          :options="[
-            { value: 'preset', text: t('contracts.freezePresetMode') },
-            { value: 'manual', text: t('contracts.freezeManualMode') },
-          ]"
-          value-by="value"
-          text-by="text"
-          class="modal-grid__full"
-        />
-        <VaSelect
-          v-if="freezeMode === 'preset'"
-          v-model="freezePreset"
-          :label="t('contracts.freezeDuration')"
-          :options="freezePresetOptions"
-          value-by="value"
-          text-by="text"
-          class="modal-grid__full"
-        />
-        <VaAlert
-          v-if="freezeMode === 'preset' && freezePresetOptions.length === 0"
-          color="warning"
-          outline
-          class="modal-grid__full"
-        >
-          {{ t('contracts.freezeOutOfRange') }}
-        </VaAlert>
         <VaDateInput
-          v-if="freezeMode === 'manual'"
-          :model-value="freezeForm.startDate || undefined"
-          :label="t('contracts.freezeStartDate')"
-          @update:model-value="freezeForm.startDate = toIsoDate($event)"
+          :model-value="isoToDate(activateForm.serviceStartDate) || undefined"
+          :label="t('contracts.serviceStartDate')"
+          class="modal-grid__full"
+          @update:model-value="activateForm.serviceStartDate = toIsoDate($event)"
         />
         <VaDateInput
-          v-if="freezeMode === 'manual'"
-          :model-value="freezeForm.endDate || undefined"
-          :label="t('contracts.freezeEndDate')"
-          @update:model-value="freezeForm.endDate = toIsoDate($event)"
+          :model-value="isoToDate(activateForm.serviceEndDate) || undefined"
+          :label="t('contracts.serviceEndDate')"
+          class="modal-grid__full"
+          readonly
         />
-        <VaInput v-model="freezeForm.reason" :label="t('contracts.freezeReason')" class="modal-grid__full" />
-        <VaAlert v-if="freezeUiError" color="danger" outline class="modal-grid__full">
-          {{ freezeUiError }}
+        <VaAlert v-if="activateUiError" color="danger" outline class="modal-grid__full">
+          {{ activateUiError }}
         </VaAlert>
       </div>
       <div class="app-modal-actions">
-        <VaButton preset="secondary" @click="freezeOpen = false">{{ t('common.cancel') }}</VaButton>
-        <VaButton
-          :loading="freezeLoading"
-          :disabled="freezeMode === 'preset' && freezePresetOptions.length === 0"
-          @click="submitFreezeFromHistory"
-        >
-          {{ t('contracts.pause') }}
+        <VaButton preset="secondary" @click="activateOpen = false">{{ t('common.cancel') }}</VaButton>
+        <VaButton :loading="activateLoading" @click="submitActivateFromHistory">
+          {{ t('clients.activateContract') }}
         </VaButton>
       </div>
     </VaModal>
+
+    <ContractFreezeModal
+      v-model="freezeOpen"
+      :loading="freezeLoading"
+      :error="freezeUiError"
+      :contract-number="freezeTargetContract?.contractNumber"
+      :service-start-date="freezeTargetContract?.serviceStartDate"
+      :service-end-date="freezeTargetContract?.serviceEndDate"
+      @submit="submitFreezeFromHistory"
+    />
 
     <VaModal v-model="cancelOpen" hide-default-actions fixed-layout max-width="520px">
       <h3 class="modal-title">{{ t('contracts.cancelRefundTitle') }}</h3>
@@ -2743,47 +3039,45 @@ watch(
   color: var(--app-muted);
   background: color-mix(in srgb, var(--app-surface) 85%, var(--app-border));
 }
-/** Редактирование клиента: фиксированная высота модалки, скролл только у тела вкладок. */
-.app-modal-form--client-edit-scroll {
-  --client-edit-modal-height: min(88vh, 960px);
-  --client-edit-modal-height: min(88dvh, 960px);
-  height: var(--client-edit-modal-height);
-  max-height: var(--client-edit-modal-height);
-  box-sizing: border-box;
-  overflow: hidden;
+/** Редактирование клиента: скролл только при реальном переполнении, без «пустого хвоста». */
+.app-modal-form--client-edit {
+  gap: 0.65rem;
+  align-items: stretch;
 }
 
-.app-modal-form--client-edit-scroll > :deep(.section-card) {
-  display: flex;
-  flex-direction: column;
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: hidden;
+.app-modal-form--client-edit :deep(.client-editor-card.section-card) {
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
 }
 
-.app-modal-form--client-edit-scroll :deep(.section-card__header) {
-  flex-shrink: 0;
+.client-edit-modal-scroll {
+  --client-edit-scroll-max-height: calc(100vh - 10.5rem);
+  --client-edit-scroll-max-height: calc(100dvh - 10.5rem);
+  flex: 0 0 auto;
+  align-self: stretch;
+  width: 100%;
+  height: fit-content;
+  max-height: var(--client-edit-scroll-max-height);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--app-muted) 28%, transparent) transparent;
 }
 
-.app-modal-form--client-edit-scroll :deep(.section-card__content) {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
+.client-edit-modal-scroll::-webkit-scrollbar {
+  width: 9px;
 }
 
-.app-modal-form--client-edit-scroll :deep(.section-card__content > .person-header) {
-  flex-shrink: 0;
+.client-edit-modal-scroll::-webkit-scrollbar-track {
+  background: transparent;
 }
 
-.app-modal-form--client-edit-scroll :deep(.client-editor-form-body) {
-  flex: 1 1 auto;
-  min-height: 0;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
+.client-edit-modal-scroll::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-muted) 28%, transparent);
 }
 
 .person-header {
@@ -2856,14 +3150,20 @@ watch(
     line-height: 1.3;
   }
 
-  .app-modal-form--client-edit-scroll :deep(.section-card__header) {
-    margin-bottom: 0.4rem;
+  .client-edit-modal-scroll {
+    --client-edit-scroll-max-height: calc(100dvh - 9rem);
   }
 }
 .modal-title {
   margin: 0 0 0.75rem;
   font-size: 1.04rem;
   font-weight: 700;
+}
+.modal-hint {
+  margin: 0 0 0.85rem;
+  font-size: 0.88rem;
+  line-height: 1.4;
+  color: var(--app-muted);
 }
 .modal-grid {
   display: grid;
@@ -2954,6 +3254,46 @@ watch(
   display: flex;
   justify-content: flex-end;
   width: 100%;
+}
+
+.clients-modal-actions {
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 0.15rem;
+  padding: 0.75rem 0.85rem 0.85rem;
+  border-top: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--app-text) 2.5%, var(--app-surface)) 0%,
+    var(--app-surface) 100%
+  );
+}
+
+.clients-modal-actions__start,
+.clients-modal-actions__end {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.clients-modal-actions__end {
+  margin-left: auto;
+}
+
+.clients-modal-actions__end--only {
+  width: 100%;
+  justify-content: flex-end;
+}
+
+.clients-modal-actions__start :deep(.va-button),
+.clients-modal-actions__end :deep(.va-button) {
+  min-width: 7.5rem;
+}
+
+.clients-modal-actions__end :deep(.va-button[type='submit']) {
+  min-width: 8.5rem;
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--app-accent) 24%, transparent);
 }
 
 .clients-row-menu {

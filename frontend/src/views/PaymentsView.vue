@@ -38,6 +38,7 @@ type PaymentApiRow = {
   amount: string | number
   paidAt: string
   status: string
+  channel?: 'CASH' | 'NON_CASH' | string | null
   comment?: string | null
   contract?: { id: string; contractNumber: string; s3Url?: string | null } | null
   client?: {
@@ -98,6 +99,11 @@ const hasActiveFilters = computed(
     page.value > 1 ||
     limit.value !== DEFAULT_TABLE_PAGE_LIMIT,
 )
+
+function paymentChannelLabel(channel?: string | null): string {
+  const c = (channel || 'CASH').trim().toUpperCase()
+  return c === 'NON_CASH' ? t('clients.paymentChannelNonCash') : t('clients.paymentChannelCash')
+}
 
 function paymentStatusLabel(value: string) {
   const normalized = value === 'REFUND' ? 'REFUNDED' : value
@@ -554,6 +560,7 @@ onBeforeUnmount(() => {
         :columns="[
           { key: 'clientShort', label: t('payments.columnClient') },
           { key: 'amount', label: t('payments.columnAmount') },
+          { key: 'channel', label: t('payments.columnChannel') },
           { key: 'status', label: t('clients.statusLabel') },
           { key: 'contractNumber', label: t('payments.columnContract') },
           { key: 'paidAt', label: t('payments.columnPaidAt') },
@@ -565,6 +572,7 @@ onBeforeUnmount(() => {
       >
         <template #cell(clientShort)="{ rowData }">{{ rowData.clientShort }}</template>
         <template #cell(amount)="{ rowData }">{{ Number(rowData.amount).toFixed(2) }}</template>
+        <template #cell(channel)="{ rowData }">{{ paymentChannelLabel(rowData.channel) }}</template>
         <template #cell(paidAt)="{ rowData }">{{ new Date(rowData.paidAt).toLocaleString('ru-RU') }}</template>
         <template #cell(status)="{ rowData }">
           <StatusBadge :label="paymentStatusLabel(rowData.status)" :tone="paymentStatusTone(rowData.status)" />

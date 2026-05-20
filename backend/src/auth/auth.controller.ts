@@ -17,9 +17,9 @@ import {
   type AuthUser,
 } from './decorators/current-user.decorator';
 import { Roles } from './decorators/roles.decorator';
+import { Public } from './decorators/public.decorator';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
-import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { RolesGuard } from './guards/roles.guard';
 import { AuthService } from './auth.service';
 
@@ -48,6 +48,7 @@ export class AuthController {
   }
 
   @Post('login')
+  @Public()
   @Throttle({ default: { limit: 5, ttl: 60 * 1000 } })
   async login(
     @Body() dto: LoginDto,
@@ -62,6 +63,7 @@ export class AuthController {
   }
 
   @Post('refresh')
+  @Public()
   @Throttle({ default: { limit: 20, ttl: 60 * 1000 } })
   async refresh(
     @Req() req: Request,
@@ -86,6 +88,7 @@ export class AuthController {
   }
 
   @Post('logout')
+  @Public()
   @Throttle({ default: { limit: 20, ttl: 60 * 1000 } })
   async logout(
     @Req() req: Request,
@@ -103,14 +106,13 @@ export class AuthController {
   }
 
   @Get('me')
-  @UseGuards(JwtAuthGuard)
   me(@CurrentUser() user: AuthUser) {
     return user;
   }
 
   /** Проверка RBAC (только ADMIN) — для отладки и тестов фронта */
   @Get('admin/ping')
-  @UseGuards(JwtAuthGuard, RolesGuard)
+  @UseGuards(RolesGuard)
   @Roles(Role.ADMIN)
   adminPing() {
     return { ok: true, scope: 'admin' };

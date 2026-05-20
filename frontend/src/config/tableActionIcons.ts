@@ -19,6 +19,8 @@ export const TableActionIcon = {
   contractPause: 'pause_circle',
   /** Возобновление договора */
   contractResume: 'play_circle',
+  /** Запуск ожидающего договора (дата начала услуги) */
+  contractActivate: 'play_arrow',
   /** Расторжение / отмена договора (не путать с blockClient) */
   contractTerminate: 'cancel',
 } as const

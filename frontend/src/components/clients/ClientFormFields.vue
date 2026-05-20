@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import IMask, { type InputMask } from 'imask'
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type ComponentPublicInstance } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, type ComponentPublicInstance } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useToast } from 'vuestic-ui'
 import { TableActionIcon } from '@/config/tableActionIcons'
+import { DEFAULT_TABLE_PAGE_LIMIT } from '@/config/tablePagination'
 import type { ClientForm, ClientStatus } from '@/types/clients'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
+import ConfirmModal from '@/components/ui/ConfirmModal.vue'
 import AppEmptyState from '@/components/ui/AppEmptyState.vue'
+import AppTablePagerRow from '@/components/ui/AppTablePagerRow.vue'
 import { resolveApiErrorMessage } from '@/composables/useApiErrorMap'
 import { api } from '@/utils/api'
 import { copyTextToClipboard } from '@/utils/clipboard'
@@ -14,6 +17,7 @@ import {
   buildMonthNames,
   buildWeekdayNames,
   formatIsoDate,
+  pickerValueToIsoYmd,
   hasDateFormatError,
   normalizeDateInputText,
   ruDateTextToIso,
@@ -22,6 +26,7 @@ import {
 } from '@/utils/ruDateInput'
 import { clientPhotoDisplayUrl } from '@/utils/clientPhotoUrl'
 import { meaningfulAlertText } from '@/utils/meaningfulAlertText'
+import type { ClientEditTab } from '@/composables/useClientsListUrlSync'
 
 const props = defineProps<{
   modelValue: ClientForm
@@ -41,6 +46,7 @@ const props = defineProps<{
     serviceEndDate?: string | null
     contractDate?: string | null
     pauseUntil?: string | null
+    pauseDurationDays?: number | null
     s3Url?: string | null
     createdAt: string
     paidTotal?: string
@@ -56,14 +62,33 @@ const props = defineProps<{
     amount: string | number
     paidAt: string
     status: string
+    channel?: 'CASH' | 'NON_CASH' | string | null
     comment?: string | null
     contractDocumentId?: string | null
     operationType?: string
     contract?: { id: string; contractNumber: string; s3Url?: string | null } | null
   }>
   paymentsLoading?: boolean
+  visitsHistory?: Array<{
+    id: string
+    lockerNumber: string
+    enteredAt: string
+    exitedAt: string | null
+    status: 'IN_GYM' | 'LEFT' | 'OVERDUE' | 'FORCE_CLOSED'
+    closeReason?: string | null
+    comment?: string | null
+    exitedBy?: { firstName?: string | null; lastName?: string | null; login?: string } | null
+  }>
+  visitsLoading?: boolean
+  visitsPage?: number
+  visitsLimit?: number
+  visitsTotal?: number
+  visitsFrom?: string
+  visitsTo?: string
   /** При сохранении платежа по договору с родителя — блокировка кнопки. */
   addingContractPayment?: boolean
+  /** Активная вкладка (редактирование клиента; синхронизируется с URL). */
+  activeTab?: ClientEditTab
   /** Если задан — загрузка фото идёт в `clients/:id/…`; иначе в `clients/pending/…` (создание клиента). */
   photoUploadClientId?: string | null
 }>()
@@ -72,11 +97,24 @@ const emit = defineEmits<{
   (e: 'update:modelValue', value: ClientForm): void
   (e: 'generate-contract-number'): void
   (e: 'open-contract-history-item', id: string): void
+  (e: 'activate-contract-history-item', id: string): void
   (e: 'pause-contract-history-item', id: string): void
   (e: 'resume-contract-history-item', id: string): void
   (e: 'terminate-contract-history-item', id: string): void
-  (e: 'add-contract-payment', value: { contractDocumentId: string; amount: number; paidAt: string }): void
+  (e: 'add-contract-payment', value: {
+    contractDocumentId: string
+    amount: number
+    paidAt: string
+    channel: 'CASH' | 'NON_CASH'
+  }): void
+  (e: 'visits-tab-open'): void
+  (e: 'update:visitsPage', value: number): void
+  (e: 'update:visitsLimit', value: number): void
+  (e: 'update:visitsFrom', value: string): void
+  (e: 'update:visitsTo', value: string): void
+  (e: 'visits-reset-filters'): void
   (e: 'photo-draft-changed', pending: boolean): void
+  (e: 'update:activeTab', value: ClientEditTab): void
 }>()
 const { t, locale } = useI18n()
 const { init: notify } = useToast()
@@ -231,6 +269,11 @@ function paymentHistoryStatusLabel(status?: string): string {
   return key ? t(`contracts.paymentStatuses.${key}`) : (status?.trim() || '—')
 }
 
+function paymentChannelLabel(channel?: string | null): string {
+  const c = (channel || 'CASH').trim().toUpperCase()
+  return c === 'NON_CASH' ? t('clients.paymentChannelNonCash') : t('clients.paymentChannelCash')
+}
+
 function paymentHistoryStatusTone(status?: string): 'success' | 'warning' | 'danger' | 'info' | 'neutral' {
   const s = (status || '').trim().toUpperCase()
   if (s === 'PAID') return 'success'
@@ -259,6 +302,7 @@ const addPaymentContractOptions = computed(() =>
 const addPaymentContractId = ref('')
 const addPaymentAmount = ref('')
 const addPaymentPaidAt = ref(formatIsoDate(new Date()))
+const addPaymentChannel = ref<'CASH' | 'NON_CASH'>('CASH')
 
 watch(
   contractsWithOutstandingBalance,
@@ -307,7 +351,12 @@ function submitAddContractPayment() {
     notify({ color: 'warning', message: t('clients.invalidPaymentDate') })
     return
   }
-  emit('add-contract-payment', { contractDocumentId: cid, amount, paidAt })
+  emit('add-contract-payment', {
+    contractDocumentId: cid,
+    amount,
+    paidAt,
+    channel: addPaymentChannel.value,
+  })
   addPaymentAmount.value = ''
 }
 
@@ -318,6 +367,8 @@ const photoUploadError = ref<string | null>(null)
 const pendingPhotoFile = ref<File | null>(null)
 const pendingPhotoPreviewUrl = ref<string | null>(null)
 const photoCameraOpen = ref(false)
+const photoRemoveConfirmOpen = ref(false)
+const photoViewerOpen = ref(false)
 const photoFileInputRef = ref<HTMLInputElement | null>(null)
 const cameraVideoRef = ref<HTMLVideoElement | null>(null)
 const cameraStream = ref<MediaStream | null>(null)
@@ -534,7 +585,20 @@ function onPhotoPreviewImgError() {
   avatarLoadFailed.value = true
 }
 
-const activeTab = ref<'general' | 'payments' | 'history'>('general')
+const internalActiveTab = ref<ClientEditTab>('general')
+
+const activeTab = computed({
+  get(): ClientEditTab {
+    return props.activeTab ?? internalActiveTab.value
+  },
+  set(value: ClientEditTab) {
+    if (props.activeTab !== undefined) {
+      emit('update:activeTab', value)
+    } else {
+      internalActiveTab.value = value
+    }
+  },
+})
 
 /** На узком экране — один селект вместо горизонтальных табов. */
 const MOBILE_TAB_SELECT_MQ = '(max-width: 640px)'
@@ -542,15 +606,498 @@ const mobileTabSelect = ref(false)
 let tabSelectMq: MediaQueryList | null = null
 let tabSelectListener: ((e: MediaQueryListEvent) => void) | null = null
 
-const tabSelectOptions = computed(() => [
-  { value: 'general' as const, text: t('clients.tabGeneral') },
-  { value: 'payments' as const, text: t('clients.tabPayments') },
-  { value: 'history' as const, text: t('clients.tabHistory') },
+const clientFormTabs = computed(() => [
+  { value: 'general' as const, text: t('clients.tabGeneral'), icon: 'person' },
+  { value: 'payments' as const, text: t('clients.tabPayments'), icon: 'payments' },
+  { value: 'visits' as const, text: t('clients.tabVisits'), icon: 'directions_walk' },
+  { value: 'history' as const, text: t('clients.tabHistory'), icon: 'description' },
 ])
 
+const tabSelectOptions = computed(() =>
+  clientFormTabs.value.map(({ value, text }) => ({ value, text })),
+)
+
 function onTabSelectChange(value: unknown) {
-  if (value === 'general' || value === 'payments' || value === 'history') activeTab.value = value
+  if (value === 'general' || value === 'payments' || value === 'visits' || value === 'history') {
+    activeTab.value = value
+  }
 }
+
+const visitsPages = computed(() => {
+  const limit = props.visitsLimit ?? 10
+  const total = props.visitsTotal ?? 0
+  return Math.max(1, Math.ceil(total / limit))
+})
+
+const visitsPageModel = computed({
+  get: () => props.visitsPage ?? 1,
+  set: (value: number) => emit('update:visitsPage', value),
+})
+
+const visitsLimitModel = computed({
+  get: () => props.visitsLimit ?? 10,
+  set: (value: number) => emit('update:visitsLimit', value),
+})
+
+const visitsHasActiveDateFilters = computed(
+  () => Boolean(props.visitsFrom?.trim()) || Boolean(props.visitsTo?.trim()),
+)
+
+const PAYMENT_STATUS_OPTIONS = ['PENDING', 'PAID', 'REFUNDED'] as const
+const PAYMENT_STATUS_ALL = '__ALL__'
+const PAYMENT_CHANNEL_ALL = '__ALL__'
+const CONTRACT_STATUS_OPTIONS = ['ACTIVE', 'SAVED', 'PAUSED', 'EXPIRED', 'CANCELLED'] as const
+const CONTRACT_STATUS_ALL = '__ALL__'
+
+const paymentsPage = ref(1)
+const paymentsLimit = ref<number>(DEFAULT_TABLE_PAGE_LIMIT)
+const paymentsSortBy = ref<'paidAt' | 'amount' | 'status' | 'contractNumber' | 'channel'>('paidAt')
+const paymentsSortOrder = ref<'asc' | 'desc'>('desc')
+const paymentsFilters = reactive({
+  status: '' as '' | (typeof PAYMENT_STATUS_OPTIONS)[number],
+  channel: '' as '' | 'CASH' | 'NON_CASH',
+  from: '',
+  to: '',
+})
+
+const contractsPage = ref(1)
+const contractsLimit = ref<number>(DEFAULT_TABLE_PAGE_LIMIT)
+const contractsSortBy = ref<
+  | 'contractNumber'
+  | 'status'
+  | 'contractDate'
+  | 'serviceStartDate'
+  | 'serviceEndDate'
+  | 'balanceDue'
+  | 'servicePrice'
+>('contractDate')
+const contractsSortOrder = ref<'asc' | 'desc'>('desc')
+const contractsFilters = reactive({
+  status: '' as '' | (typeof CONTRACT_STATUS_OPTIONS)[number],
+  from: '',
+  to: '',
+  contractSearch: '',
+})
+
+const paymentsStatusFilterOptions = computed(() => [
+  { value: PAYMENT_STATUS_ALL, text: t('common.all') },
+  ...PAYMENT_STATUS_OPTIONS.map((s) => ({
+    value: s,
+    text: paymentHistoryStatusLabel(s),
+  })),
+])
+
+const paymentsChannelFilterOptions = computed(() => [
+  { value: PAYMENT_CHANNEL_ALL, text: t('common.all') },
+  { value: 'CASH', text: t('clients.paymentChannelCash') },
+  { value: 'NON_CASH', text: t('clients.paymentChannelNonCash') },
+])
+
+const contractsStatusFilterOptions = computed(() => [
+  { value: CONTRACT_STATUS_ALL, text: t('common.all') },
+  ...CONTRACT_STATUS_OPTIONS.map((s) => ({
+    value: s,
+    text: t(`contracts.contractStatuses.${s}`),
+  })),
+])
+
+const paymentsHasActiveFilters = computed(
+  () =>
+    Boolean(paymentsFilters.status) ||
+    Boolean(paymentsFilters.channel) ||
+    Boolean(paymentsFilters.from.trim()) ||
+    Boolean(paymentsFilters.to.trim()),
+)
+
+const contractsHasActiveFilters = computed(
+  () =>
+    Boolean(contractsFilters.status) ||
+    Boolean(contractsFilters.from.trim()) ||
+    Boolean(contractsFilters.to.trim()) ||
+    Boolean(contractsFilters.contractSearch.trim()),
+)
+
+const paymentsDateRangeModel = computed(() => {
+  const from = paymentsFilters.from.trim()
+  const to = paymentsFilters.to.trim()
+  if (!from && !to) return undefined
+  return {
+    start: from ? parseVisitDateIso(from) ?? undefined : undefined,
+    end: to ? parseVisitDateIso(to) ?? undefined : undefined,
+  }
+})
+
+const contractsDateRangeModel = computed(() => {
+  const from = contractsFilters.from.trim()
+  const to = contractsFilters.to.trim()
+  if (!from && !to) return undefined
+  return {
+    start: from ? parseVisitDateIso(from) ?? undefined : undefined,
+    end: to ? parseVisitDateIso(to) ?? undefined : undefined,
+  }
+})
+
+const paymentsHistoryTableColumns = computed(() => [
+  { key: 'paidAt', label: t('clients.paymentPaidAt'), sortable: true },
+  { key: 'amount', label: t('payments.columnAmount'), sortable: true },
+  { key: 'status', label: t('clients.statusLabel'), sortable: true },
+  { key: 'contractNumber', label: t('clients.contractHistoryNumberColumn'), sortable: true },
+  { key: 'channel', label: t('payments.columnChannel'), sortable: true },
+])
+
+const contractsHistoryTableColumns = computed(() => [
+  { key: 'contractNumber', label: t('clients.contractHistoryNumberColumn'), sortable: true },
+  { key: 'status', label: t('clients.statusLabel'), sortable: true },
+  { key: 'contractDate', label: t('clients.contractHistoryContractDateColumn'), sortable: true },
+  { key: 'serviceStartDate', label: t('clients.contractHistoryStartColumn'), sortable: true },
+  { key: 'serviceEndDate', label: t('clients.contractHistoryEndColumn'), sortable: true },
+  { key: 'balanceDue', label: t('clients.contractBalanceColumn'), sortable: true },
+  { key: 'actions', label: t('clients.actions'), sortable: false },
+])
+
+function normalizePaymentStatus(status?: string): string {
+  const s = (status || '').trim().toUpperCase()
+  return s === 'REFUND' ? 'REFUNDED' : s
+}
+
+function matchesClientTabDateFilter(isoValue: string, from: string, to: string): boolean {
+  const tms = new Date(isoValue).getTime()
+  if (!Number.isFinite(tms)) return false
+  const fromIso = from.trim().slice(0, 10)
+  const toIso = to.trim().slice(0, 10)
+  if (fromIso && /^\d{4}-\d{2}-\d{2}$/.test(fromIso)) {
+    const f = new Date(`${fromIso}T00:00:00.000Z`).getTime()
+    if (tms < f) return false
+  }
+  if (toIso && /^\d{4}-\d{2}-\d{2}$/.test(toIso)) {
+    const te = new Date(`${toIso}T23:59:59.999Z`).getTime()
+    if (tms > te) return false
+  }
+  return true
+}
+
+const filteredPaymentsHistory = computed(() => {
+  const list = props.paymentsHistory ?? []
+  const qStatus = paymentsFilters.status
+  const qChannel = paymentsFilters.channel
+  return list.filter((item) => {
+    if (qStatus && normalizePaymentStatus(item.status) !== qStatus) return false
+    if (qChannel && (item.channel || 'CASH').toUpperCase() !== qChannel) return false
+    if (!matchesClientTabDateFilter(item.paidAt, paymentsFilters.from, paymentsFilters.to)) return false
+    return true
+  })
+})
+
+const filteredContractsHistory = computed(() => {
+  const list = props.contractHistory ?? []
+  const qStatus = contractsFilters.status
+  const qSearch = contractsFilters.contractSearch.trim().toLowerCase()
+  return list.filter((item) => {
+    if (qStatus && (item.status || '') !== qStatus) return false
+    if (qSearch && !(item.contractNumber || '').toLowerCase().includes(qSearch)) return false
+    if (!matchesClientTabDateFilter(item.contractDate ?? item.createdAt, contractsFilters.from, contractsFilters.to)) return false
+    return true
+  })
+})
+
+function sortClientTabRows<T extends { id: string }>(
+  list: T[],
+  sortBy: string,
+  sortOrder: 'asc' | 'desc',
+  valueOf: (row: T, key: string) => string | number,
+): T[] {
+  const factor = sortOrder === 'asc' ? 1 : -1
+  return [...list].sort((a, b) => {
+    const av = valueOf(a, sortBy)
+    const bv = valueOf(b, sortBy)
+    if (typeof av === 'number' && typeof bv === 'number') {
+      const d = av - bv
+      if (d !== 0) return d * factor
+      return String(a.id).localeCompare(String(b.id)) * factor
+    }
+    const c = String(av ?? '').localeCompare(String(bv ?? ''), locale.value === 'en' ? 'en' : 'ru')
+    if (c !== 0) return c * factor
+    return String(a.id).localeCompare(String(b.id)) * factor
+  })
+}
+
+const sortedPaymentsHistory = computed(() =>
+  sortClientTabRows(filteredPaymentsHistory.value, paymentsSortBy.value, paymentsSortOrder.value, (row, key) => {
+    if (key === 'amount') return Number(row.amount)
+    if (key === 'paidAt') {
+      const tms = new Date(row.paidAt).getTime()
+      return Number.isFinite(tms) ? tms : 0
+    }
+    if (key === 'contractNumber') return row.contract?.contractNumber?.trim() || ''
+    if (key === 'channel') return (row.channel || 'CASH').toUpperCase()
+    if (key === 'status') return normalizePaymentStatus(row.status)
+    return ''
+  }),
+)
+
+const sortedContractsHistory = computed(() =>
+  sortClientTabRows(filteredContractsHistory.value, contractsSortBy.value, contractsSortOrder.value, (row, key) => {
+    if (key === 'servicePrice' || key === 'balanceDue') {
+      const raw = key === 'balanceDue' ? row.balanceDue : row.servicePrice
+      const n = Number(String(raw ?? '0').replace(',', '.'))
+      return Number.isFinite(n) ? n : 0
+    }
+    if (key === 'serviceStartDate' || key === 'serviceEndDate' || key === 'contractDate') {
+      const iso =
+        key === 'contractDate'
+          ? row.contractDate
+          : row[key]
+      const tms = iso ? new Date(iso).getTime() : 0
+      return Number.isFinite(tms) ? tms : 0
+    }
+    if (key === 'contractNumber') return row.contractNumber || ''
+    if (key === 'status') return row.status || ''
+    return ''
+  }),
+)
+
+const paymentsPages = computed(() =>
+  Math.max(1, Math.ceil(sortedPaymentsHistory.value.length / paymentsLimit.value)),
+)
+const contractsPages = computed(() =>
+  Math.max(1, Math.ceil(sortedContractsHistory.value.length / contractsLimit.value)),
+)
+
+const pagedPaymentsHistory = computed(() => {
+  const start = (paymentsPage.value - 1) * paymentsLimit.value
+  return sortedPaymentsHistory.value.slice(start, start + paymentsLimit.value)
+})
+
+const pagedContractsHistory = computed(() => {
+  const start = (contractsPage.value - 1) * contractsLimit.value
+  return sortedContractsHistory.value.slice(start, start + contractsLimit.value)
+})
+
+function onPaymentsDateRangeChange(value: unknown) {
+  if (value == null || value === '' || value === false) {
+    paymentsFilters.from = ''
+    paymentsFilters.to = ''
+    paymentsPage.value = 1
+    return
+  }
+  if (Array.isArray(value)) {
+    const [a, b] = value
+    paymentsFilters.from = a != null && a !== '' ? visitToIsoDate(a) : ''
+    paymentsFilters.to = b != null && b !== '' ? visitToIsoDate(b) : ''
+    paymentsPage.value = 1
+    return
+  }
+  if (typeof value === 'object' && value !== null && ('start' in value || 'end' in value)) {
+    const r = value as { start?: Date | string | null; end?: Date | string | null }
+    paymentsFilters.from = r.start != null && r.start !== '' ? visitToIsoDate(r.start) : ''
+    paymentsFilters.to = r.end != null && r.end !== '' ? visitToIsoDate(r.end) : ''
+    paymentsPage.value = 1
+  }
+}
+
+function onContractsDateRangeChange(value: unknown) {
+  if (value == null || value === '' || value === false) {
+    contractsFilters.from = ''
+    contractsFilters.to = ''
+    contractsPage.value = 1
+    return
+  }
+  if (Array.isArray(value)) {
+    const [a, b] = value
+    contractsFilters.from = a != null && a !== '' ? visitToIsoDate(a) : ''
+    contractsFilters.to = b != null && b !== '' ? visitToIsoDate(b) : ''
+    contractsPage.value = 1
+    return
+  }
+  if (typeof value === 'object' && value !== null && ('start' in value || 'end' in value)) {
+    const r = value as { start?: Date | string | null; end?: Date | string | null }
+    contractsFilters.from = r.start != null && r.start !== '' ? visitToIsoDate(r.start) : ''
+    contractsFilters.to = r.end != null && r.end !== '' ? visitToIsoDate(r.end) : ''
+    contractsPage.value = 1
+  }
+}
+
+function resetPaymentsTabFilters() {
+  paymentsFilters.status = ''
+  paymentsFilters.channel = ''
+  paymentsFilters.from = ''
+  paymentsFilters.to = ''
+  paymentsPage.value = 1
+}
+
+function resetContractsTabFilters() {
+  contractsFilters.status = ''
+  contractsFilters.from = ''
+  contractsFilters.to = ''
+  contractsFilters.contractSearch = ''
+  contractsPage.value = 1
+}
+
+function onPaymentsSortByUpdate(next?: string) {
+  if (!next) return
+  if (paymentsSortBy.value === next) {
+    paymentsSortOrder.value = paymentsSortOrder.value === 'asc' ? 'desc' : 'asc'
+    return
+  }
+  paymentsSortBy.value = next as typeof paymentsSortBy.value
+  paymentsSortOrder.value = next === 'paidAt' ? 'desc' : 'asc'
+}
+
+function onPaymentsSortOrderUpdate(next?: string) {
+  paymentsSortOrder.value = next === 'desc' ? 'desc' : 'asc'
+}
+
+function onContractsSortByUpdate(next?: string) {
+  if (!next) return
+  if (contractsSortBy.value === next) {
+    contractsSortOrder.value = contractsSortOrder.value === 'asc' ? 'desc' : 'asc'
+    return
+  }
+  contractsSortBy.value = next as typeof contractsSortBy.value
+  contractsSortOrder.value =
+    next === 'contractDate' || next === 'serviceStartDate' || next === 'serviceEndDate' ? 'desc' : 'asc'
+}
+
+function onContractsSortOrderUpdate(next?: string) {
+  contractsSortOrder.value = next === 'desc' ? 'desc' : 'asc'
+}
+
+function resetClientTabTablesState() {
+  paymentsPage.value = 1
+  paymentsLimit.value = DEFAULT_TABLE_PAGE_LIMIT
+  paymentsSortBy.value = 'paidAt'
+  paymentsSortOrder.value = 'desc'
+  paymentsFilters.status = ''
+  paymentsFilters.channel = ''
+  paymentsFilters.from = ''
+  paymentsFilters.to = ''
+  contractsPage.value = 1
+  contractsLimit.value = DEFAULT_TABLE_PAGE_LIMIT
+  contractsSortBy.value = 'contractDate'
+  contractsSortOrder.value = 'desc'
+  contractsFilters.status = ''
+  contractsFilters.from = ''
+  contractsFilters.to = ''
+  contractsFilters.contractSearch = ''
+}
+
+watch(
+  () => props.photoUploadClientId,
+  () => {
+    resetClientTabTablesState()
+  },
+)
+
+watch([paymentsPages, paymentsLimit], () => {
+  if (paymentsPage.value > paymentsPages.value) paymentsPage.value = paymentsPages.value
+})
+
+watch([contractsPages, contractsLimit], () => {
+  if (contractsPage.value > contractsPages.value) contractsPage.value = contractsPages.value
+})
+
+watch(
+  () => [paymentsFilters.status, paymentsFilters.channel, paymentsFilters.from, paymentsFilters.to],
+  () => {
+    paymentsPage.value = 1
+  },
+)
+
+watch(
+  () => [contractsFilters.status, contractsFilters.from, contractsFilters.to, contractsFilters.contractSearch],
+  () => {
+    contractsPage.value = 1
+  },
+)
+
+function parseVisitDateIso(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null
+  const [yy, mm, dd] = value.split('-').map((v) => Number(v))
+  if (!yy || !mm || !dd) return null
+  return new Date(yy, mm - 1, dd)
+}
+
+const visitsDateRangeModel = computed(() => {
+  const from = props.visitsFrom?.trim() ?? ''
+  const to = props.visitsTo?.trim() ?? ''
+  if (!from && !to) return undefined
+  return {
+    start: from ? parseVisitDateIso(from) ?? undefined : undefined,
+    end: to ? parseVisitDateIso(to) ?? undefined : undefined,
+  }
+})
+
+function visitToIsoDate(value: unknown): string {
+  return pickerValueToIsoYmd(value)
+}
+
+function onVisitsDateRangeChange(value: unknown) {
+  if (value == null || value === '' || value === false) {
+    emit('update:visitsFrom', '')
+    emit('update:visitsTo', '')
+    return
+  }
+  if (Array.isArray(value)) {
+    const [a, b] = value
+    emit('update:visitsFrom', a != null && a !== '' ? visitToIsoDate(a) : '')
+    emit('update:visitsTo', b != null && b !== '' ? visitToIsoDate(b) : '')
+    return
+  }
+  if (typeof value === 'object' && value !== null && ('start' in value || 'end' in value)) {
+    const r = value as { start?: Date | string | null; end?: Date | string | null }
+    emit('update:visitsFrom', r.start != null && r.start !== '' ? visitToIsoDate(r.start) : '')
+    emit('update:visitsTo', r.end != null && r.end !== '' ? visitToIsoDate(r.end) : '')
+  }
+}
+
+function formatVisitDateTime(value: string | null | undefined) {
+  if (!value) return '—'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString(locale.value === 'en' ? 'en-US' : 'ru-RU')
+}
+
+function visitStateLabel(state: 'IN_GYM' | 'LEFT' | 'OVERDUE' | 'FORCE_CLOSED') {
+  if (state === 'IN_GYM') return t('visits.stateInGym')
+  if (state === 'OVERDUE') return t('visits.stateOverdue')
+  if (state === 'FORCE_CLOSED') return t('visits.stateForceClosed')
+  return t('visits.stateLeft')
+}
+
+function visitStateTone(state: 'IN_GYM' | 'LEFT' | 'OVERDUE' | 'FORCE_CLOSED'): 'success' | 'neutral' | 'warning' | 'danger' {
+  if (state === 'IN_GYM') return 'success'
+  if (state === 'OVERDUE') return 'warning'
+  if (state === 'FORCE_CLOSED') return 'danger'
+  return 'neutral'
+}
+
+function visitCloseReasonLabel(reason?: string | null) {
+  if (!reason) return '—'
+  return t(`visits.closeReason.${reason}`)
+}
+
+function visitCloseReasonTone(reason?: string | null): 'success' | 'neutral' | 'warning' | 'danger' {
+  if (!reason || reason === 'NORMAL') return 'neutral'
+  if (reason === 'FOUND_LATER') return 'warning'
+  if (reason === 'AUTO_TIMEOUT') return 'warning'
+  if (reason === 'LOST_KEY' || reason === 'BLOCKED') return 'danger'
+  if (reason === 'ADMIN_CORRECTION') return 'warning'
+  return 'neutral'
+}
+
+function visitActorName(row?: { firstName?: string | null; lastName?: string | null; login?: string } | null) {
+  if (!row) return '—'
+  const full = [row.lastName, row.firstName].filter(Boolean).join(' ').trim()
+  return full || row.login || '—'
+}
+
+const visitsHistoryTableColumns = computed(() => [
+  { key: 'lockerNumber', label: t('visits.locker'), sortable: false },
+  { key: 'status', label: t('clients.statusLabel'), sortable: false },
+  { key: 'enteredAt', label: t('visits.enteredAt'), sortable: false },
+  { key: 'exitedAt', label: t('visits.exitedAt'), sortable: false },
+  { key: 'closeReason', label: t('visits.closeReasonLabel'), sortable: false },
+  { key: 'exitedBy', label: t('clients.visitClosedBy'), sortable: false },
+])
 
 function pickPrimaryListContract<
   T extends { id: string; status?: string; createdAt: string },
@@ -573,16 +1120,112 @@ function formatContractHistoryUiDate(iso: string | null | undefined): string {
   return d.toLocaleDateString(tag)
 }
 
-function contractHistoryServicePeriodLine(item: {
-  serviceStartDate?: string | null
-  serviceEndDate?: string | null
-}): string {
-  const s = formatContractHistoryUiDate(item.serviceStartDate ?? undefined)
-  const e = formatContractHistoryUiDate(item.serviceEndDate ?? undefined)
-  if (!s && !e) return ''
-  if (s && e && s === e) return s
-  if (s && e) return `${s} — ${e}`
-  return s || e
+function contractHistoryDateCell(iso: string | null | undefined): string {
+  return formatContractHistoryUiDate(iso ?? undefined) || '—'
+}
+
+function contractHistoryStatusLabel(status?: string | null): string {
+  const key = status || 'ACTIVE'
+  return t(`contracts.contractStatusesShort.${key}`)
+}
+
+function contractHistoryStatusTitle(status?: string | null): string {
+  const key = status || 'ACTIVE'
+  return t(`contracts.contractStatuses.${key}`)
+}
+
+type ContractHistoryRow = NonNullable<(typeof props)['contractHistory']>[number]
+
+const contractHistoryRowMenuOpenId = ref<string | null>(null)
+const contractHistoryRowMenuRow = ref<ContractHistoryRow | null>(null)
+const contractHistoryRowMenuAnchorRect = ref<DOMRect | null>(null)
+
+function closeContractHistoryRowMenu() {
+  contractHistoryRowMenuOpenId.value = null
+  contractHistoryRowMenuRow.value = null
+  contractHistoryRowMenuAnchorRect.value = null
+}
+
+const contractHistoryRowMenuLayerStyle = computed(() => {
+  const r = contractHistoryRowMenuAnchorRect.value
+  if (!r || typeof window === 'undefined') return {}
+  const gap = 6
+  const reserve = 10
+  const winW = window.innerWidth
+  const winH = window.innerHeight
+  const estMenuPx = 260
+  const spaceBelow = winH - r.bottom - gap - reserve
+  const spaceAbove = r.top - gap - reserve
+  const openAbove =
+    spaceBelow < Math.min(estMenuPx, 200) && spaceAbove > spaceBelow && spaceAbove > 80
+  const maxH = Math.max(100, Math.min(openAbove ? spaceAbove : spaceBelow, winH - reserve * 2))
+  const base: Record<string, string> = {
+    position: 'fixed',
+    right: `${winW - r.right}px`,
+    zIndex: '4000',
+    maxHeight: `${maxH}px`,
+    overflowY: 'auto',
+    overflowX: 'hidden',
+    overscrollBehavior: 'contain',
+  }
+  if (openAbove) {
+    return { ...base, bottom: `${winH - r.top + gap}px`, top: 'auto' }
+  }
+  return { ...base, top: `${r.bottom + gap}px`, bottom: 'auto' }
+})
+
+function onContractHistoryRowMenuTriggerClick(row: ContractHistoryRow, ev: MouseEvent) {
+  const el = ev.currentTarget
+  if (!(el instanceof HTMLElement)) return
+  if (contractHistoryRowMenuOpenId.value === row.id) {
+    closeContractHistoryRowMenu()
+    return
+  }
+  contractHistoryRowMenuOpenId.value = row.id
+  contractHistoryRowMenuRow.value = row
+  contractHistoryRowMenuAnchorRect.value = el.getBoundingClientRect()
+}
+
+function runContractHistoryRowMenuAction(
+  row: ContractHistoryRow | null,
+  action: (r: ContractHistoryRow) => void,
+) {
+  if (!row) return
+  closeContractHistoryRowMenu()
+  action(row)
+}
+
+function contractHistoryPauseNote(row: ContractHistoryRow): string {
+  if (row.status !== 'PAUSED' || !row.pauseUntil) return ''
+  if (
+    typeof row.pauseDurationDays === 'number' &&
+    Number.isFinite(row.pauseDurationDays) &&
+    row.pauseDurationDays > 0
+  ) {
+    return t('clients.pauseUntilWithDays', {
+      date: formatRuDate(row.pauseUntil),
+      days: row.pauseDurationDays,
+    })
+  }
+  return t('clients.pauseUntilLabel', { date: formatRuDate(row.pauseUntil) })
+}
+
+/** Запуск очередного — только после окончания текущего; ACTIVE и PAUSED блокируют. */
+function hasBlockingMembershipForActivate(excludeId: string): boolean {
+  return (props.contractHistory ?? []).some(
+    (c) => c.id !== excludeId && (c.status === 'ACTIVE' || c.status === 'PAUSED'),
+  )
+}
+
+function canActivateQueuedContract(item: { id: string; status?: string }): boolean {
+  return item.status === 'SAVED' && !hasBlockingMembershipForActivate(item.id)
+}
+
+function activateQueuedContractTooltip(item: { id: string; status?: string }): string {
+  if (item.status !== 'SAVED') return ''
+  return canActivateQueuedContract(item)
+    ? t('clients.activateContract')
+    : t('contracts.activateBlockedActiveExists')
 }
 
 const currentContract = computed(() => pickPrimaryListContract(props.contractHistory ?? []))
@@ -594,6 +1237,31 @@ const displayContractNumber = computed(() => {
   const fromDoc = currentContract.value?.contractNumber?.trim()
   if (fromDoc) return fromDoc
   return props.modelValue.contractNumber.trim()
+})
+
+const contractSummarySignedDate = computed(() =>
+  contractHistoryDateCell(
+    currentContract.value?.contractDate ?? props.modelValue.paymentDate ?? null,
+  ),
+)
+
+const contractSummaryStartDate = computed(() =>
+  contractHistoryDateCell(
+    currentContract.value?.serviceStartDate ?? props.modelValue.contractStartDate ?? null,
+  ),
+)
+
+const contractSummaryEndDate = computed(() =>
+  contractHistoryDateCell(
+    currentContract.value?.serviceEndDate ?? props.modelValue.contractEndDate ?? null,
+  ),
+)
+
+const currentContractBalanceDue = computed(() => {
+  const item = currentContract.value
+  if (!item || !contractShowsUnderpaidNote(item)) return ''
+  const bal = Number(String(item.balanceDue ?? '0').replace(',', '.'))
+  return Number.isFinite(bal) ? bal.toFixed(2) : ''
 })
 
 async function copyToClipboard(text: string) {
@@ -611,13 +1279,6 @@ const cardNumberRequiredError = computed(
   () => props.attempted && !props.modelValue.cardNumber.trim(),
 )
 
-const membershipLabelKey = computed(() =>
-  hasCurrentContract.value ? 'clients.membership' : 'clients.plannedMembership',
-)
-const membershipHintKey = computed(() =>
-  hasCurrentContract.value ? 'clients.membershipHintActive' : 'clients.plannedMembershipHint',
-)
-
 function formatRuDate(dateLike?: string | null) {
   if (!dateLike) return ''
   const d = new Date(dateLike)
@@ -630,6 +1291,20 @@ function clearPhoto() {
   avatarLoadFailed.value = false
   resetPendingPhotoFile()
   patch('photoUrl', '')
+}
+
+function requestClearPhoto() {
+  photoRemoveConfirmOpen.value = true
+}
+
+function confirmClearPhoto() {
+  photoRemoveConfirmOpen.value = false
+  clearPhoto()
+}
+
+function openPhotoViewer() {
+  if (!showPhotoPreviewImg.value) return
+  photoViewerOpen.value = true
 }
 
 const cardScannerOpen = ref(false)
@@ -968,6 +1643,11 @@ function onDocumentPointerDown(event: PointerEvent) {
   if (paymentPickerOpen.value && paymentFieldWrapRef.value && !paymentFieldWrapRef.value.contains(target)) {
     paymentPickerOpen.value = false
   }
+  const clicked = event.target
+  if (!(clicked instanceof Element)) return
+  if (clicked.closest('.contract-history-row-menu-layer')) return
+  if (clicked.closest('.contract-history-row-menu__trigger')) return
+  closeContractHistoryRowMenu()
 }
 
 function unmountPhoneMask() {
@@ -1102,7 +1782,11 @@ onMounted(async () => {
 })
 
 watch(activeTab, async (tab) => {
+  closeContractHistoryRowMenu()
   await nextTick()
+  if (tab === 'visits') {
+    emit('visits-tab-open')
+  }
   if (tab === 'general') {
     mountPhoneMask()
     mountBirthMask()
@@ -1116,7 +1800,7 @@ watch(activeTab, async (tab) => {
   unmountBirthMask()
   unmountContractDateMasks()
   unmountPassportMask()
-})
+}, { immediate: true })
 
 watch(
   () => props.isCreateMode,
@@ -1221,19 +1905,23 @@ watch(paymentTextValue, (value) => {
     </div>
     <div
       v-else-if="!isCreateMode"
-      class="tabs-row"
+      class="client-form-tabs"
       role="tablist"
       :aria-label="$t('clients.tabListAria')"
     >
-      <VaButton type="button" size="small" :preset="activeTab === 'general' ? 'primary' : 'secondary'" @click="activeTab = 'general'">
-        {{ $t('clients.tabGeneral') }}
-      </VaButton>
-      <VaButton type="button" size="small" :preset="activeTab === 'payments' ? 'primary' : 'secondary'" @click="activeTab = 'payments'">
-        {{ $t('clients.tabPayments') }}
-      </VaButton>
-      <VaButton type="button" size="small" :preset="activeTab === 'history' ? 'primary' : 'secondary'" @click="activeTab = 'history'">
-        {{ $t('clients.tabHistory') }}
-      </VaButton>
+      <button
+        v-for="tab in clientFormTabs"
+        :key="tab.value"
+        type="button"
+        role="tab"
+        class="client-form-tab"
+        :class="{ 'client-form-tab--active': activeTab === tab.value }"
+        :aria-selected="activeTab === tab.value ? 'true' : 'false'"
+        @click="activeTab = tab.value"
+      >
+        <VaIcon :name="tab.icon" size="17px" class="client-form-tab__icon" aria-hidden="true" />
+        <span class="client-form-tab__label">{{ tab.text }}</span>
+      </button>
     </div>
 
     <div class="client-form-tab-body">
@@ -1243,15 +1931,15 @@ watch(paymentTextValue, (value) => {
         <aside class="photo-rail" :class="{ 'photo-rail--busy': photoUploading }">
           <div
             class="photo-preview"
-            :class="{
-              'photo-preview--deletable': Boolean(modelValue.photoUrl?.trim() || pendingPhotoFile),
-            }"
+            :class="{ 'photo-preview--clickable': showPhotoPreviewImg }"
+            role="presentation"
           >
             <img
               v-if="showPhotoPreviewImg"
               :src="photoPreviewSrc"
               alt=""
               @error="onPhotoPreviewImgError"
+              @click="openPhotoViewer"
             />
             <div v-if="!showPhotoPreviewImg" class="photo-placeholder">
               {{
@@ -1260,17 +1948,6 @@ watch(paymentTextValue, (value) => {
                   : $t('clients.photoPlaceholder')
               }}
             </div>
-            <button
-              v-if="modelValue.photoUrl?.trim() || pendingPhotoFile"
-              type="button"
-              class="photo-preview__delete"
-              :disabled="photoUploading"
-              :title="$t('clients.photoRemove')"
-              :aria-label="$t('clients.photoRemove')"
-              @click="clearPhoto"
-            >
-              <VaIcon :name="TableActionIcon.delete" size="28px" />
-            </button>
           </div>
           <div class="photo-actions">
             <input
@@ -1307,6 +1984,19 @@ watch(paymentTextValue, (value) => {
               @click="photoCameraOpen = true"
             >
               <VaIcon name="photo_camera" size="24px" class="photo-action-half__icon" />
+            </VaButton>
+            <VaButton
+              v-if="modelValue.photoUrl?.trim() || pendingPhotoFile"
+              type="button"
+              preset="secondary"
+              color="danger"
+              class="photo-action-half"
+              :disabled="photoUploading"
+              :aria-label="$t('clients.photoRemove')"
+              :title="$t('clients.photoRemove')"
+              @click="requestClearPhoto"
+            >
+              <VaIcon :name="TableActionIcon.delete" size="24px" class="photo-action-half__icon" />
             </VaButton>
           </div>
           <p v-if="pendingPhotoFile && !photoUploading" class="photo-draft-hint">{{ $t('clients.photoSaveToUpload') }}</p>
@@ -1409,13 +2099,9 @@ watch(paymentTextValue, (value) => {
       </div>
 
       <div class="control-grid general-bottom">
-        <VaSelect
-          class="client-status-select"
-          :model-value="modelValue.status"
-          :label="$t('clients.statusLabel')"
-          :options="statusOptions"
-          value-by="value"
-          text-by="text"
+        <VaInput
+          :model-value="currentManagerName"
+          :label="$t('clients.manager')"
           readonly
           disabled
         />
@@ -1424,6 +2110,17 @@ watch(paymentTextValue, (value) => {
           :model-value="modelValue.passport"
           :label="$t('clients.passport')"
           @update:model-value="patch('passport', $event)"
+        />
+        <VaInput
+          :model-value="modelValue.passportIssuedBy"
+          :label="$t('clients.passportIssuedBy')"
+          @update:model-value="patch('passportIssuedBy', $event)"
+        />
+        <VaDateInput
+          :model-value="modelValue.passportIssuedAt || undefined"
+          :label="$t('clients.passportIssuedAt')"
+          clearable
+          @update:model-value="patch('passportIssuedAt', visitToIsoDate($event))"
         />
         <VaInput
           class="card-number-readonly"
@@ -1488,31 +2185,6 @@ watch(paymentTextValue, (value) => {
           @update:model-value="patch('email', $event)"
           @blur="markTouched('email')"
         />
-        <VaInput
-          :model-value="currentManagerName"
-          :label="$t('clients.manager')"
-          readonly
-          disabled
-        />
-        <VaSelect
-          :model-value="modelValue.membershipType"
-          :label="$t(membershipLabelKey)"
-          :options="membershipOptions"
-          value-by="value"
-          text-by="text"
-          :readonly="!isCreateMode && hasCurrentContract"
-          :disabled="!isCreateMode && hasCurrentContract"
-          @update:model-value="patch('membershipType', $event)"
-        >
-          <template #label>
-            <span class="label-with-tip">
-              <span>{{ $t(membershipLabelKey) }}</span>
-              <VaPopover :message="$t(membershipHintKey)">
-                <VaIcon name="info_outline" size="14px" color="secondary" />
-              </VaPopover>
-            </span>
-          </template>
-        </VaSelect>
         <div class="control-grid__full address-autocomplete">
           <VaInput
             :model-value="modelValue.address"
@@ -1545,195 +2217,88 @@ watch(paymentTextValue, (value) => {
         </div>
         <VaInput class="control-grid__full" :model-value="modelValue.notes" :label="$t('clients.notes')" @update:model-value="patch('notes', $event)" />
 
-        <div v-if="!isCreateMode" class="contract-panel control-grid__full">
-          <div class="contract-panel__title">{{ $t('clients.sectionContract') }}</div>
-          <div v-if="hasCurrentContract" class="contract-panel__status">
-            <StatusBadge
-              :label="$t(`contracts.contractStatuses.${currentContract?.status || 'ACTIVE'}`)"
-              :tone="contractStatusTone(currentContract?.status)"
-            />
-            <span
-              v-if="currentContract?.status === 'PAUSED' && currentContract?.pauseUntil"
-              class="contract-panel__pause"
-            >
-              {{ $t('clients.pauseUntilLabel', { date: formatRuDate(currentContract.pauseUntil) }) }}
-            </span>
-          </div>
-          <div v-else class="contract-empty-state" role="status">
-            <div class="contract-empty-state__icon-wrap" aria-hidden="true">
-              <VaIcon name="description" size="22px" class="contract-empty-state__icon" />
-            </div>
-            <div class="contract-empty-state__body">
-              <div class="contract-empty-state__title">{{ $t('clients.noActiveContractInCard') }}</div>
-              <p class="contract-empty-state__desc">{{ $t('clients.noActiveContractHint') }}</p>
-            </div>
-          </div>
-          <div v-if="hasCurrentContract" class="control-grid control-grid--contract control-grid--contract-readonly">
-            <VaInput
-              :model-value="displayContractNumber"
-              :label="$t('clients.contractNumber')"
-              readonly
-            >
-              <template #appendInner>
-                <VaButton
-                  v-if="canEditContractData"
-                  type="button"
-                  preset="plain"
-                  icon="autorenew"
-                  size="small"
-                  @click.stop="emit('generate-contract-number')"
-                />
-                <VaButton
-                  v-if="displayContractNumber"
-                  type="button"
-                  preset="plain"
-                  icon="content_copy"
-                  size="small"
-                  class="field-copy-btn"
-                  :title="$t('common.copy')"
-                  @click.stop="copyToClipboard(displayContractNumber)"
-                />
-              </template>
-            </VaInput>
-            <div ref="contractStartFieldWrapRef" class="custom-date-field">
-              <VaInput
-                ref="contractStartTextFieldRef"
-                data-client-field="contractStartDate"
-                :model-value="contractStartTextValue"
-                :label="$t('clients.contractStartDate')"
-                placeholder="дд.мм.гггг"
-                inputmode="numeric"
-                readonly
-                :immediate-validation="attempted"
-                :class="{ 'date-input--invalid': dateErrors.contractStartDate }"
-                :error="dateErrors.contractStartDate"
-                :error-messages="dateErrors.contractStartDate ? ['Неверный формат даты'] : []"
-                @focus="mountContractStartMask()"
-              >
-                <template #appendInner>
-                  <VaButton
-                    v-if="canEditContractData && contractStartTextValue"
-                    type="button"
-                    preset="plain"
-                    icon="close"
-                    size="small"
-                    class="date-clear-btn"
-                    @click.stop="clearContractStartDate"
-                  />
-                  <VaButton
-                    v-if="canEditContractData"
-                    type="button"
-                    preset="plain"
-                    icon="date_range"
-                    size="medium"
-                    class="date-trigger-btn"
-                    @click.stop="contractStartPickerOpen = !contractStartPickerOpen"
-                  />
-                </template>
-              </VaInput>
-              <div v-if="dateErrors.contractStartDate" class="date-error-text">Неверный формат даты</div>
-              <div v-if="canEditContractData && contractStartPickerOpen" class="date-picker-popup">
-                <VaDatePicker
-                  :model-value="toDateValue(modelValue.contractStartDate)"
-                  :month-names="birthPickerMonthNames"
-                  :weekday-names="birthPickerWeekdayNames"
-                  first-weekday="monday"
-                  @update:model-value="onContractStartPickerSelect"
-                />
+        <div v-if="!isCreateMode" class="contract-summary-panel control-grid__full">
+          <header class="contract-summary-panel__header">
+            <div class="contract-summary-panel__lead">
+              <div class="contract-summary-panel__icon" aria-hidden="true">
+                <VaIcon name="description" size="20px" />
+              </div>
+              <div class="contract-summary-panel__head-copy">
+                <h3 class="contract-summary-panel__title">{{ $t('clients.sectionContract') }}</h3>
+                <p v-if="hasCurrentContract && displayContractNumber" class="contract-summary-panel__number">
+                  {{ displayContractNumber }}
+                </p>
               </div>
             </div>
-            <div ref="contractEndFieldWrapRef" class="custom-date-field">
-              <VaInput
-                ref="contractEndTextFieldRef"
-                data-client-field="contractEndDate"
-                :model-value="contractEndTextValue"
-                :label="$t('clients.contractEndDate')"
-                placeholder="дд.мм.гггг"
-                inputmode="numeric"
-                readonly
-                :immediate-validation="attempted"
-                :class="{ 'date-input--invalid': dateErrors.contractEndDate }"
-                :error="dateErrors.contractEndDate"
-                :error-messages="dateErrors.contractEndDate ? ['Неверный формат даты'] : []"
-                @focus="mountContractEndMask()"
-              >
-                <template #appendInner>
-                  <VaButton
-                    v-if="canEditContractData && contractEndTextValue"
-                    type="button"
-                    preset="plain"
-                    icon="close"
-                    size="small"
-                    class="date-clear-btn"
-                    @click.stop="clearContractEndDate"
-                  />
-                  <VaButton
-                    v-if="canEditContractData"
-                    type="button"
-                    preset="plain"
-                    icon="date_range"
-                    size="medium"
-                    class="date-trigger-btn"
-                    @click.stop="contractEndPickerOpen = !contractEndPickerOpen"
-                  />
-                </template>
-              </VaInput>
-              <div v-if="dateErrors.contractEndDate" class="date-error-text">Неверный формат даты</div>
-              <div v-if="canEditContractData && contractEndPickerOpen" class="date-picker-popup">
-                <VaDatePicker
-                  :model-value="toDateValue(modelValue.contractEndDate)"
-                  :month-names="birthPickerMonthNames"
-                  :weekday-names="birthPickerWeekdayNames"
-                  first-weekday="monday"
-                  @update:model-value="onContractEndPickerSelect"
+            <div v-if="hasCurrentContract" class="contract-summary-panel__meta">
+              <span :title="contractHistoryStatusTitle(currentContract?.status)">
+                <StatusBadge
+                  :label="contractHistoryStatusLabel(currentContract?.status)"
+                  :tone="contractStatusTone(currentContract?.status)"
+                  class="contract-summary-panel__status"
                 />
-              </div>
+              </span>
+              <span
+                v-if="currentContract?.status === 'PAUSED' && currentContract?.pauseUntil"
+                class="contract-summary-panel__pause"
+              >
+                <template
+                  v-if="
+                    typeof currentContract.pauseDurationDays === 'number' &&
+                    Number.isFinite(currentContract.pauseDurationDays) &&
+                    currentContract.pauseDurationDays > 0
+                  "
+                >
+                  {{
+                    $t('clients.pauseUntilWithDays', {
+                      date: formatRuDate(currentContract.pauseUntil),
+                      days: currentContract.pauseDurationDays,
+                    })
+                  }}
+                </template>
+                <template v-else>
+                  {{ $t('clients.pauseUntilLabel', { date: formatRuDate(currentContract.pauseUntil) }) }}
+                </template>
+              </span>
+              <button
+                v-if="displayContractNumber"
+                type="button"
+                class="contract-summary-panel__copy"
+                :title="$t('common.copy')"
+                @click="copyToClipboard(displayContractNumber)"
+              >
+                <VaIcon name="content_copy" size="16px" />
+              </button>
             </div>
-            <div ref="paymentFieldWrapRef" class="custom-date-field">
-              <VaInput
-                ref="paymentTextFieldRef"
-                data-client-field="paymentDate"
-                :model-value="paymentTextValue"
-                :label="$t('clients.paymentDate')"
-                placeholder="дд.мм.гггг"
-                inputmode="numeric"
-                readonly
-                :immediate-validation="attempted"
-                :class="{ 'date-input--invalid': dateErrors.paymentDate }"
-                :error="dateErrors.paymentDate"
-                :error-messages="dateErrors.paymentDate ? ['Неверный формат даты'] : []"
-                @focus="mountPaymentMask()"
+          </header>
+
+          <div v-if="!hasCurrentContract" class="contract-summary-panel__empty" role="status">
+            <p class="contract-summary-panel__empty-title">{{ $t('clients.noActiveContractInCard') }}</p>
+            <p class="contract-summary-panel__empty-desc">{{ $t('clients.noActiveContractHint') }}</p>
+          </div>
+
+          <div v-else class="contract-summary-panel__body">
+            <div class="contract-summary-panel__grid">
+              <div class="contract-summary-stat">
+                <span class="contract-summary-stat__label">{{ $t('clients.contractHistoryContractDateColumn') }}</span>
+                <span class="contract-summary-stat__value">{{ contractSummarySignedDate }}</span>
+              </div>
+              <div class="contract-summary-stat">
+                <span class="contract-summary-stat__label">{{ $t('clients.contractHistoryStartColumn') }}</span>
+                <span class="contract-summary-stat__value">{{ contractSummaryStartDate }}</span>
+              </div>
+              <div class="contract-summary-stat">
+                <span class="contract-summary-stat__label">{{ $t('clients.contractHistoryEndColumn') }}</span>
+                <span class="contract-summary-stat__value">{{ contractSummaryEndDate }}</span>
+              </div>
+              <div
+                class="contract-summary-stat"
+                :class="{ 'contract-summary-stat--balance': currentContractBalanceDue }"
               >
-                <template #appendInner>
-                  <VaButton
-                    v-if="canEditContractData && paymentTextValue"
-                    type="button"
-                    preset="plain"
-                    icon="close"
-                    size="small"
-                    class="date-clear-btn"
-                    @click.stop="clearPaymentDate"
-                  />
-                  <VaButton
-                    v-if="canEditContractData"
-                    type="button"
-                    preset="plain"
-                    icon="date_range"
-                    size="medium"
-                    class="date-trigger-btn"
-                    @click.stop="paymentPickerOpen = !paymentPickerOpen"
-                  />
-                </template>
-              </VaInput>
-              <div v-if="dateErrors.paymentDate" class="date-error-text">Неверный формат даты</div>
-              <div v-if="canEditContractData && paymentPickerOpen" class="date-picker-popup">
-                <VaDatePicker
-                  :model-value="toDateValue(modelValue.paymentDate)"
-                  :month-names="birthPickerMonthNames"
-                  :weekday-names="birthPickerWeekdayNames"
-                  first-weekday="monday"
-                  @update:model-value="onPaymentPickerSelect"
-                />
+                <span class="contract-summary-stat__label">{{ $t('clients.contractBalanceColumn') }}</span>
+                <span class="contract-summary-stat__value">{{
+                  currentContractBalanceDue || '—'
+                }}</span>
               </div>
             </div>
           </div>
@@ -1741,37 +2306,117 @@ watch(paymentTextValue, (value) => {
       </div>
     </div>
 
-    <div v-else-if="!isCreateMode && activeTab === 'payments'" class="history-tab">
+    <div v-else-if="!isCreateMode && activeTab === 'payments'" class="history-tab payments-tab">
+      <div v-if="contractsWithOutstandingBalance.length" class="add-contract-payment-panel">
+        <header class="add-contract-payment-panel__header">
+          <div class="add-contract-payment-panel__icon" aria-hidden="true">
+            <VaIcon name="payments" size="20px" />
+          </div>
+          <h3 class="add-contract-payment-panel__title">{{ $t('clients.addContractPaymentTitle') }}</h3>
+        </header>
+
+        <div class="add-contract-payment-panel__fields">
+          <VaSelect
+            v-model="addPaymentContractId"
+            :label="$t('clients.addContractPaymentContract')"
+            :options="addPaymentContractOptions"
+            text-by="text"
+            value-by="value"
+            class="add-contract-payment-panel__field add-contract-payment-panel__field--contract"
+          />
+          <VaInput
+            v-model="addPaymentAmount"
+            :label="$t('clients.addContractPaymentAmount')"
+            inputmode="decimal"
+            class="add-contract-payment-panel__field add-contract-payment-panel__field--amount"
+          />
+          <VaDateInput
+            :model-value="addPaymentPaidAt || undefined"
+            :label="$t('clients.addContractPaymentDate')"
+            class="add-contract-payment-panel__field add-contract-payment-panel__field--date"
+            @update:model-value="(v) => (addPaymentPaidAt = formatIsoDate(v))"
+          />
+        </div>
+
+        <footer class="add-contract-payment-panel__footer">
+          <div class="add-contract-payment-panel__channel">
+            <span class="add-contract-payment-panel__channel-label">{{ $t('contracts.paymentChannel') }}</span>
+            <div
+              class="add-contract-payment-segment"
+              role="group"
+              :aria-label="$t('contracts.paymentChannel')"
+            >
+              <button
+                type="button"
+                class="add-contract-payment-segment__btn"
+                :class="{ 'add-contract-payment-segment__btn--active': addPaymentChannel === 'CASH' }"
+                @click="addPaymentChannel = 'CASH'"
+              >
+                {{ $t('contracts.paymentCash') }}
+              </button>
+              <button
+                type="button"
+                class="add-contract-payment-segment__btn"
+                :class="{ 'add-contract-payment-segment__btn--active': addPaymentChannel === 'NON_CASH' }"
+                @click="addPaymentChannel = 'NON_CASH'"
+              >
+                {{ $t('contracts.paymentNonCash') }}
+              </button>
+            </div>
+          </div>
+          <VaButton
+            class="add-contract-payment-panel__submit"
+            icon="check"
+            :loading="addingContractPayment"
+            @click="submitAddContractPayment"
+          >
+            {{ $t('clients.addContractPaymentSubmit') }}
+          </VaButton>
+        </footer>
+      </div>
+      <div class="client-tab-filters">
+        <VaSelect
+          :model-value="paymentsFilters.status === '' ? PAYMENT_STATUS_ALL : paymentsFilters.status"
+          :label="$t('payments.filterStatus')"
+          :options="paymentsStatusFilterOptions"
+          text-by="text"
+          value-by="value"
+          class="client-tab-filters__select"
+          @update:model-value="(v) => (paymentsFilters.status = v === PAYMENT_STATUS_ALL || v === '' ? '' : (v as typeof paymentsFilters.status))"
+        />
+        <VaSelect
+          :model-value="paymentsFilters.channel === '' ? PAYMENT_CHANNEL_ALL : paymentsFilters.channel"
+          :label="$t('payments.columnChannel')"
+          :options="paymentsChannelFilterOptions"
+          text-by="text"
+          value-by="value"
+          class="client-tab-filters__select"
+          @update:model-value="(v) => (paymentsFilters.channel = v === PAYMENT_CHANNEL_ALL || v === '' ? '' : (v as typeof paymentsFilters.channel))"
+        />
+        <VaDateInput
+          mode="range"
+          :model-value="paymentsDateRangeModel"
+          :label="$t('payments.filterDateRange')"
+          :placeholder="$t('payments.filterDateRangePlaceholder')"
+          clearable
+          class="client-tab-filters__range"
+          @update:model-value="onPaymentsDateRangeChange"
+        />
+        <VaButton
+          size="small"
+          preset="secondary"
+          icon="close"
+          :disabled="!paymentsHasActiveFilters"
+          @click="resetPaymentsTabFilters"
+        >
+          {{ $t('contracts.resetFilters') }}
+        </VaButton>
+      </div>
       <div v-if="paymentsLoading" class="client-tab-state client-tab-state--loading" role="status" aria-live="polite">
         <VaIcon name="sync" size="32px" class="client-tab-state__spinner" aria-hidden="true" />
         <p class="client-tab-state__text">{{ $t('clients.paymentsLoading') }}</p>
       </div>
       <template v-else>
-        <div v-if="contractsWithOutstandingBalance.length" class="add-contract-payment-panel">
-          <div class="add-contract-payment-panel__title">{{ $t('clients.addContractPaymentTitle') }}</div>
-          <div class="add-contract-payment-panel__grid">
-            <VaSelect
-              v-model="addPaymentContractId"
-              :label="$t('clients.addContractPaymentContract')"
-              :options="addPaymentContractOptions"
-              text-by="text"
-              value-by="value"
-            />
-            <VaInput
-              v-model="addPaymentAmount"
-              :label="$t('clients.addContractPaymentAmount')"
-              inputmode="decimal"
-            />
-            <VaDateInput
-              :model-value="addPaymentPaidAt || undefined"
-              :label="$t('clients.addContractPaymentDate')"
-              @update:model-value="(v) => (addPaymentPaidAt = formatIsoDate(v))"
-            />
-            <VaButton :loading="addingContractPayment" @click="submitAddContractPayment">
-              {{ $t('clients.addContractPaymentSubmit') }}
-            </VaButton>
-          </div>
-        </div>
         <div v-if="!props.paymentsHistory?.length" class="client-tab-empty-wrap">
           <AppEmptyState
             icon="receipt_long"
@@ -1779,37 +2424,184 @@ watch(paymentTextValue, (value) => {
             :description="$t('clients.paymentsEmptyDesc')"
           />
         </div>
-        <div v-if="props.paymentsHistory?.length" class="contract-history-list payments-history-list">
-          <div v-for="item in props.paymentsHistory" :key="item.id" class="contract-history-row payments-history-row">
-            <div class="payments-history-row__body">
-              <div class="payments-history-row__top">
-                <span class="payments-history-row__amount">
-                  {{ $t('clients.paymentAmount', { amount: Number(item.amount).toFixed(2) }) }}
-                </span>
-                <StatusBadge
-                  class="payments-history-row__badge"
-                  :label="paymentHistoryStatusLabel(item.status)"
-                  :tone="paymentHistoryStatusTone(item.status)"
-                />
-              </div>
-              <div class="payments-history-row__contract">
-                {{
-                  item.contract?.contractNumber?.trim()
-                    ? $t('clients.paymentLinkedContract', { number: item.contract.contractNumber.trim() })
-                    : $t('clients.paymentNoContract')
-                }}
-              </div>
-              <div class="payments-history-row__date">
-                {{ $t('clients.paymentPaidAt') }}: {{ new Date(item.paidAt).toLocaleString('ru-RU') }}
-              </div>
-              <div v-if="item.comment?.trim()" class="payments-history-row__comment">{{ item.comment.trim() }}</div>
-            </div>
+        <template v-else>
+          <div v-if="!filteredPaymentsHistory.length" class="client-tab-empty-wrap">
+            <AppEmptyState
+              icon="receipt_long"
+              :title="$t('clients.paymentsEmptyTitle')"
+              :description="$t('clients.paymentsEmptyDescFiltered')"
+            />
           </div>
+          <div v-else class="client-history-table-wrap">
+            <VaDataTable
+              :items="pagedPaymentsHistory"
+              :columns="paymentsHistoryTableColumns"
+              :sort-by="paymentsSortBy"
+              :sorting-order="paymentsSortOrder"
+              class="client-history-table client-history-table--payments"
+              @update:sort-by="onPaymentsSortByUpdate"
+              @update:sorting-order="onPaymentsSortOrderUpdate"
+            >
+              <template #cell(paidAt)="{ rowData }">
+                {{ formatVisitDateTime(rowData.paidAt) }}
+              </template>
+              <template #cell(amount)="{ rowData }">
+                <span class="client-history-table__amount">{{ Number(rowData.amount).toFixed(2) }}</span>
+              </template>
+              <template #cell(status)="{ rowData }">
+                <StatusBadge
+                  :label="paymentHistoryStatusLabel(rowData.status)"
+                  :tone="paymentHistoryStatusTone(rowData.status)"
+                />
+              </template>
+              <template #cell(contractNumber)="{ rowData }">
+                {{
+                  rowData.contract?.contractNumber?.trim()
+                    ? rowData.contract.contractNumber.trim()
+                    : '—'
+                }}
+              </template>
+              <template #cell(channel)="{ rowData }">
+                {{ paymentChannelLabel(rowData.channel) }}
+              </template>
+            </VaDataTable>
+          </div>
+          <div v-if="filteredPaymentsHistory.length > 0" class="client-tab-table-footer">
+            <AppTablePagerRow
+              v-model:page="paymentsPage"
+              v-model:limit="paymentsLimit"
+              :pages="paymentsPages"
+              :disabled="paymentsLoading"
+            />
+          </div>
+        </template>
+      </template>
+    </div>
+
+    <div v-else-if="!isCreateMode && activeTab === 'visits'" class="history-tab visits-tab">
+      <div class="visits-tab-filters">
+        <VaDateInput
+          mode="range"
+          :model-value="visitsDateRangeModel"
+          :label="$t('visits.filterDateRange')"
+          :placeholder="$t('visits.dateRangePlaceholder')"
+          clearable
+          class="visits-tab-filters__range"
+          @update:model-value="onVisitsDateRangeChange"
+        />
+        <VaButton
+          size="small"
+          preset="secondary"
+          icon="close"
+          :disabled="!visitsHasActiveDateFilters"
+          @click="emit('visits-reset-filters')"
+        >
+          {{ $t('clients.visitsResetFilters') }}
+        </VaButton>
+      </div>
+      <div v-if="visitsLoading" class="client-tab-state client-tab-state--loading" role="status" aria-live="polite">
+        <VaIcon name="sync" size="32px" class="client-tab-state__spinner" aria-hidden="true" />
+        <p class="client-tab-state__text">{{ $t('clients.visitsLoading') }}</p>
+      </div>
+      <template v-else>
+        <div v-if="!props.visitsHistory?.length" class="client-tab-empty-wrap">
+          <AppEmptyState
+            icon="history"
+            :title="$t('clients.visitsEmptyTitle')"
+            :description="visitsHasActiveDateFilters ? $t('clients.visitsEmptyDescFiltered') : $t('clients.visitsEmptyDesc')"
+          />
+        </div>
+        <div v-if="props.visitsHistory?.length" class="visits-history-table-wrap">
+          <VaDataTable
+            :items="props.visitsHistory"
+            :columns="visitsHistoryTableColumns"
+            class="visits-history-table"
+          >
+            <template #cell(lockerNumber)="{ rowData }">
+              <span class="visits-history-table__locker">{{ rowData.lockerNumber || '—' }}</span>
+            </template>
+            <template #cell(status)="{ rowData }">
+              <StatusBadge
+                :label="visitStateLabel(rowData.status)"
+                :tone="visitStateTone(rowData.status)"
+              />
+            </template>
+            <template #cell(enteredAt)="{ rowData }">
+              {{ formatVisitDateTime(rowData.enteredAt) }}
+            </template>
+            <template #cell(exitedAt)="{ rowData }">
+              {{ formatVisitDateTime(rowData.exitedAt) }}
+            </template>
+            <template #cell(closeReason)="{ rowData }">
+              <div class="visits-history-table__reason-cell">
+                <StatusBadge
+                  v-if="rowData.closeReason"
+                  :label="visitCloseReasonLabel(rowData.closeReason)"
+                  :tone="visitCloseReasonTone(rowData.closeReason)"
+                />
+                <span v-else>—</span>
+                <span
+                  v-if="rowData.comment?.trim()"
+                  class="visits-history-table__comment"
+                  :title="rowData.comment.trim()"
+                >
+                  {{ rowData.comment.trim() }}
+                </span>
+              </div>
+            </template>
+            <template #cell(exitedBy)="{ rowData }">
+              {{ rowData.exitedAt ? visitActorName(rowData.exitedBy) : '—' }}
+            </template>
+          </VaDataTable>
+        </div>
+        <div v-if="(props.visitsTotal ?? 0) > 0" class="client-tab-table-footer">
+          <AppTablePagerRow
+            v-model:page="visitsPageModel"
+            v-model:limit="visitsLimitModel"
+            :pages="visitsPages"
+            :disabled="visitsLoading"
+          />
         </div>
       </template>
     </div>
 
-    <div v-else-if="!isCreateMode" class="history-tab">
+    <div v-else-if="!isCreateMode && activeTab === 'history'" class="history-tab contracts-tab">
+      <div class="client-tab-filters">
+        <VaInput
+          v-model="contractsFilters.contractSearch"
+          :label="$t('payments.columnContract')"
+          :placeholder="$t('clients.contractHistorySearchPlaceholder')"
+          clearable
+          class="client-tab-filters__search"
+        />
+        <VaSelect
+          :model-value="contractsFilters.status === '' ? CONTRACT_STATUS_ALL : contractsFilters.status"
+          :label="$t('clients.statusLabel')"
+          :options="contractsStatusFilterOptions"
+          text-by="text"
+          value-by="value"
+          class="client-tab-filters__select"
+          @update:model-value="(v) => (contractsFilters.status = v === CONTRACT_STATUS_ALL || v === '' ? '' : (v as typeof contractsFilters.status))"
+        />
+        <VaDateInput
+          mode="range"
+          :model-value="contractsDateRangeModel"
+          :label="$t('contracts.filterDateRange')"
+          :placeholder="$t('payments.filterDateRangePlaceholder')"
+          clearable
+          class="client-tab-filters__range"
+          @update:model-value="onContractsDateRangeChange"
+        />
+        <VaButton
+          size="small"
+          preset="secondary"
+          icon="close"
+          :disabled="!contractsHasActiveFilters"
+          @click="resetContractsTabFilters"
+        >
+          {{ $t('contracts.resetFilters') }}
+        </VaButton>
+      </div>
       <div
         v-if="contractHistoryLoading"
         class="client-tab-state client-tab-state--loading"
@@ -1819,89 +2611,104 @@ watch(paymentTextValue, (value) => {
         <VaIcon name="sync" size="32px" class="client-tab-state__spinner" aria-hidden="true" />
         <p class="client-tab-state__text">{{ $t('clients.contractHistoryLoading') }}</p>
       </div>
-      <div v-else-if="!props.contractHistory?.length" class="client-tab-empty-wrap">
-        <AppEmptyState
-          icon="folder_open"
-          :title="$t('clients.contractHistoryEmptyTitle')"
-          :description="$t('clients.contractHistoryEmptyDesc')"
-        />
-      </div>
-      <div v-else class="contract-history-list">
-        <div v-for="item in props.contractHistory" :key="item.id" class="contract-history-row">
-          <div class="contract-history-row__main">
-            <div class="contract-history-header-line">
-              <div class="contract-history-number">{{ item.contractNumber || '—' }}</div>
-              <StatusBadge
-                class="contract-history-status"
-                :label="$t(`contracts.contractStatuses.${item.status || 'ACTIVE'}`)"
-                :tone="contractStatusTone(item.status)"
-              />
-            </div>
-            <div class="contract-history-date">
-              <div v-if="contractHistoryServicePeriodLine(item)" class="contract-history-period">
-                {{ contractHistoryServicePeriodLine(item) }}
-              </div>
-              <div class="contract-history-registered">
-                {{ $t('clients.contractHistoryRegistered') }}:
-                {{ new Date(item.createdAt).toLocaleString(locale === 'en' ? 'en-US' : 'ru-RU') }}
-              </div>
-            </div>
-            <div v-if="item.paymentPlan && item.paymentPlan !== 'FULL'" class="contract-history-meta">
-              {{ $t('clients.contractPaymentPlanLabel', { plan: paymentPlanShortLabel(item.paymentPlan) }) }}
-            </div>
-            <div
-              v-if="contractShowsUnderpaidNote(item)"
-              class="contract-history-underpaid"
-              role="status"
-            >
-              {{
-                $t('clients.contractNotFullyPaid', {
-                  balance: Number(String(item.balanceDue).replace(',', '.')).toFixed(2),
-                })
-              }}
-            </div>
-          </div>
-          <div class="contract-history-actions">
-            <VaPopover v-if="item.status === 'ACTIVE'" :message="$t('contracts.pause')">
-              <VaButton
-                type="button"
-                size="large"
-                preset="plain"
-                :icon="TableActionIcon.contractPause"
-                @click="emit('pause-contract-history-item', item.id)"
-              />
-            </VaPopover>
-            <VaPopover v-if="item.status === 'PAUSED'" :message="$t('contracts.resume')">
-              <VaButton
-                type="button"
-                size="large"
-                preset="plain"
-                :icon="TableActionIcon.contractResume"
-                @click="emit('resume-contract-history-item', item.id)"
-              />
-            </VaPopover>
-            <VaPopover v-if="item.status !== 'CANCELLED' && item.status !== 'EXPIRED'" :message="$t('contracts.terminate')">
-              <VaButton
-                type="button"
-                size="large"
-                color="warning"
-                preset="plain"
-                :icon="TableActionIcon.contractTerminate"
-                @click="emit('terminate-contract-history-item', item.id)"
-              />
-            </VaPopover>
-            <VaPopover :message="$t('clients.openContract')">
-              <VaButton
-                type="button"
-                size="large"
-                preset="plain"
-                :icon="TableActionIcon.viewDocument"
-                @click="emit('open-contract-history-item', item.id)"
-              />
-            </VaPopover>
-          </div>
+      <template v-else>
+        <div v-if="!props.contractHistory?.length" class="client-tab-empty-wrap">
+          <AppEmptyState
+            icon="folder_open"
+            :title="$t('clients.contractHistoryEmptyTitle')"
+            :description="$t('clients.contractHistoryEmptyDesc')"
+          />
         </div>
-      </div>
+        <template v-else>
+          <div v-if="!filteredContractsHistory.length" class="client-tab-empty-wrap">
+            <AppEmptyState
+              icon="folder_open"
+              :title="$t('clients.contractHistoryEmptyTitle')"
+              :description="$t('clients.contractHistoryEmptyDescFiltered')"
+            />
+          </div>
+          <div v-else class="client-history-table-wrap">
+            <VaDataTable
+              :items="pagedContractsHistory"
+              :columns="contractsHistoryTableColumns"
+              :sort-by="contractsSortBy"
+              :sorting-order="contractsSortOrder"
+              class="client-history-table client-history-table--contracts"
+              @update:sort-by="onContractsSortByUpdate"
+              @update:sorting-order="onContractsSortOrderUpdate"
+            >
+              <template #cell(contractNumber)="{ rowData }">
+                <span
+                  class="client-history-table__contract-number client-history-table__contract-number--compact"
+                  :title="rowData.contractNumber || undefined"
+                >
+                  {{ rowData.contractNumber || '—' }}
+                </span>
+              </template>
+              <template #cell(status)="{ rowData }">
+                <span :title="contractHistoryStatusTitle(rowData.status)">
+                  <StatusBadge
+                    :label="contractHistoryStatusLabel(rowData.status)"
+                    :tone="contractStatusTone(rowData.status)"
+                    class="client-history-table__status-badge"
+                  />
+                </span>
+              </template>
+              <template #cell(contractDate)="{ rowData }">
+                <span class="client-history-table__date">{{ contractHistoryDateCell(rowData.contractDate) }}</span>
+              </template>
+              <template #cell(serviceStartDate)="{ rowData }">
+                <div
+                  class="client-history-table__date-cell"
+                  :title="contractHistoryPauseNote(rowData) || undefined"
+                >
+                  <span class="client-history-table__date">{{
+                    contractHistoryDateCell(rowData.serviceStartDate)
+                  }}</span>
+                  <span v-if="contractHistoryPauseNote(rowData)" class="client-history-table__date-note">
+                    {{ contractHistoryPauseNote(rowData) }}
+                  </span>
+                </div>
+              </template>
+              <template #cell(serviceEndDate)="{ rowData }">
+                <span class="client-history-table__date">{{ contractHistoryDateCell(rowData.serviceEndDate) }}</span>
+              </template>
+              <template #cell(balanceDue)="{ rowData }">
+                <span
+                  v-if="contractShowsUnderpaidNote(rowData)"
+                  class="client-history-table__balance-due"
+                >
+                  {{
+                    Number(String(rowData.balanceDue).replace(',', '.')).toFixed(2)
+                  }}
+                </span>
+                <span v-else class="client-history-table__balance-ok">—</span>
+              </template>
+              <template #cell(actions)="{ rowData }">
+                <div class="contract-history-row-menu">
+                  <button
+                    type="button"
+                    class="contract-history-row-menu__trigger"
+                    :aria-label="$t('contracts.actionsMenu')"
+                    :aria-expanded="contractHistoryRowMenuOpenId === rowData.id ? 'true' : 'false'"
+                    @click.stop="onContractHistoryRowMenuTriggerClick(rowData, $event)"
+                  >
+                    <VaIcon name="more_vert" size="22px" />
+                  </button>
+                </div>
+              </template>
+            </VaDataTable>
+          </div>
+          <div v-if="filteredContractsHistory.length > 0" class="client-tab-table-footer">
+            <AppTablePagerRow
+              v-model:page="contractsPage"
+              v-model:limit="contractsLimit"
+              :pages="contractsPages"
+              :disabled="contractHistoryLoading"
+            />
+          </div>
+        </template>
+      </template>
     </div>
     </div>
 
@@ -1922,6 +2729,28 @@ watch(paymentTextValue, (value) => {
         <div class="card-scanner-modal__actions">
           <VaButton type="button" preset="secondary" @click="cancelCardScanner">{{ $t('common.cancel') }}</VaButton>
           <VaButton type="button" @click="confirmCardScanner">{{ $t('users.save') }}</VaButton>
+        </div>
+      </div>
+    </VaModal>
+
+    <ConfirmModal
+      v-model="photoRemoveConfirmOpen"
+      :title="$t('clients.photoRemoveConfirmTitle')"
+      :message="$t('clients.photoRemoveConfirmMessage')"
+      :confirm-label="$t('clients.photoRemove')"
+      :cancel-label="$t('common.cancel')"
+      danger
+      @confirm="confirmClearPhoto"
+    />
+
+    <VaModal v-model="photoViewerOpen" hide-default-actions fixed-layout max-width="min(96vw, 720px)">
+      <div class="photo-viewer-modal">
+        <h3 class="photo-viewer-modal__title">{{ $t('clients.photoViewTitle') }}</h3>
+        <div class="photo-viewer-modal__frame">
+          <img :src="photoPreviewSrc" alt="" class="photo-viewer-modal__img" />
+        </div>
+        <div class="photo-viewer-modal__actions">
+          <VaButton preset="secondary" @click="photoViewerOpen = false">{{ $t('clients.photoViewClose') }}</VaButton>
         </div>
       </div>
     </VaModal>
@@ -1947,6 +2776,103 @@ watch(paymentTextValue, (value) => {
         </div>
       </div>
     </VaModal>
+
+    <Teleport to="body">
+      <div
+        v-if="contractHistoryRowMenuRow"
+        class="contract-history-row-menu-layer"
+        :style="contractHistoryRowMenuLayerStyle"
+        @click.stop
+      >
+        <div class="contract-history-row-menu__panel">
+          <ul class="contract-history-row-menu__list" role="menu">
+            <li v-if="contractHistoryRowMenuRow.status === 'SAVED'" role="none">
+              <button
+                type="button"
+                role="menuitem"
+                class="contract-history-row-menu__item"
+                :disabled="!canActivateQueuedContract(contractHistoryRowMenuRow)"
+                :title="activateQueuedContractTooltip(contractHistoryRowMenuRow)"
+                @click="
+                  runContractHistoryRowMenuAction(contractHistoryRowMenuRow, (r) =>
+                    emit('activate-contract-history-item', r.id),
+                  )
+                "
+              >
+                <VaIcon :name="TableActionIcon.contractActivate" size="18px" />
+                {{ $t('clients.activateContract') }}
+              </button>
+            </li>
+            <li v-if="contractHistoryRowMenuRow.status === 'ACTIVE'" role="none">
+              <button
+                type="button"
+                role="menuitem"
+                class="contract-history-row-menu__item"
+                @click="
+                  runContractHistoryRowMenuAction(contractHistoryRowMenuRow, (r) =>
+                    emit('pause-contract-history-item', r.id),
+                  )
+                "
+              >
+                <VaIcon :name="TableActionIcon.contractPause" size="18px" />
+                {{ $t('contracts.pause') }}
+              </button>
+            </li>
+            <li v-if="contractHistoryRowMenuRow.status === 'PAUSED'" role="none">
+              <button
+                type="button"
+                role="menuitem"
+                class="contract-history-row-menu__item"
+                @click="
+                  runContractHistoryRowMenuAction(contractHistoryRowMenuRow, (r) =>
+                    emit('resume-contract-history-item', r.id),
+                  )
+                "
+              >
+                <VaIcon :name="TableActionIcon.contractResume" size="18px" />
+                {{ $t('contracts.resume') }}
+              </button>
+            </li>
+            <li
+              v-if="
+                contractHistoryRowMenuRow.status !== 'CANCELLED' &&
+                contractHistoryRowMenuRow.status !== 'EXPIRED'
+              "
+              role="none"
+            >
+              <button
+                type="button"
+                role="menuitem"
+                class="contract-history-row-menu__item contract-history-row-menu__item--warning"
+                @click="
+                  runContractHistoryRowMenuAction(contractHistoryRowMenuRow, (r) =>
+                    emit('terminate-contract-history-item', r.id),
+                  )
+                "
+              >
+                <VaIcon :name="TableActionIcon.contractTerminate" size="18px" />
+                {{ $t('contracts.terminate') }}
+              </button>
+            </li>
+            <li role="none">
+              <button
+                type="button"
+                role="menuitem"
+                class="contract-history-row-menu__item"
+                @click="
+                  runContractHistoryRowMenuAction(contractHistoryRowMenuRow, (r) =>
+                    emit('open-contract-history-item', r.id),
+                  )
+                "
+              >
+                <VaIcon :name="TableActionIcon.viewDocument" size="18px" />
+                {{ $t('clients.openContract') }}
+              </button>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -1957,43 +2883,16 @@ watch(paymentTextValue, (value) => {
 }
 
 .client-form-layout--tabbed {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: hidden;
+  display: block;
+}
+
+.client-form-layout--tabbed .client-form-tabs {
+  margin-bottom: 0.85rem;
 }
 
 .client-form-layout--tabbed .client-form-tab-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding: 0 0.35rem 0.45rem 0;
-  scrollbar-width: thin;
-  scrollbar-color: color-mix(in srgb, var(--app-muted) 28%, transparent) transparent;
-}
-
-.client-form-layout--tabbed .client-form-tab-body::-webkit-scrollbar {
-  width: 9px;
-}
-
-.client-form-layout--tabbed .client-form-tab-body::-webkit-scrollbar-track {
-  margin: 0.35rem 0;
-  background: transparent;
-}
-
-.client-form-layout--tabbed .client-form-tab-body::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  border: 2px solid transparent;
-  background-clip: padding-box;
-  background-color: color-mix(in srgb, var(--app-muted) 26%, transparent);
-}
-
-.client-form-layout--tabbed .client-form-tab-body::-webkit-scrollbar-thumb:hover {
-  background-color: color-mix(in srgb, var(--app-muted) 40%, transparent);
+  overflow: visible;
+  padding: 0;
 }
 
 .card-field-append {
@@ -2047,38 +2946,79 @@ watch(paymentTextValue, (value) => {
   --va-input-wrapper-width: 100%;
 }
 
-.tabs-row {
+.client-form-tabs {
   display: flex;
-  align-items: center;
-  gap: 0.3rem;
+  align-items: stretch;
+  gap: 0.35rem;
   flex-wrap: wrap;
-  padding: 0.25rem;
-  border-radius: 12px;
-  border: 1px solid color-mix(in srgb, var(--app-border) 86%, transparent);
-  background: color-mix(in srgb, var(--app-surface) 96%, white 4%);
+  padding: 0.35rem;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--app-border) 88%, transparent);
+  background: color-mix(in srgb, var(--app-text) 4%, var(--app-surface));
+  box-shadow: inset 0 1px 2px color-mix(in srgb, var(--app-text) 5%, transparent);
 }
 
-.tabs-row :deep(.va-button) {
-  --va-button-sm-height: 2.15rem;
-  border-radius: 10px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-  padding: 0 0.8rem;
-}
-
-.tabs-row :deep(.va-button--secondary) {
-  color: color-mix(in srgb, var(--app-text) 68%, var(--app-muted));
-  background: transparent;
+.client-form-tab {
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.42rem;
+  min-height: 2.4rem;
+  min-width: 0;
+  padding: 0.45rem 0.75rem;
   border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: color-mix(in srgb, var(--app-text) 56%, var(--app-muted));
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1.2;
+  cursor: pointer;
+  transition:
+    background-color 0.18s ease,
+    color 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease;
 }
 
-.tabs-row :deep(.va-button--secondary:hover) {
-  background: color-mix(in srgb, var(--app-surface) 90%, var(--app-border) 10%);
+.client-form-tab:hover:not(.client-form-tab--active) {
+  color: var(--app-text);
+  background: color-mix(in srgb, var(--app-surface) 86%, var(--app-accent) 14%);
+  border-color: color-mix(in srgb, var(--app-accent) 22%, transparent);
 }
 
-.tabs-row :deep(.va-button--primary) {
-  color: color-mix(in srgb, white 94%, var(--app-text) 6%);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--app-accent) 78%, white 22%);
+.client-form-tab--active {
+  color: #fff;
+  background: linear-gradient(
+    165deg,
+    color-mix(in srgb, var(--app-accent) 90%, white 10%) 0%,
+    color-mix(in srgb, var(--app-accent) 76%, black 24%) 100%
+  );
+  border-color: color-mix(in srgb, var(--app-accent) 62%, black 38%);
+  box-shadow:
+    0 2px 10px color-mix(in srgb, var(--app-accent) 34%, transparent),
+    inset 0 1px 0 color-mix(in srgb, white 24%, transparent);
+}
+
+.client-form-tab__icon {
+  flex-shrink: 0;
+  opacity: 0.72;
+}
+
+.client-form-tab--active .client-form-tab__icon {
+  opacity: 1;
+}
+
+.client-form-tab:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--app-accent) 55%, transparent);
+  outline-offset: 2px;
+}
+
+.client-form-tab__label {
+  min-width: 0;
+  white-space: nowrap;
 }
 
 .label-with-tip {
@@ -2228,81 +3168,171 @@ watch(paymentTextValue, (value) => {
   to { transform: rotate(360deg); }
 }
 
-.contract-panel {
-  border: 1px solid color-mix(in srgb, var(--app-border) 84%, transparent);
-  border-radius: 10px;
-  padding: 0.6rem;
-  background: color-mix(in srgb, var(--app-surface) 97%, white 3%);
+.contract-summary-panel {
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--app-accent) 16%, var(--app-border));
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--app-accent) 5%, var(--app-surface)) 0%,
+    var(--app-surface) 48%
+  );
+  overflow: hidden;
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--app-text) 6%, transparent);
 }
 
-.contract-panel__title {
-  font-size: 0.78rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--app-muted);
-  margin-bottom: 0.45rem;
-}
-
-.contract-panel__status {
-  display: flex;
-  align-items: center;
-  gap: 0.55rem;
-  margin-bottom: 0.5rem;
-}
-
-.contract-panel__pause {
-  font-size: 0.8rem;
-  color: var(--app-muted);
-}
-
-.contract-panel__hint {
-  margin-bottom: 0.5rem;
-}
-
-.contract-empty-state {
-  margin-bottom: 0.5rem;
+.contract-summary-panel__header {
   display: flex;
   align-items: flex-start;
+  justify-content: space-between;
   gap: 0.75rem;
-  padding: 0.85rem 0.95rem;
-  border-radius: 12px;
-  border: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
-  background: color-mix(in srgb, var(--app-surface) 96%, var(--app-accent) 6%);
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--app-border) 78%, transparent);
 }
 
-.contract-empty-state__icon-wrap {
-  flex-shrink: 0;
-  width: 2.5rem;
-  height: 2.5rem;
-  border-radius: 10px;
-  display: grid;
-  place-items: center;
-  background: color-mix(in srgb, var(--app-accent) 14%, white);
-}
-
-.contract-empty-state__icon {
-  color: var(--app-accent-strong);
-  opacity: 0.95;
-}
-
-.contract-empty-state__body {
+.contract-summary-panel__lead {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
   min-width: 0;
-  flex: 1;
 }
 
-.contract-empty-state__title {
-  font-size: 0.95rem;
+.contract-summary-panel__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--app-accent) 14%, var(--app-surface));
+  color: var(--app-accent);
+  flex-shrink: 0;
+}
+
+.contract-summary-panel__head-copy {
+  min-width: 0;
+}
+
+.contract-summary-panel__title {
+  margin: 0;
+  font-size: 0.9375rem;
   font-weight: 700;
-  color: var(--app-text);
   line-height: 1.3;
 }
 
-.contract-empty-state__desc {
+.contract-summary-panel__number {
+  margin: 0.18rem 0 0;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, var(--app-text) 72%, var(--app-muted));
+  word-break: break-all;
+}
+
+.contract-summary-panel__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.45rem;
+  flex-shrink: 0;
+}
+
+.contract-summary-panel__pause {
+  font-size: 0.75rem;
+  color: var(--app-muted);
+  max-width: 14rem;
+  text-align: right;
+  line-height: 1.3;
+}
+
+.contract-summary-panel__copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.85rem;
+  height: 1.85rem;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--app-border) 88%, transparent);
+  border-radius: 8px;
+  background: var(--app-surface);
+  color: var(--app-muted);
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.contract-summary-panel__copy:hover {
+  color: var(--app-accent);
+  background: color-mix(in srgb, var(--app-surface) 86%, var(--app-accent) 14%);
+}
+
+.contract-summary-panel__copy:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--app-accent) 55%, transparent);
+  outline-offset: 2px;
+}
+
+.contract-summary-panel__empty {
+  padding: 0.85rem 1rem 1rem;
+}
+
+.contract-summary-panel__empty-title {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.contract-summary-panel__empty-desc {
   margin: 0.35rem 0 0;
-  font-size: 0.86rem;
+  font-size: 0.84rem;
   line-height: 1.45;
   color: color-mix(in srgb, var(--app-muted) 55%, var(--app-text));
+}
+
+.contract-summary-panel__body {
+  padding: 0.8rem 1rem 0.95rem;
+}
+
+.contract-summary-panel__grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.contract-summary-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.22rem;
+  min-width: 0;
+  padding: 0.55rem 0.65rem;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
+  background: color-mix(in srgb, var(--app-surface) 94%, white 6%);
+}
+
+.contract-summary-stat__label {
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--app-muted);
+}
+
+.contract-summary-stat__value {
+  font-size: 0.875rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+  color: var(--app-text);
+}
+
+.contract-summary-stat--balance .contract-summary-stat__value {
+  color: var(--va-danger);
+}
+
+.contract-summary-panel :deep(.contract-summary-panel__status.status-badge) {
+  padding: 0.12rem 0.45rem;
+  min-height: 1.35rem;
+  font-size: 0.68rem;
 }
 
 .client-tab-state--loading {
@@ -2367,6 +3397,12 @@ watch(paymentTextValue, (value) => {
 
 .control-grid--contract-readonly :deep(.va-input-wrapper--readonly) {
   opacity: 1;
+}
+
+.control-grid--contract-readonly :deep(.va-input-wrapper__messages),
+.control-grid--contract-readonly :deep(.va-message-list__list) {
+  min-height: 0;
+  margin-top: 0;
 }
 
 .field-copy-btn {
@@ -2435,12 +3471,6 @@ watch(paymentTextValue, (value) => {
   margin-top: 0.35rem;
 }
 
-.client-status-select :deep(.va-select-content__value),
-.client-status-select :deep(.va-select-content__placeholder) {
-  color: var(--app-text) !important;
-  opacity: 1 !important;
-}
-
 .photo-preview {
   position: relative;
   width: 100%;
@@ -2455,39 +3485,10 @@ watch(paymentTextValue, (value) => {
 }
 
 .photo-preview img { width: 100%; height: 100%; object-fit: cover; }
+.photo-preview--clickable img {
+  cursor: zoom-in;
+}
 .photo-placeholder { font-size: 0.8rem; color: var(--app-muted); text-align: center; padding: 0 0.5rem; }
-
-.photo-preview__delete {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin: 0;
-  padding: 0;
-  border: none;
-  border-radius: inherit;
-  background: color-mix(in srgb, rgba(0, 0, 0, 0.5) 100%, transparent);
-  color: #fff;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s ease;
-  pointer-events: none;
-}
-
-.photo-preview--deletable:hover .photo-preview__delete,
-.photo-preview--deletable:focus-within .photo-preview__delete {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.photo-preview__delete:hover:not(:disabled) {
-  background: color-mix(in srgb, rgba(0, 0, 0, 0.62) 100%, transparent);
-}
-
-.photo-preview__delete:disabled {
-  cursor: not-allowed;
-}
 
 .photo-file-input-hidden {
   position: absolute;
@@ -2575,6 +3576,40 @@ watch(paymentTextValue, (value) => {
   flex-wrap: wrap;
   gap: 0.5rem;
   margin-top: 0.15rem;
+}
+
+.photo-viewer-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.25rem 0.15rem 0.5rem;
+}
+
+.photo-viewer-modal__title {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.photo-viewer-modal__frame {
+  border-radius: 12px;
+  overflow: hidden;
+  background: color-mix(in oklab, var(--app-surface) 92%, var(--app-muted) 8%);
+  border: 1px solid color-mix(in srgb, var(--app-border) 88%, transparent);
+}
+
+.photo-viewer-modal__img {
+  display: block;
+  width: 100%;
+  max-height: min(72vh, 640px);
+  object-fit: contain;
+  margin: 0 auto;
+}
+
+.photo-viewer-modal__actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .photo-draft-hint {
@@ -2684,22 +3719,133 @@ watch(paymentTextValue, (value) => {
 
 .add-contract-payment-panel {
   margin-bottom: 1rem;
-  padding: 0.75rem 0.85rem;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--app-accent) 16%, var(--app-border));
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--app-accent) 5%, var(--app-surface)) 0%,
+    var(--app-surface) 42%
+  );
+  overflow: hidden;
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--app-text) 6%, transparent);
+}
+
+.add-contract-payment-panel__header {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--app-border) 78%, transparent);
+}
+
+.add-contract-payment-panel__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
   border-radius: 10px;
-  border: 1px solid color-mix(in srgb, var(--app-border) 84%, transparent);
-  background: color-mix(in srgb, var(--app-surface) 96%, white 4%);
+  background: color-mix(in srgb, var(--app-accent) 14%, var(--app-surface));
+  color: var(--app-accent);
+  flex-shrink: 0;
 }
 
 .add-contract-payment-panel__title {
-  font-weight: 600;
-  margin-bottom: 0.55rem;
+  margin: 0;
+  font-size: 0.9375rem;
+  font-weight: 700;
+  line-height: 1.3;
 }
 
-.add-contract-payment-panel__grid {
+.add-contract-payment-panel__fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(0, 0.75fr) minmax(0, 0.85fr);
+  gap: 0.65rem 0.75rem;
+  padding: 0.85rem 1rem 0.7rem;
+}
+
+.add-contract-payment-panel__field {
+  min-width: 0;
+}
+
+.add-contract-payment-panel__footer {
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.65rem;
   align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.7rem 1rem 0.9rem;
+  border-top: 1px solid color-mix(in srgb, var(--app-border) 72%, transparent);
+  background: color-mix(in srgb, var(--app-text) 2.5%, var(--app-surface));
+}
+
+.add-contract-payment-panel__channel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.add-contract-payment-panel__channel-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--app-muted);
+}
+
+.add-contract-payment-segment {
+  display: inline-flex;
+  min-height: 2.15rem;
+  padding: 0.2rem;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--app-border) 92%, transparent);
+  background: color-mix(in srgb, var(--app-text) 3%, var(--app-surface));
+}
+
+.add-contract-payment-segment__btn {
+  min-width: 5.5rem;
+  min-height: calc(2.15rem - 0.4rem);
+  padding: 0.35rem 0.85rem;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: color-mix(in srgb, var(--app-text) 68%, var(--app-muted));
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.add-contract-payment-segment__btn:hover:not(.add-contract-payment-segment__btn--active) {
+  background: color-mix(in srgb, var(--app-text) 5%, transparent);
+  color: var(--app-text);
+}
+
+.add-contract-payment-segment__btn--active {
+  color: #fff;
+  background: linear-gradient(
+    165deg,
+    color-mix(in srgb, var(--app-accent) 88%, white 12%) 0%,
+    color-mix(in srgb, var(--app-accent) 74%, black 26%) 100%
+  );
+  box-shadow: 0 1px 4px color-mix(in srgb, var(--app-accent) 28%, transparent);
+}
+
+.add-contract-payment-segment__btn:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--app-accent) 55%, transparent);
+  outline-offset: 2px;
+}
+
+.add-contract-payment-panel__submit {
+  flex-shrink: 0;
+  margin-left: auto;
+  min-height: 2.35rem;
+  padding-left: 1rem;
+  padding-right: 1rem;
 }
 
 .payments-history-list .payments-history-row {
@@ -2733,7 +3879,8 @@ watch(paymentTextValue, (value) => {
   line-height: 1.35;
 }
 
-.payments-history-row__date {
+.payments-history-row__date,
+.payments-history-row__channel {
   font-size: 0.8rem;
   color: var(--app-muted);
 }
@@ -2746,6 +3893,356 @@ watch(paymentTextValue, (value) => {
 
 .payments-history-row__badge {
   flex-shrink: 0;
+}
+
+.visits-tab-filters,
+.client-tab-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  align-items: flex-end;
+  margin-bottom: 0.85rem;
+}
+
+.visits-tab-filters__range,
+.client-tab-filters__range {
+  flex: 1 1 14rem;
+  min-width: 12rem;
+}
+
+.client-tab-filters__select {
+  flex: 0 1 10rem;
+  min-width: 9rem;
+}
+
+.client-tab-filters__search {
+  flex: 1 1 12rem;
+  min-width: 10rem;
+}
+
+.visits-tab-pager,
+.client-tab-pager {
+  margin-top: 0.85rem;
+}
+
+.client-tab-table-footer {
+  margin-top: 0.65rem;
+  padding: 0.55rem 0.7rem;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
+  background: color-mix(in srgb, var(--app-text) 2.5%, var(--app-surface));
+}
+
+.client-history-table--payments {
+  min-width: 0;
+  width: 100%;
+}
+
+.client-history-table--payments :deep(.va-data-table__table) {
+  table-layout: fixed;
+  width: 100%;
+}
+
+.client-history-table--payments :deep(.va-data-table__table-th),
+.client-history-table--payments :deep(.va-data-table__table-td) {
+  padding: 0.28rem 0.35rem;
+  font-size: 0.72rem;
+  line-height: 1.25;
+}
+
+.client-history-table--payments :deep(.va-data-table__table-th) {
+  font-size: 0.68rem;
+}
+
+.client-history-table--payments :deep(.va-data-table__table-th:nth-child(1)),
+.client-history-table--payments :deep(.va-data-table__table-td:nth-child(1)) {
+  width: 24%;
+}
+
+.client-history-table--payments :deep(.va-data-table__table-th:nth-child(2)),
+.client-history-table--payments :deep(.va-data-table__table-td:nth-child(2)) {
+  width: 12%;
+}
+
+.client-history-table--payments :deep(.va-data-table__table-th:nth-child(3)),
+.client-history-table--payments :deep(.va-data-table__table-td:nth-child(3)) {
+  width: 14%;
+}
+
+.client-history-table--payments :deep(.va-data-table__table-th:nth-child(4)),
+.client-history-table--payments :deep(.va-data-table__table-td:nth-child(4)) {
+  width: 28%;
+}
+
+.client-history-table--payments :deep(.va-data-table__table-th:nth-child(5)),
+.client-history-table--payments :deep(.va-data-table__table-td:nth-child(5)) {
+  width: 14%;
+}
+
+.client-history-table--payments :deep(.status-badge) {
+  padding: 0.1rem 0.35rem;
+  min-height: 1.2rem;
+  font-size: 0.62rem;
+  letter-spacing: 0;
+}
+
+.client-history-table-wrap:has(.client-history-table--payments) {
+  overflow-x: hidden;
+}
+
+.visits-history-table-wrap,
+.client-history-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--va-background-border, rgba(0, 0, 0, 0.08));
+  border-radius: var(--app-radius-sm, 0.5rem);
+}
+
+.visits-history-table,
+.client-history-table {
+  min-width: 42rem;
+}
+
+.client-history-table--contracts {
+  min-width: 0;
+  width: 100%;
+}
+
+.client-history-table--contracts :deep(.va-data-table__table) {
+  table-layout: fixed;
+  width: 100%;
+}
+
+.client-history-table--contracts :deep(.va-data-table__table-th),
+.client-history-table--contracts :deep(.va-data-table__table-td) {
+  padding: 0.25rem 0.3rem;
+  font-size: 0.72rem;
+  line-height: 1.25;
+}
+
+.client-history-table--contracts :deep(.va-data-table__table-th) {
+  font-size: 0.68rem;
+  padding-top: 0.35rem;
+  padding-bottom: 0.35rem;
+}
+
+.client-history-table--contracts :deep(.va-data-table__table-th:last-child),
+.client-history-table--contracts :deep(.va-data-table__table-td:last-child) {
+  width: 9%;
+  min-width: 4.25rem;
+  padding-left: 0.25rem;
+  padding-right: 0.35rem;
+  text-align: right;
+}
+
+.client-history-table--contracts :deep(.va-data-table__table-td:last-child) .contract-history-row-menu {
+  width: 100%;
+  justify-content: flex-end;
+}
+
+.client-history-table--contracts :deep(.va-data-table__table-th:nth-child(1)),
+.client-history-table--contracts :deep(.va-data-table__table-td:nth-child(1)) {
+  width: 21%;
+}
+
+.client-history-table--contracts :deep(.va-data-table__table-th:nth-child(2)),
+.client-history-table--contracts :deep(.va-data-table__table-td:nth-child(2)) {
+  width: 11%;
+}
+
+.client-history-table--contracts :deep(.va-data-table__table-th:nth-child(3)),
+.client-history-table--contracts :deep(.va-data-table__table-td:nth-child(3)),
+.client-history-table--contracts :deep(.va-data-table__table-th:nth-child(4)),
+.client-history-table--contracts :deep(.va-data-table__table-td:nth-child(4)),
+.client-history-table--contracts :deep(.va-data-table__table-th:nth-child(5)),
+.client-history-table--contracts :deep(.va-data-table__table-td:nth-child(5)) {
+  width: 12%;
+}
+
+.client-history-table--contracts :deep(.va-data-table__table-th:nth-child(6)),
+.client-history-table--contracts :deep(.va-data-table__table-td:nth-child(6)) {
+  width: 8%;
+}
+
+.client-history-table-wrap:has(.client-history-table--contracts) {
+  overflow-x: hidden;
+}
+
+.client-history-table__contract-number--compact {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.client-history-table--contracts :deep(.client-history-table__status-badge) {
+  padding: 0.1rem 0.35rem;
+  min-height: 1.2rem;
+  font-size: 0.62rem;
+  letter-spacing: 0;
+}
+
+.client-history-table--contracts .client-history-table__date-cell {
+  min-width: 0;
+}
+
+.client-history-table--contracts .client-history-table__date-note {
+  display: none;
+}
+
+.client-history-table--contracts .contract-history-row-menu__trigger {
+  width: 1.65rem;
+  height: 1.65rem;
+}
+
+.client-history-table--contracts .contract-history-row-menu__trigger :deep(.va-icon) {
+  font-size: 1.15rem !important;
+}
+
+.visits-history-table :deep(.va-data-table__table),
+.client-history-table :deep(.va-data-table__table) {
+  font-size: 0.8125rem;
+}
+
+.visits-history-table :deep(.va-data-table__table-th),
+.client-history-table :deep(.va-data-table__table-th) {
+  white-space: nowrap;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.45rem 0.55rem;
+}
+
+.visits-history-table :deep(.va-data-table__table-td),
+.client-history-table :deep(.va-data-table__table-td) {
+  vertical-align: middle;
+  padding: 0.4rem 0.55rem;
+  line-height: 1.3;
+}
+
+.client-history-table__amount,
+.client-history-table__contract-number,
+.visits-history-table__locker {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.client-history-table__date,
+.client-history-table__date-cell {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.client-history-table__date-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 6.5rem;
+}
+
+.client-history-table__date-note {
+  font-size: 0.75rem;
+  line-height: 1.3;
+  color: var(--app-muted);
+}
+
+.client-history-table__balance-due {
+  color: var(--va-danger);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.client-history-table__balance-ok {
+  color: var(--app-muted);
+}
+
+.contract-history-row-menu {
+  position: relative;
+  display: inline-flex;
+  justify-content: flex-end;
+}
+
+.contract-history-row-menu__trigger {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--app-muted);
+}
+
+.contract-history-row-menu__trigger:hover {
+  background: color-mix(in srgb, var(--app-surface) 86%, var(--va-primary) 14%);
+}
+
+.contract-history-row-menu-layer {
+  box-sizing: border-box;
+  min-width: 12.5rem;
+}
+
+.contract-history-row-menu-layer .contract-history-row-menu__panel {
+  border: 1px solid color-mix(in srgb, var(--app-border) 88%, transparent);
+  border-radius: 10px;
+  background: var(--app-surface);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.contract-history-row-menu__list {
+  margin: 0;
+  padding: 0.3rem;
+  min-width: 12.5rem;
+  list-style: none;
+}
+
+.contract-history-row-menu__item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.45rem 0.55rem;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.contract-history-row-menu__item:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--app-surface) 82%, var(--app-border) 18%);
+}
+
+.contract-history-row-menu__item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.contract-history-row-menu__item--warning {
+  color: var(--va-warning);
+}
+
+.visits-history-table__reason-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.visits-history-table__comment {
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.72rem;
+  color: var(--app-muted);
 }
 
 .contract-history-actions {
@@ -2763,6 +4260,13 @@ watch(paymentTextValue, (value) => {
   min-width: 2.2rem;
   min-height: 2.2rem;
   padding: 0;
+}
+
+/** Подсказка на disabled-кнопке: hover ловит обёртка, не сам button */
+.contract-history-action-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .control-grid__date {
@@ -2831,21 +4335,26 @@ watch(paymentTextValue, (value) => {
 }
 
 @media (max-width: 640px) {
-  .tabs-row {
+  .client-form-tabs {
     flex-wrap: nowrap;
     gap: 0.3rem;
-    padding: 0.28rem 0.35rem;
+    padding: 0.32rem;
     overflow-x: auto;
     overflow-y: hidden;
     -webkit-overflow-scrolling: touch;
     scrollbar-width: thin;
   }
 
-  .tabs-row :deep(.va-button) {
+  .client-form-tab {
     flex: 0 0 auto;
-    padding: 0 0.52rem;
-    font-size: 0.72rem;
-    --va-button-sm-height: 1.85rem;
+    min-height: 2.1rem;
+    padding: 0.4rem 0.62rem;
+    font-size: 0.75rem;
+    gap: 0.32rem;
+  }
+
+  .client-form-tab__icon {
+    display: none;
   }
 
   .general-layout {
@@ -2856,6 +4365,24 @@ watch(paymentTextValue, (value) => {
 
   .general-top {
     gap: 0.55rem;
+  }
+
+  .contract-summary-panel__header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .contract-summary-panel__meta {
+    justify-content: flex-start;
+  }
+
+  .contract-summary-panel__pause {
+    max-width: none;
+    text-align: left;
+  }
+
+  .contract-summary-panel__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .photo-rail {
@@ -2909,13 +4436,31 @@ watch(paymentTextValue, (value) => {
     flex-wrap: wrap;
   }
 
-  .add-contract-payment-panel__grid {
+  .add-contract-payment-panel__fields {
+    grid-template-columns: 1fr;
+  }
+
+  .add-contract-payment-panel__footer {
     flex-direction: column;
     align-items: stretch;
   }
 
+  .add-contract-payment-panel__submit {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .add-contract-payment-segment {
+    width: 100%;
+  }
+
+  .add-contract-payment-segment__btn {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
   .client-form-layout--tabbed .client-form-tab-body {
-    padding: 0 0.08rem 0.35rem 0;
+    padding: 0;
   }
 }
 </style>

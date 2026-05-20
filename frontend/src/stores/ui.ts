@@ -12,9 +12,10 @@ export const useUiStore = defineStore('ui', {
     visitsTableRefreshTick: 0,
     /** После записи платежа из карточки клиента / сохранения договора — PaymentsView перезагружает реестр. */
     paymentsTableRefreshTick: 0,
-    /** Открыть модалку сканера и выполнить lookup по карте/ключу (с ClientsView и др.). */
+    /** Открыть модалку сканера и выполнить lookup по карте/ключу или по id клиента. */
     scannerLookupTick: 0,
     scannerLookupCode: '',
+    scannerLookupClientId: '',
     /** Префилл номера карты при открытии создания клиента из сканера («не найден»). */
     createClientPrefillCardNumber: '',
     createClientFromScannerTick: 0,
@@ -31,8 +32,15 @@ export const useUiStore = defineStore('ui', {
     setScannerTargetClientId(id: string | null) {
       this.scannerTargetClientId = id
     },
-    requestScannerLookup(code: string) {
-      this.scannerLookupCode = code.trim()
+    requestScannerLookup(payload: string | { code?: string; clientId?: string }) {
+      if (typeof payload === 'string') {
+        this.scannerLookupCode = payload.trim()
+        this.scannerLookupClientId = ''
+      } else {
+        this.scannerLookupCode = payload.code?.trim() ?? ''
+        this.scannerLookupClientId = payload.clientId?.trim() ?? ''
+      }
+      if (!this.scannerLookupCode && !this.scannerLookupClientId) return
       this.scannerLookupTick += 1
     },
     requestCreateClientFromScanner(cardNumber: string) {

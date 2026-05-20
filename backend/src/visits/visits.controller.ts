@@ -16,8 +16,8 @@ export class VisitsController {
 
   @Get('lookup')
   @Roles(Role.ADMIN, Role.MANAGER, Role.RECEPTIONIST, Role.TRAINER)
-  lookup(@Query('code') code?: string) {
-    return this.visitsService.lookup(code ?? '');
+  lookup(@Query('code') code?: string, @Query('clientId') clientId?: string) {
+    return this.visitsService.lookup({ code, clientId });
   }
 
   @Get('current')

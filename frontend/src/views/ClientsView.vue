@@ -1019,21 +1019,8 @@ async function openScannerTargetClient(id: string) {
   }
 }
 
-async function openScannerFromGymChip(row: ClientRow) {
-  let code = (row.cardNumber?.trim() || row.accessKey?.trim()) ?? ''
-  if (!code) {
-    try {
-      const { data } = await api.get<ClientRow>(`/clients/${row.id}`)
-      code = (data.cardNumber?.trim() || data.accessKey?.trim()) ?? ''
-    } catch {
-      // show warning below
-    }
-  }
-  if (!code) {
-    notify({ color: 'warning', message: t('clients.scannerNeedCardOrKey') })
-    return
-  }
-  ui.requestScannerLookup(code)
+function openScannerFromGymChip(row: ClientRow) {
+  ui.requestScannerLookup({ clientId: row.id })
 }
 
 async function createClient() {

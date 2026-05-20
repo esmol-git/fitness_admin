@@ -95,6 +95,27 @@ export class VisitsService {
     }
   }
 
+  private async findClientById(clientId: string) {
+    const id = clientId.trim();
+    if (!id) throw new BadRequestException(this.errors.clientNotFound);
+    const client = await this.prisma.client.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        middleName: true,
+        phone: true,
+        cardNumber: true,
+        accessKey: true,
+        status: true,
+        photoUrl: true,
+      },
+    });
+    if (!client) throw new NotFoundException(this.errors.clientNotFound);
+    return client;
+  }
+
   private async findClientByCode(code: string) {
     const normalized = this.normalizeCode(code);
     if (!normalized) throw new BadRequestException(this.errors.clientNotFound);
@@ -107,6 +128,7 @@ export class VisitsService {
         middleName: true,
         phone: true,
         cardNumber: true,
+        accessKey: true,
         status: true,
         photoUrl: true,
       },
@@ -115,9 +137,17 @@ export class VisitsService {
     return client;
   }
 
-  async lookup(code: string) {
-    await this.markOverdueSessions();
-    const client = await this.findClientByCode(code);
+  private async buildLookupResponse(client: {
+    id: string;
+    firstName: string;
+    lastName: string;
+    middleName: string | null;
+    phone: string;
+    cardNumber: string | null;
+    accessKey: string | null;
+    status: ClientStatus;
+    photoUrl: string | null;
+  }) {
     const clientReadable = await this.withReadablePhotoUrl(client);
     const contractUnpaid = await this.contracts.getPrimaryContractUnpaidSummaryForVisitLookup(client.id);
     const openSession = await this.prisma.visitSession.findFirst({
@@ -134,6 +164,15 @@ export class VisitsService {
       inGym: openSession?.status === VisitSessionStatus.IN_GYM,
       openSession,
     };
+  }
+
+  async lookup(params: { code?: string; clientId?: string }) {
+    const code = params.code?.trim() ?? '';
+    const clientId = params.clientId?.trim() ?? '';
+    if (!code && !clientId) throw new BadRequestException(this.errors.clientNotFound);
+    await this.markOverdueSessions();
+    const client = clientId ? await this.findClientById(clientId) : await this.findClientByCode(code);
+    return this.buildLookupResponse(client);
   }
 
   async checkIn(code: string, lockerNumber: string, actorId: string) {

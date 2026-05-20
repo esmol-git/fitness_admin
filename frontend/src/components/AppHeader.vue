@@ -233,9 +233,53 @@ function prepareAnotherScannerLookup() {
   void nextTick(() => focusScannerInput())
 }
 
-async function onScannerSubmit() {
-  const code = scannerInputValue.value.trim()
-  if (!code) {
+type ScannerLookupPayload = {
+  client: {
+    id: string
+    fullName: string
+    phone: string
+    cardNumber: string | null
+    accessKey?: string | null
+    status: string
+    photoUrl?: string | null
+    contractUnpaid?: { contractNumber: string; balanceDue: string } | null
+  }
+  inGym: boolean
+  openSession?: { lockerNumber: string; status: 'IN_GYM' | 'OVERDUE' | 'LEFT' | 'FORCE_CLOSED' } | null
+}
+
+function scannerCodeFromClient(client: { cardNumber?: string | null; accessKey?: string | null }) {
+  return (client.cardNumber?.trim() || client.accessKey?.trim() || '').trim()
+}
+
+function applyScannerLookupPayload(payload: ScannerLookupPayload) {
+  scannerClientCard.value = payload.client
+  scannerVisitStatus.value = payload.openSession?.status ?? null
+  scannerCurrentLocker.value = payload.openSession?.lockerNumber ?? null
+  scannerLockerNumber.value = (payload.openSession?.lockerNumber ?? '')
+    .replace(/\D/g, '')
+    .slice(0, SCANNER_LOCKER_MAX_LEN)
+  scannerHintTone.value = 'default'
+  if (payload.inGym) {
+    scannerHint.value = t('header.scannerClientInGym')
+  } else if (payload.openSession?.status === 'OVERDUE') {
+    scannerHintTone.value = 'callout'
+    scannerHint.value = t('header.scannerOverdueCloseFirstHint')
+  } else if (payload.client.status === 'BLOCKED') {
+    scannerHint.value = t('header.scannerClientBlockedHint')
+  } else if (payload.client.status !== 'ACTIVE') {
+    scannerHint.value = t('header.scannerInactiveLookupHint')
+  } else {
+    scannerHint.value = null
+    scannerHintTone.value = 'default'
+  }
+  return !payload.openSession && payload.client.status === 'ACTIVE'
+}
+
+async function runScannerLookup(params: { code?: string; clientId?: string }) {
+  const code = params.code?.trim() ?? ''
+  const clientId = params.clientId?.trim() ?? ''
+  if (!code && !clientId) {
     scannerHintTone.value = 'callout'
     scannerHint.value = t('header.scannerEmpty')
     return
@@ -245,41 +289,14 @@ async function onScannerSubmit() {
   scannerHint.value = t('header.scannerSearching')
   let focusLockerAfterLookup = false
   try {
-    const { data } = await api.get('/visits/lookup', { params: { code } })
-    const payload = data as {
-      client: {
-        id: string
-        fullName: string
-        phone: string
-        cardNumber: string | null
-        status: string
-        photoUrl?: string | null
-        contractUnpaid?: { contractNumber: string; balanceDue: string } | null
-      }
-      inGym: boolean
-      openSession?: { lockerNumber: string; status: 'IN_GYM' | 'OVERDUE' | 'LEFT' | 'FORCE_CLOSED' } | null
+    const { data } = await api.get<ScannerLookupPayload>('/visits/lookup', {
+      params: clientId ? { clientId } : { code },
+    })
+    const lookupCode = clientId ? scannerCodeFromClient(data.client) : code
+    if (lookupCode) {
+      scannerInputValue.value = lookupCode
     }
-    scannerClientCard.value = payload.client
-    scannerVisitStatus.value = payload.openSession?.status ?? null
-    scannerCurrentLocker.value = payload.openSession?.lockerNumber ?? null
-    scannerLockerNumber.value = (payload.openSession?.lockerNumber ?? '')
-      .replace(/\D/g, '')
-      .slice(0, SCANNER_LOCKER_MAX_LEN)
-    scannerHintTone.value = 'default'
-    if (payload.inGym) {
-      scannerHint.value = t('header.scannerClientInGym')
-    } else if (payload.openSession?.status === 'OVERDUE') {
-      scannerHintTone.value = 'callout'
-      scannerHint.value = t('header.scannerOverdueCloseFirstHint')
-    } else if (payload.client.status === 'BLOCKED') {
-      scannerHint.value = t('header.scannerClientBlockedHint')
-    } else if (payload.client.status !== 'ACTIVE') {
-      scannerHint.value = t('header.scannerInactiveLookupHint')
-    } else {
-      scannerHint.value = null
-      scannerHintTone.value = 'default'
-    }
-    focusLockerAfterLookup = !payload.openSession && payload.client.status === 'ACTIVE'
+    focusLockerAfterLookup = applyScannerLookupPayload(data)
   } catch (error: unknown) {
     clearScannerResolvedState()
     scannerHintTone.value = isLookupNotFoundError(error) ? 'notFound' : 'error'
@@ -300,6 +317,16 @@ async function onScannerSubmit() {
       focusScannerLockerInput()
     })
   }
+}
+
+async function onScannerSubmit() {
+  const code = scannerInputValue.value.trim()
+  if (!code) {
+    scannerHintTone.value = 'callout'
+    scannerHint.value = t('header.scannerEmpty')
+    return
+  }
+  await runScannerLookup({ code })
 }
 
 async function scannerCheckIn() {
@@ -423,15 +450,20 @@ watch(
   () => ui.scannerLookupTick,
   async () => {
     const code = ui.scannerLookupCode.trim()
-    if (!code) return
+    const clientId = ui.scannerLookupClientId.trim()
+    if (!code && !clientId) return
     clearScannerResolvedState()
     scannerHint.value = null
     scannerHintTone.value = 'default'
-    scannerInputValue.value = code
     scannerOpen.value = true
     await nextTick()
+    if (clientId) {
+      await runScannerLookup({ clientId })
+      return
+    }
+    scannerInputValue.value = code
     focusScannerInput()
-    await onScannerSubmit()
+    await runScannerLookup({ code })
   },
 )
 

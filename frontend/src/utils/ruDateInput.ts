@@ -99,6 +99,48 @@ export function hasDateFormatError(text: string): boolean {
  * Календарная дата `YYYY-MM-DD` + **текущие** часы/минуты/секунды (момент отправки формы) в локальном
  * часовом поясе браузера → ISO UTC. Так в реестре видно реальное время оплаты, а не 00:00 или 03:00.
  */
+/** Civil YYYY-MM-DD from stored @db.Date / ISO (UTC calendar, no local TZ shift). */
+export function isoYmdFromUtcDateValue(value: Date): string {
+  const y = value.getUTCFullYear()
+  const m = String(value.getUTCMonth() + 1).padStart(2, '0')
+  const d = String(value.getUTCDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
+export function isoYmdFromDateField(value: string | Date | null | undefined): string | null {
+  if (value == null || value === '') return null
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return isoYmdFromUtcDateValue(value)
+  const s = String(value).trim().slice(0, 10)
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null
+}
+
+function utcMsFromIsoYmd(isoYmd: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoYmd.trim().slice(0, 10))
+  if (!m) return null
+  return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+}
+
+export function diffDaysInclusiveUtcYmd(startIso: string, endIso: string): number | null {
+  const start = utcMsFromIsoYmd(startIso)
+  const end = utcMsFromIsoYmd(endIso)
+  if (start == null || end == null || end < start) return null
+  return Math.floor((end - start) / 86400000) + 1
+}
+
+/** Add whole days on the UTC civil calendar (same as backend addUtcCalendarDays). */
+export function addUtcCalendarDaysIsoYmd(isoYmd: string, daysToAdd: number): string {
+  const start = utcMsFromIsoYmd(isoYmd)
+  if (start == null) return ''
+  const out = new Date(start)
+  out.setUTCDate(out.getUTCDate() + daysToAdd)
+  return isoYmdFromUtcDateValue(out)
+}
+
+export function addUtcCalendarDaysInclusiveEndIsoYmd(startIso: string, inclusiveDayCount: number): string {
+  if (inclusiveDayCount < 1) return startIso.trim().slice(0, 10)
+  return addUtcCalendarDaysIsoYmd(startIso, inclusiveDayCount - 1)
+}
+
 export function isoCalendarDateAtNowLocalTimeToUtcIso(isoYmd: string): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoYmd.trim())
   const now = new Date()

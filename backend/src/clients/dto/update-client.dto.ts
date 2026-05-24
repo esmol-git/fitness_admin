@@ -5,6 +5,7 @@ import {
   IsEnum,
   IsOptional,
   IsString,
+  Matches,
   MaxLength,
   MinLength,
 } from 'class-validator';
@@ -103,6 +104,12 @@ export class UpdateClientDto {
   @IsString()
   @MaxLength(80)
   cardNumber?: string | null;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(4)
+  @Matches(/^\d{0,4}$/, { message: 'Locker number must be 1 to 4 digits' })
+  lockerNumber?: string | null;
 
   @IsOptional()
   @IsString()

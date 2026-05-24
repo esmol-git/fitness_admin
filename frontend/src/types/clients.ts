@@ -30,6 +30,7 @@ export interface ClientRow {
   address: string | null
   notes: string | null
   cardNumber: string | null
+  lockerNumber: string | null
   accessKey: string | null
   photoUrl: string | null
   inGym?: boolean
@@ -59,5 +60,6 @@ export interface ClientForm {
   paymentDate: string
   membershipType: string
   cardNumber: string
+  lockerNumber: string
   photoUrl: string
 }

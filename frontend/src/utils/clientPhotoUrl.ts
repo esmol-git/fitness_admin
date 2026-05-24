@@ -9,3 +9,12 @@ export function clientPhotoDisplayUrl(raw: string | null | undefined): string {
   if (/^https?:\/\//i.test(u)) return u
   return ''
 }
+
+/** Значение для POST/PATCH: только http(s) public/presigned URL, не data: и не blob:. */
+export function clientPhotoUrlForApiPayload(raw: string | null | undefined): string | undefined {
+  const u = typeof raw === 'string' ? raw.trim() : ''
+  if (!u) return undefined
+  if (/^data:/i.test(u) || /^blob:/i.test(u)) return undefined
+  if (/^https?:\/\//i.test(u)) return u
+  return undefined
+}

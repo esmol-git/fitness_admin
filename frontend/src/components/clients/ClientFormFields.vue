@@ -4,10 +4,11 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, t
 import { useI18n } from 'vue-i18n'
 import { useToast } from 'vuestic-ui'
 import { TableActionIcon } from '@/config/tableActionIcons'
-import { DEFAULT_TABLE_PAGE_LIMIT } from '@/config/tablePagination'
+import { DEFAULT_TABLE_PAGE_LIMIT, TABLE_PAGER_MIN_TOTAL_ITEMS } from '@/config/tablePagination'
 import type { ClientForm, ClientStatus } from '@/types/clients'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
 import ConfirmModal from '@/components/ui/ConfirmModal.vue'
+import AppDateRangeFilter from '@/components/ui/AppDateRangeFilter.vue'
 import AppEmptyState from '@/components/ui/AppEmptyState.vue'
 import AppTablePagerRow from '@/components/ui/AppTablePagerRow.vue'
 import { resolveApiErrorMessage } from '@/composables/useApiErrorMap'
@@ -25,7 +26,13 @@ import {
   toRuDateText,
 } from '@/utils/ruDateInput'
 import { clientPhotoDisplayUrl } from '@/utils/clientPhotoUrl'
+import { formatMoneyAmount } from '@/utils/formatMoneyAmount'
 import { meaningfulAlertText } from '@/utils/meaningfulAlertText'
+import {
+  LOCKER_NUMBER_MAX_LEN,
+  onLockerDigitKeydown,
+  sanitizeLockerDigits,
+} from '@/utils/lockerNumber'
 import type { ClientEditTab } from '@/composables/useClientsListUrlSync'
 
 const props = defineProps<{
@@ -34,9 +41,10 @@ const props = defineProps<{
   isCreateMode?: boolean
   statusOptions: Array<{ value: ClientStatus; text: string }>
   membershipOptions: Array<{ value: string; text: string }>
-  currentManagerName: string
   cardNumberChecking?: boolean
   cardNumberTaken?: boolean
+  lockerNumberChecking?: boolean
+  lockerNumberTaken?: boolean
   contractHistory?: Array<{
     id: string
     contractNumber: string
@@ -149,6 +157,22 @@ const addressSuggestOpen = ref(false)
 let addressSuggestTimer: ReturnType<typeof setTimeout> | null = null
 let addressSuggestBlurTimer: ReturnType<typeof setTimeout> | null = null
 
+const canAssignLocker = computed(
+  () => props.modelValue.status === 'ACTIVE' || props.modelValue.status === 'PAUSED',
+)
+
+function onLockerNativeInput(event: Event) {
+  const el = event.target as HTMLInputElement
+  const next = sanitizeLockerDigits(el.value)
+  if (el.value !== next) el.value = next
+  patch('lockerNumber', next)
+}
+
+function onLockerPaste(event: ClipboardEvent) {
+  event.preventDefault()
+  patch('lockerNumber', sanitizeLockerDigits(event.clipboardData?.getData('text') ?? ''))
+}
+
 function patch<K extends keyof ClientForm>(key: K, value: ClientForm[K]) {
   emit('update:modelValue', { ...props.modelValue, [key]: value })
 }
@@ -252,6 +276,16 @@ const showCardNumberError = computed(
     (props.attempted || touched.value.cardNumber) &&
     (cardNumberInvalid.value || Boolean(props.cardNumberTaken)),
 )
+
+const lockerTouched = ref(false)
+
+const showLockerNumberError = computed(
+  () =>
+    (props.attempted || lockerTouched.value) &&
+    Boolean(props.lockerNumberTaken) &&
+    canAssignLocker.value &&
+    Boolean(props.modelValue.lockerNumber.trim()),
+)
 const GENDER_UNSET_VALUE = '__UNSPECIFIED__'
 
 function contractStatusTone(status?: string): 'success' | 'warning' | 'danger' | 'info' | 'neutral' {
@@ -282,21 +316,52 @@ function paymentHistoryStatusTone(status?: string): 'success' | 'warning' | 'dan
   return 'neutral'
 }
 
+const PAYABLE_CONTRACT_STATUSES = new Set(['ACTIVE', 'PAUSED', 'SAVED', 'EXPIRED'])
+
+function contractHasOutstandingBalance(c: {
+  status?: string
+  fullyPaid?: boolean
+  balanceDue?: string | null
+}): boolean {
+  const st = (c.status || '').trim().toUpperCase()
+  if (st === 'CANCELLED' || !PAYABLE_CONTRACT_STATUSES.has(st)) return false
+  if (c.fullyPaid === true) return false
+  const bal = Number(String(c.balanceDue ?? '0').replace(',', '.'))
+  return Number.isFinite(bal) && bal > 0.001
+}
+
+function payableContractSortRank(status?: string): number {
+  const st = (status || '').trim().toUpperCase()
+  if (st === 'ACTIVE') return 0
+  if (st === 'PAUSED') return 1
+  if (st === 'SAVED') return 2
+  if (st === 'EXPIRED') return 3
+  return 4
+}
+
 const contractsWithOutstandingBalance = computed(() => {
   const list = props.contractHistory ?? []
-  return list.filter((c) => {
-    if (c.status !== 'ACTIVE' && c.status !== 'PAUSED') return false
-    if (c.fullyPaid === true) return false
-    const bal = Number(String(c.balanceDue ?? '0').replace(',', '.'))
-    return Number.isFinite(bal) && bal > 0.001
-  })
+  return list
+    .filter(contractHasOutstandingBalance)
+    .sort((a, b) => {
+      const rankDiff = payableContractSortRank(a.status) - payableContractSortRank(b.status)
+      if (rankDiff !== 0) return rankDiff
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    })
 })
 
 const addPaymentContractOptions = computed(() =>
-  contractsWithOutstandingBalance.value.map((c) => ({
-    value: c.id,
-    text: `${c.contractNumber || '—'} · ${Number(String(c.balanceDue).replace(',', '.')).toFixed(2)}`,
-  })),
+  contractsWithOutstandingBalance.value.map((c) => {
+    const balance = formatMoneyAmount(c.balanceDue)
+    const statusSuffix =
+      c.status && c.status !== 'ACTIVE'
+        ? ` · ${contractHistoryStatusLabel(c.status)}`
+        : ''
+    return {
+      value: c.id,
+      text: `${c.contractNumber || '—'} · ${balance}${statusSuffix}`,
+    }
+  }),
 )
 
 const addPaymentContractId = ref('')
@@ -331,10 +396,7 @@ function contractShowsUnderpaidNote(item: {
   fullyPaid?: boolean
   balanceDue?: string | null
 }): boolean {
-  if (item.status !== 'ACTIVE' && item.status !== 'PAUSED') return false
-  if (item.fullyPaid === true) return false
-  const bal = Number(String(item.balanceDue ?? '0').replace(',', '.'))
-  return Number.isFinite(bal) && bal > 0.001
+  return contractHasOutstandingBalance(item)
 }
 
 function submitAddContractPayment() {
@@ -717,24 +779,14 @@ const contractsHasActiveFilters = computed(
     Boolean(contractsFilters.contractSearch.trim()),
 )
 
-const paymentsDateRangeModel = computed(() => {
-  const from = paymentsFilters.from.trim()
-  const to = paymentsFilters.to.trim()
-  if (!from && !to) return undefined
-  return {
-    start: from ? parseVisitDateIso(from) ?? undefined : undefined,
-    end: to ? parseVisitDateIso(to) ?? undefined : undefined,
-  }
+const visitsFromModel = computed({
+  get: () => props.visitsFrom ?? '',
+  set: (value: string) => emit('update:visitsFrom', value),
 })
 
-const contractsDateRangeModel = computed(() => {
-  const from = contractsFilters.from.trim()
-  const to = contractsFilters.to.trim()
-  if (!from && !to) return undefined
-  return {
-    start: from ? parseVisitDateIso(from) ?? undefined : undefined,
-    end: to ? parseVisitDateIso(to) ?? undefined : undefined,
-  }
+const visitsToModel = computed({
+  get: () => props.visitsTo ?? '',
+  set: (value: string) => emit('update:visitsTo', value),
 })
 
 const paymentsHistoryTableColumns = computed(() => [
@@ -873,48 +925,12 @@ const pagedContractsHistory = computed(() => {
   return sortedContractsHistory.value.slice(start, start + contractsLimit.value)
 })
 
-function onPaymentsDateRangeChange(value: unknown) {
-  if (value == null || value === '' || value === false) {
-    paymentsFilters.from = ''
-    paymentsFilters.to = ''
-    paymentsPage.value = 1
-    return
-  }
-  if (Array.isArray(value)) {
-    const [a, b] = value
-    paymentsFilters.from = a != null && a !== '' ? visitToIsoDate(a) : ''
-    paymentsFilters.to = b != null && b !== '' ? visitToIsoDate(b) : ''
-    paymentsPage.value = 1
-    return
-  }
-  if (typeof value === 'object' && value !== null && ('start' in value || 'end' in value)) {
-    const r = value as { start?: Date | string | null; end?: Date | string | null }
-    paymentsFilters.from = r.start != null && r.start !== '' ? visitToIsoDate(r.start) : ''
-    paymentsFilters.to = r.end != null && r.end !== '' ? visitToIsoDate(r.end) : ''
-    paymentsPage.value = 1
-  }
+function onClientTabDateFilterChange() {
+  paymentsPage.value = 1
 }
 
-function onContractsDateRangeChange(value: unknown) {
-  if (value == null || value === '' || value === false) {
-    contractsFilters.from = ''
-    contractsFilters.to = ''
-    contractsPage.value = 1
-    return
-  }
-  if (Array.isArray(value)) {
-    const [a, b] = value
-    contractsFilters.from = a != null && a !== '' ? visitToIsoDate(a) : ''
-    contractsFilters.to = b != null && b !== '' ? visitToIsoDate(b) : ''
-    contractsPage.value = 1
-    return
-  }
-  if (typeof value === 'object' && value !== null && ('start' in value || 'end' in value)) {
-    const r = value as { start?: Date | string | null; end?: Date | string | null }
-    contractsFilters.from = r.start != null && r.start !== '' ? visitToIsoDate(r.start) : ''
-    contractsFilters.to = r.end != null && r.end !== '' ? visitToIsoDate(r.end) : ''
-    contractsPage.value = 1
-  }
+function onClientContractsDateFilterChange() {
+  contractsPage.value = 1
 }
 
 function resetPaymentsTabFilters() {
@@ -1010,44 +1026,8 @@ watch(
   },
 )
 
-function parseVisitDateIso(value: string) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null
-  const [yy, mm, dd] = value.split('-').map((v) => Number(v))
-  if (!yy || !mm || !dd) return null
-  return new Date(yy, mm - 1, dd)
-}
-
-const visitsDateRangeModel = computed(() => {
-  const from = props.visitsFrom?.trim() ?? ''
-  const to = props.visitsTo?.trim() ?? ''
-  if (!from && !to) return undefined
-  return {
-    start: from ? parseVisitDateIso(from) ?? undefined : undefined,
-    end: to ? parseVisitDateIso(to) ?? undefined : undefined,
-  }
-})
-
 function visitToIsoDate(value: unknown): string {
   return pickerValueToIsoYmd(value)
-}
-
-function onVisitsDateRangeChange(value: unknown) {
-  if (value == null || value === '' || value === false) {
-    emit('update:visitsFrom', '')
-    emit('update:visitsTo', '')
-    return
-  }
-  if (Array.isArray(value)) {
-    const [a, b] = value
-    emit('update:visitsFrom', a != null && a !== '' ? visitToIsoDate(a) : '')
-    emit('update:visitsTo', b != null && b !== '' ? visitToIsoDate(b) : '')
-    return
-  }
-  if (typeof value === 'object' && value !== null && ('start' in value || 'end' in value)) {
-    const r = value as { start?: Date | string | null; end?: Date | string | null }
-    emit('update:visitsFrom', r.start != null && r.start !== '' ? visitToIsoDate(r.start) : '')
-    emit('update:visitsTo', r.end != null && r.end !== '' ? visitToIsoDate(r.end) : '')
-  }
 }
 
 function formatVisitDateTime(value: string | null | undefined) {
@@ -1162,7 +1142,8 @@ const contractHistoryRowMenuLayerStyle = computed(() => {
   const base: Record<string, string> = {
     position: 'fixed',
     right: `${winW - r.right}px`,
-    zIndex: '4000',
+    /** Выше оверлея VaModal, иначе клик уходит в модалку и меню закрывается до действия */
+    zIndex: '15000',
     maxHeight: `${maxH}px`,
     overflowY: 'auto',
     overflowX: 'hidden',
@@ -1260,8 +1241,7 @@ const contractSummaryEndDate = computed(() =>
 const currentContractBalanceDue = computed(() => {
   const item = currentContract.value
   if (!item || !contractShowsUnderpaidNote(item)) return ''
-  const bal = Number(String(item.balanceDue ?? '0').replace(',', '.'))
-  return Number.isFinite(bal) ? bal.toFixed(2) : ''
+  return formatMoneyAmount(item.balanceDue)
 })
 
 async function copyToClipboard(text: string) {
@@ -1643,6 +1623,7 @@ function onDocumentPointerDown(event: PointerEvent) {
   if (paymentPickerOpen.value && paymentFieldWrapRef.value && !paymentFieldWrapRef.value.contains(target)) {
     paymentPickerOpen.value = false
   }
+  if (!contractHistoryRowMenuOpenId.value) return
   const clicked = event.target
   if (!(clicked instanceof Element)) return
   if (clicked.closest('.contract-history-row-menu-layer')) return
@@ -1724,6 +1705,10 @@ function focusFirstInvalid() {
           Boolean(props.cardNumberTaken)),
       selector: '.card-number-readonly input',
     },
+    {
+      invalid: showLockerNumberError.value,
+      selector: '.client-locker-field__input',
+    },
     { invalid: Boolean(dateErrors.value.birthDate), selector: '[data-client-field="birthDate"] input' },
     { invalid: showEmailError.value, selector: '[data-client-field="email"] input' },
     { invalid: Boolean(dateErrors.value.contractStartDate), selector: '[data-client-field="contractStartDate"] input' },
@@ -1748,7 +1733,7 @@ defineExpose({
 })
 
 onBeforeUnmount(() => {
-  document.removeEventListener('pointerdown', onDocumentPointerDown, true)
+  document.removeEventListener('pointerdown', onDocumentPointerDown)
   if (addressSuggestTimer) clearTimeout(addressSuggestTimer)
   if (addressSuggestBlurTimer) clearTimeout(addressSuggestBlurTimer)
   if (tabSelectMq && tabSelectListener) tabSelectMq.removeEventListener('change', tabSelectListener)
@@ -1767,7 +1752,7 @@ onMounted(async () => {
     mobileTabSelect.value = e.matches
   }
   tabSelectMq.addEventListener('change', tabSelectListener)
-  document.addEventListener('pointerdown', onDocumentPointerDown, true)
+  document.addEventListener('pointerdown', onDocumentPointerDown)
   await nextTick()
   birthTextValue.value = toRuDateText(props.modelValue.birthDate)
   contractStartTextValue.value = toRuDateText(props.modelValue.contractStartDate)
@@ -2100,10 +2085,15 @@ watch(paymentTextValue, (value) => {
 
       <div class="control-grid general-bottom">
         <VaInput
-          :model-value="currentManagerName"
-          :label="$t('clients.manager')"
-          readonly
-          disabled
+          data-client-field="email"
+          :model-value="modelValue.email"
+          :label="$t('clients.email')"
+          type="email"
+          :immediate-validation="attempted"
+          :error="showEmailError"
+          :error-messages="showEmailError ? [$t('clients.invalidEmail')] : []"
+          @update:model-value="patch('email', $event)"
+          @blur="markTouched('email')"
         />
         <VaInput
           ref="passportFieldRef"
@@ -2117,7 +2107,7 @@ watch(paymentTextValue, (value) => {
           @update:model-value="patch('passportIssuedBy', $event)"
         />
         <VaDateInput
-          :model-value="modelValue.passportIssuedAt || undefined"
+          :model-value="toDateValue(modelValue.passportIssuedAt)"
           :label="$t('clients.passportIssuedAt')"
           clearable
           @update:model-value="patch('passportIssuedAt', visitToIsoDate($event))"
@@ -2174,17 +2164,37 @@ watch(paymentTextValue, (value) => {
             </div>
           </template>
         </VaInput>
-        <VaInput
-          data-client-field="email"
-          :model-value="modelValue.email"
-          :label="$t('clients.email')"
-          type="email"
-          :immediate-validation="attempted"
-          :error="showEmailError"
-          :error-messages="showEmailError ? [$t('clients.invalidEmail')] : []"
-          @update:model-value="patch('email', $event)"
-          @blur="markTouched('email')"
-        />
+        <label
+          v-if="photoUploadClientId"
+          class="client-locker-field"
+          :class="{ 'client-locker-field--error': showLockerNumberError }"
+          data-client-field="lockerNumber"
+        >
+          <span class="client-locker-field__label label-with-tip">
+            <span>{{ $t('clients.lockerNumber') }}</span>
+            <VaPopover :message="$t('clients.lockerNumberHint')">
+              <VaIcon name="info_outline" size="14px" color="secondary" />
+            </VaPopover>
+          </span>
+          <input
+            :value="modelValue.lockerNumber"
+            class="client-locker-field__input"
+            type="text"
+            inputmode="numeric"
+            :maxlength="LOCKER_NUMBER_MAX_LEN"
+            autocomplete="off"
+            :disabled="!canAssignLocker"
+            :placeholder="canAssignLocker ? '' : '—'"
+            :aria-invalid="showLockerNumberError ? 'true' : undefined"
+            @input="onLockerNativeInput"
+            @keydown="onLockerDigitKeydown"
+            @paste="onLockerPaste"
+            @blur="lockerTouched = true"
+          />
+          <span v-if="showLockerNumberError" class="client-locker-field__error" role="alert">
+            {{ $t('clients.lockerNumberTaken') }}
+          </span>
+        </label>
         <div class="control-grid__full address-autocomplete">
           <VaInput
             :model-value="modelValue.address"
@@ -2307,7 +2317,13 @@ watch(paymentTextValue, (value) => {
     </div>
 
     <div v-else-if="!isCreateMode && activeTab === 'payments'" class="history-tab payments-tab">
-      <div v-if="contractsWithOutstandingBalance.length" class="add-contract-payment-panel">
+      <p
+        v-if="!contractsWithOutstandingBalance.length"
+        class="add-contract-payment-panel__empty-hint"
+      >
+        {{ $t('clients.addContractPaymentNoContracts') }}
+      </p>
+      <div v-else class="add-contract-payment-panel">
         <header class="add-contract-payment-panel__header">
           <div class="add-contract-payment-panel__icon" aria-hidden="true">
             <VaIcon name="payments" size="20px" />
@@ -2331,10 +2347,10 @@ watch(paymentTextValue, (value) => {
             class="add-contract-payment-panel__field add-contract-payment-panel__field--amount"
           />
           <VaDateInput
-            :model-value="addPaymentPaidAt || undefined"
+            :model-value="toDateValue(addPaymentPaidAt)"
             :label="$t('clients.addContractPaymentDate')"
             class="add-contract-payment-panel__field add-contract-payment-panel__field--date"
-            @update:model-value="(v) => (addPaymentPaidAt = formatIsoDate(v))"
+            @update:model-value="(v) => (addPaymentPaidAt = visitToIsoDate(v))"
           />
         </div>
 
@@ -2375,42 +2391,46 @@ watch(paymentTextValue, (value) => {
         </footer>
       </div>
       <div class="client-tab-filters">
-        <VaSelect
-          :model-value="paymentsFilters.status === '' ? PAYMENT_STATUS_ALL : paymentsFilters.status"
-          :label="$t('payments.filterStatus')"
-          :options="paymentsStatusFilterOptions"
-          text-by="text"
-          value-by="value"
-          class="client-tab-filters__select"
-          @update:model-value="(v) => (paymentsFilters.status = v === PAYMENT_STATUS_ALL || v === '' ? '' : (v as typeof paymentsFilters.status))"
-        />
-        <VaSelect
-          :model-value="paymentsFilters.channel === '' ? PAYMENT_CHANNEL_ALL : paymentsFilters.channel"
-          :label="$t('payments.columnChannel')"
-          :options="paymentsChannelFilterOptions"
-          text-by="text"
-          value-by="value"
-          class="client-tab-filters__select"
-          @update:model-value="(v) => (paymentsFilters.channel = v === PAYMENT_CHANNEL_ALL || v === '' ? '' : (v as typeof paymentsFilters.channel))"
-        />
-        <VaDateInput
-          mode="range"
-          :model-value="paymentsDateRangeModel"
-          :label="$t('payments.filterDateRange')"
-          :placeholder="$t('payments.filterDateRangePlaceholder')"
-          clearable
-          class="client-tab-filters__range"
-          @update:model-value="onPaymentsDateRangeChange"
-        />
-        <VaButton
-          size="small"
-          preset="secondary"
-          icon="close"
-          :disabled="!paymentsHasActiveFilters"
-          @click="resetPaymentsTabFilters"
-        >
-          {{ $t('contracts.resetFilters') }}
-        </VaButton>
+        <div class="client-tab-filters__row">
+          <VaSelect
+            :model-value="paymentsFilters.status === '' ? PAYMENT_STATUS_ALL : paymentsFilters.status"
+            :label="$t('payments.filterStatus')"
+            :options="paymentsStatusFilterOptions"
+            text-by="text"
+            value-by="value"
+            class="client-tab-filters__select"
+            @update:model-value="(v) => (paymentsFilters.status = v === PAYMENT_STATUS_ALL || v === '' ? '' : (v as typeof paymentsFilters.status))"
+          />
+          <VaSelect
+            :model-value="paymentsFilters.channel === '' ? PAYMENT_CHANNEL_ALL : paymentsFilters.channel"
+            :label="$t('payments.columnChannel')"
+            :options="paymentsChannelFilterOptions"
+            text-by="text"
+            value-by="value"
+            class="client-tab-filters__select"
+            @update:model-value="(v) => (paymentsFilters.channel = v === PAYMENT_CHANNEL_ALL || v === '' ? '' : (v as typeof paymentsFilters.channel))"
+          />
+          <AppDateRangeFilter
+            v-model:from="paymentsFilters.from"
+            v-model:to="paymentsFilters.to"
+            :label="$t('payments.filterDateRange')"
+            :range-placeholder="$t('payments.filterDateRangePlaceholder')"
+            input-class="app-date-range-filter__input client-tab-filters__range"
+            @change="onClientTabDateFilterChange"
+            @cleared="onClientTabDateFilterChange"
+          />
+        </div>
+        <div class="client-tab-filters__actions">
+          <VaButton
+            size="small"
+            preset="secondary"
+            icon="close"
+            :disabled="!paymentsHasActiveFilters"
+            @click="resetPaymentsTabFilters"
+          >
+            {{ $t('contracts.resetFilters') }}
+          </VaButton>
+        </div>
       </div>
       <div v-if="paymentsLoading" class="client-tab-state client-tab-state--loading" role="status" aria-live="polite">
         <VaIcon name="sync" size="32px" class="client-tab-state__spinner" aria-hidden="true" />
@@ -2446,7 +2466,7 @@ watch(paymentTextValue, (value) => {
                 {{ formatVisitDateTime(rowData.paidAt) }}
               </template>
               <template #cell(amount)="{ rowData }">
-                <span class="client-history-table__amount">{{ Number(rowData.amount).toFixed(2) }}</span>
+                <span class="client-history-table__amount">{{ formatMoneyAmount(rowData.amount) }}</span>
               </template>
               <template #cell(status)="{ rowData }">
                 <StatusBadge
@@ -2466,7 +2486,10 @@ watch(paymentTextValue, (value) => {
               </template>
             </VaDataTable>
           </div>
-          <div v-if="filteredPaymentsHistory.length > 0" class="client-tab-table-footer">
+          <div
+            v-if="filteredPaymentsHistory.length > TABLE_PAGER_MIN_TOTAL_ITEMS"
+            class="client-tab-table-footer"
+          >
             <AppTablePagerRow
               v-model:page="paymentsPage"
               v-model:limit="paymentsLimit"
@@ -2480,24 +2503,26 @@ watch(paymentTextValue, (value) => {
 
     <div v-else-if="!isCreateMode && activeTab === 'visits'" class="history-tab visits-tab">
       <div class="visits-tab-filters">
-        <VaDateInput
-          mode="range"
-          :model-value="visitsDateRangeModel"
-          :label="$t('visits.filterDateRange')"
-          :placeholder="$t('visits.dateRangePlaceholder')"
-          clearable
-          class="visits-tab-filters__range"
-          @update:model-value="onVisitsDateRangeChange"
-        />
-        <VaButton
-          size="small"
-          preset="secondary"
-          icon="close"
-          :disabled="!visitsHasActiveDateFilters"
-          @click="emit('visits-reset-filters')"
-        >
-          {{ $t('clients.visitsResetFilters') }}
-        </VaButton>
+        <div class="client-tab-filters__row">
+          <AppDateRangeFilter
+            v-model:from="visitsFromModel"
+            v-model:to="visitsToModel"
+            :label="$t('visits.filterDateRange')"
+            :range-placeholder="$t('visits.dateRangePlaceholder')"
+            input-class="app-date-range-filter__input visits-tab-filters__range"
+          />
+        </div>
+        <div class="client-tab-filters__actions">
+          <VaButton
+            size="small"
+            preset="secondary"
+            icon="close"
+            :disabled="!visitsHasActiveDateFilters"
+            @click="emit('visits-reset-filters')"
+          >
+            {{ $t('clients.visitsResetFilters') }}
+          </VaButton>
+        </div>
       </div>
       <div v-if="visitsLoading" class="client-tab-state client-tab-state--loading" role="status" aria-live="polite">
         <VaIcon name="sync" size="32px" class="client-tab-state__spinner" aria-hidden="true" />
@@ -2554,7 +2579,10 @@ watch(paymentTextValue, (value) => {
             </template>
           </VaDataTable>
         </div>
-        <div v-if="(props.visitsTotal ?? 0) > 0" class="client-tab-table-footer">
+        <div
+          v-if="(props.visitsTotal ?? 0) > TABLE_PAGER_MIN_TOTAL_ITEMS"
+          class="client-tab-table-footer"
+        >
           <AppTablePagerRow
             v-model:page="visitsPageModel"
             v-model:limit="visitsLimitModel"
@@ -2567,40 +2595,44 @@ watch(paymentTextValue, (value) => {
 
     <div v-else-if="!isCreateMode && activeTab === 'history'" class="history-tab contracts-tab">
       <div class="client-tab-filters">
-        <VaInput
-          v-model="contractsFilters.contractSearch"
-          :label="$t('payments.columnContract')"
-          :placeholder="$t('clients.contractHistorySearchPlaceholder')"
-          clearable
-          class="client-tab-filters__search"
-        />
-        <VaSelect
-          :model-value="contractsFilters.status === '' ? CONTRACT_STATUS_ALL : contractsFilters.status"
-          :label="$t('clients.statusLabel')"
-          :options="contractsStatusFilterOptions"
-          text-by="text"
-          value-by="value"
-          class="client-tab-filters__select"
-          @update:model-value="(v) => (contractsFilters.status = v === CONTRACT_STATUS_ALL || v === '' ? '' : (v as typeof contractsFilters.status))"
-        />
-        <VaDateInput
-          mode="range"
-          :model-value="contractsDateRangeModel"
-          :label="$t('contracts.filterDateRange')"
-          :placeholder="$t('payments.filterDateRangePlaceholder')"
-          clearable
-          class="client-tab-filters__range"
-          @update:model-value="onContractsDateRangeChange"
-        />
-        <VaButton
-          size="small"
-          preset="secondary"
-          icon="close"
-          :disabled="!contractsHasActiveFilters"
-          @click="resetContractsTabFilters"
-        >
-          {{ $t('contracts.resetFilters') }}
-        </VaButton>
+        <div class="client-tab-filters__row">
+          <VaInput
+            v-model="contractsFilters.contractSearch"
+            :label="$t('payments.columnContract')"
+            :placeholder="$t('clients.contractHistorySearchPlaceholder')"
+            clearable
+            class="client-tab-filters__search"
+          />
+          <VaSelect
+            :model-value="contractsFilters.status === '' ? CONTRACT_STATUS_ALL : contractsFilters.status"
+            :label="$t('clients.statusLabel')"
+            :options="contractsStatusFilterOptions"
+            text-by="text"
+            value-by="value"
+            class="client-tab-filters__select"
+            @update:model-value="(v) => (contractsFilters.status = v === CONTRACT_STATUS_ALL || v === '' ? '' : (v as typeof contractsFilters.status))"
+          />
+          <AppDateRangeFilter
+            v-model:from="contractsFilters.from"
+            v-model:to="contractsFilters.to"
+            :label="$t('contracts.filterDateRange')"
+            :range-placeholder="$t('payments.filterDateRangePlaceholder')"
+            input-class="app-date-range-filter__input client-tab-filters__range"
+            @change="onClientContractsDateFilterChange"
+            @cleared="onClientContractsDateFilterChange"
+          />
+        </div>
+        <div class="client-tab-filters__actions">
+          <VaButton
+            size="small"
+            preset="secondary"
+            icon="close"
+            :disabled="!contractsHasActiveFilters"
+            @click="resetContractsTabFilters"
+          >
+            {{ $t('contracts.resetFilters') }}
+          </VaButton>
+        </div>
       </div>
       <div
         v-if="contractHistoryLoading"
@@ -2678,9 +2710,7 @@ watch(paymentTextValue, (value) => {
                   v-if="contractShowsUnderpaidNote(rowData)"
                   class="client-history-table__balance-due"
                 >
-                  {{
-                    Number(String(rowData.balanceDue).replace(',', '.')).toFixed(2)
-                  }}
+                  {{ formatMoneyAmount(rowData.balanceDue) }}
                 </span>
                 <span v-else class="client-history-table__balance-ok">—</span>
               </template>
@@ -2699,7 +2729,10 @@ watch(paymentTextValue, (value) => {
               </template>
             </VaDataTable>
           </div>
-          <div v-if="filteredContractsHistory.length > 0" class="client-tab-table-footer">
+          <div
+            v-if="filteredContractsHistory.length > TABLE_PAGER_MIN_TOTAL_ITEMS"
+            class="client-tab-table-footer"
+          >
             <AppTablePagerRow
               v-model:page="contractsPage"
               v-model:limit="contractsLimit"
@@ -2782,6 +2815,7 @@ watch(paymentTextValue, (value) => {
         v-if="contractHistoryRowMenuRow"
         class="contract-history-row-menu-layer"
         :style="contractHistoryRowMenuLayerStyle"
+        @pointerdown.stop
         @click.stop
       >
         <div class="contract-history-row-menu__panel">
@@ -3717,6 +3751,16 @@ watch(paymentTextValue, (value) => {
   line-height: 1.4;
 }
 
+.add-contract-payment-panel__empty-hint {
+  margin: 0 0 1rem;
+  padding: 0.65rem 0.85rem;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--app-muted) 8%, var(--app-surface));
+  color: var(--app-muted);
+  font-size: 0.88rem;
+  line-height: 1.4;
+}
+
 .add-contract-payment-panel {
   margin-bottom: 1rem;
   border-radius: 14px;
@@ -3898,21 +3942,38 @@ watch(paymentTextValue, (value) => {
 .visits-tab-filters,
 .client-tab-filters {
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.65rem;
-  align-items: flex-end;
+  flex-direction: column;
+  gap: 0.45rem;
   margin-bottom: 0.85rem;
+  min-width: 0;
 }
 
-.visits-tab-filters__range,
-.client-tab-filters__range {
+.client-tab-filters__row {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.65rem;
+  align-items: flex-end;
+  min-width: 0;
+}
+
+.client-tab-filters__actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.client-tab-filters__row > :deep(.app-date-range-filter) {
   flex: 1 1 14rem;
   min-width: 12rem;
 }
 
+.visits-tab-filters__range,
+.client-tab-filters__range {
+  width: 100%;
+}
+
 .client-tab-filters__select {
   flex: 0 1 10rem;
-  min-width: 9rem;
+  min-width: 8.5rem;
 }
 
 .client-tab-filters__search {
@@ -3931,6 +3992,9 @@ watch(paymentTextValue, (value) => {
   border-radius: 12px;
   border: 1px solid color-mix(in srgb, var(--app-border) 82%, transparent);
   background: color-mix(in srgb, var(--app-text) 2.5%, var(--app-surface));
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .client-history-table--payments {
@@ -4128,6 +4192,61 @@ watch(paymentTextValue, (value) => {
   font-variant-numeric: tabular-nums;
 }
 
+.client-locker-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.client-locker-field__label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--app-muted, color-mix(in srgb, var(--app-text) 62%, transparent));
+}
+
+.client-locker-field__input {
+  box-sizing: border-box;
+  width: 100%;
+  height: var(--app-control-height, 2.75rem);
+  margin: 0;
+  padding: 0 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--app-border) 92%, transparent);
+  border-radius: 10px;
+  background: var(--app-surface);
+  color: var(--app-text);
+  text-align: center;
+  font: inherit;
+  font-size: 1.1rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  font-variant-numeric: tabular-nums;
+}
+
+.client-locker-field__input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--va-primary) 72%, var(--app-border));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--va-primary) 16%, transparent);
+}
+
+.client-locker-field__input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.client-locker-field--error .client-locker-field__input {
+  border-color: var(--va-danger, #ef4444);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--va-danger, #ef4444) 14%, transparent);
+}
+
+.client-locker-field__error {
+  font-size: 0.78rem;
+  line-height: 1.3;
+  color: var(--va-danger, #ef4444);
+}
+
 .client-history-table__date,
 .client-history-table__date-cell {
   font-variant-numeric: tabular-nums;
@@ -4184,6 +4303,7 @@ watch(paymentTextValue, (value) => {
 .contract-history-row-menu-layer {
   box-sizing: border-box;
   min-width: 12.5rem;
+  pointer-events: auto;
 }
 
 .contract-history-row-menu-layer .contract-history-row-menu__panel {

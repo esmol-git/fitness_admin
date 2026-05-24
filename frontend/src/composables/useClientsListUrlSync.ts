@@ -71,8 +71,10 @@ export function parseClientsListRouteQuery(q: LocationQuery): ParsedClientsListQ
 
   let status: ClientRow['status'] | '' = ''
   let inGym: 'IN_GYM' | 'OUT_GYM' | 'VISIT_OVERDUE' | '' = ''
-  if (raw.gym === 'IN_GYM' || raw.gym === 'OUT_GYM' || raw.gym === 'VISIT_OVERDUE') {
+  if (raw.gym === 'IN_GYM' || raw.gym === 'OUT_GYM') {
     inGym = raw.gym
+  } else if (raw.gym === 'VISIT_OVERDUE') {
+    inGym = 'IN_GYM'
   }
 
   const membershipType = raw.membership ?? ''

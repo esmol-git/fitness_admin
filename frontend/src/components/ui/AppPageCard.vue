@@ -34,6 +34,7 @@ defineProps<{
   width: 100%;
   max-width: 100%;
   min-width: 0;
+  overflow: visible;
 }
 
 .page-card:hover {
@@ -57,6 +58,7 @@ defineProps<{
   gap: 1rem;
   flex-wrap: wrap;
   min-width: 0;
+  overflow: visible;
 }
 
 .page-card__body {
@@ -74,8 +76,11 @@ defineProps<{
 
 .page-card__actions {
   display: flex;
+  align-items: center;
+  justify-content: flex-end;
   gap: 0.5rem;
   flex-wrap: wrap;
+  margin-left: auto;
 }
 
 .page-card__actions :deep(.va-button) {

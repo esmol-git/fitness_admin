@@ -16,7 +16,9 @@ import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { useToast } from 'vuestic-ui'
 import AppDataTableShell from '@/components/ui/AppDataTableShell.vue'
+import AppDateRangeFilter from '@/components/ui/AppDateRangeFilter.vue'
 import ContractFreezeModal from '@/components/contracts/ContractFreezeModal.vue'
+import ContractResumeModal from '@/components/contracts/ContractResumeModal.vue'
 import AppEmptyState from '@/components/ui/AppEmptyState.vue'
 import AppPageCard from '@/components/ui/AppPageCard.vue'
 import AppListFiltersToolbar from '@/components/ui/AppListFiltersToolbar.vue'
@@ -47,6 +49,7 @@ import {
 } from '@/composables/useContractCreateModalUrlSync'
 import { useManagerScope } from '@/composables/useManagerScope'
 import { useUiStore } from '@/stores/ui'
+import { detectQuickDatePreset, quickDatePresetRange, type QuickDatePreset } from '@/utils/dateRangePresets'
 
 const { t, locale } = useI18n()
 const { init: notify } = useToast()
@@ -152,12 +155,30 @@ function registryDbDateSortTs(raw: string | Date | null | undefined): number | n
 
 const membershipOptions = ref<MembershipOption[]>([])
 const contractsRegistry = ref<ContractRegistryRow[]>([])
+const REGISTRY_DATE_FIELDS = ['contractDate', 'serviceStartDate', 'serviceEndDate'] as const
+type RegistryDateField = (typeof REGISTRY_DATE_FIELDS)[number]
+
+const REGISTRY_SORT_KEYS = [
+  'contractNumber',
+  'client',
+  'status',
+  'servicePrice',
+  'contractDate',
+  'serviceStartDate',
+  'serviceEndDate',
+] as const
+type RegistrySortKey = (typeof REGISTRY_SORT_KEYS)[number]
+
 const registryFilters = reactive({
   contractSearch: '',
   status: '',
   from: '',
   to: '',
+  dateField: 'contractDate' as RegistryDateField,
 })
+
+const registrySortBy = ref<RegistrySortKey>('contractDate')
+const registrySortOrder = ref<'asc' | 'desc'>('desc')
 
 /** Не пушить query при применении фильтра из URL (защита от цикла). */
 let applyingRegistryFromRoute = false
@@ -167,13 +188,52 @@ const registryPageCount = computed(() =>
   Math.max(1, Math.ceil(sortedContractsRegistry.value.length / registryLimit.value)),
 )
 
-function registryContractSortKey(row: ContractRegistryRow): number {
-  const fromServiceStart = registryDbDateSortTs(row.serviceStartDate)
-  if (fromServiceStart != null) return fromServiceStart
-  const fromContract = registryDbDateSortTs(row.contractDate)
-  if (fromContract != null) return fromContract
-  const n = new Date(row.createdAt).getTime()
-  return Number.isFinite(n) ? n : 0
+const activeRegistryDatePreset = computed(() => detectQuickDatePreset(registryFilters.from, registryFilters.to))
+
+const registryDateFieldChoices = computed(() => [
+  { value: 'contractDate', label: t('clients.contractHistoryContractDateColumn') },
+  { value: 'serviceStartDate', label: t('clients.contractHistoryStartColumn') },
+  { value: 'serviceEndDate', label: t('clients.contractHistoryEndColumn') },
+])
+
+const registryTableColumns = computed(() => [
+  { key: 'contractNumber', label: t('contracts.contractNumber'), sortable: true },
+  { key: 'client', label: t('clients.title'), sortable: true },
+  { key: 'status', label: t('clients.statusLabel'), sortable: true },
+  { key: 'servicePrice', label: t('contracts.servicePrice'), sortable: true },
+  { key: 'contractDate', label: t('contracts.registryContractDateColumn'), sortable: true },
+  { key: 'serviceStartDate', label: t('contracts.registryServiceStartColumn'), sortable: true },
+  { key: 'serviceEndDate', label: t('contracts.registryServiceEndColumn'), sortable: true },
+  { key: 'actions', label: t('clients.actions'), sortable: false },
+])
+
+function compareRegistryRows(a: ContractRegistryRow, b: ContractRegistryRow): number {
+  const dir = registrySortOrder.value === 'asc' ? 1 : -1
+  const key = registrySortBy.value
+
+  if (key === 'contractNumber') {
+    return dir * a.contractNumber.localeCompare(b.contractNumber, 'ru')
+  }
+  if (key === 'client') {
+    return dir * registryClientFullName(a.client).localeCompare(registryClientFullName(b.client), 'ru')
+  }
+  if (key === 'status') {
+    return dir * (a.status || '').localeCompare(b.status || '', 'ru')
+  }
+  if (key === 'servicePrice') {
+    const na = Number(a.servicePrice)
+    const nb = Number(b.servicePrice)
+    const va = Number.isFinite(na) ? na : -1
+    const vb = Number.isFinite(nb) ? nb : -1
+    return dir * (va - vb)
+  }
+  if (key === 'contractDate' || key === 'serviceStartDate' || key === 'serviceEndDate') {
+    const ta = registryDbDateSortTs(a[key])
+    const tb = registryDbDateSortTs(b[key])
+    const missing = registrySortOrder.value === 'asc' ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY
+    return dir * ((ta ?? missing) - (tb ?? missing))
+  }
+  return 0
 }
 
 const filteredContractsRegistry = computed(() => {
@@ -186,7 +246,7 @@ const filteredContractsRegistry = computed(() => {
 
 const sortedContractsRegistry = computed(() => {
   const list = [...filteredContractsRegistry.value]
-  list.sort((a, b) => registryContractSortKey(b) - registryContractSortKey(a))
+  list.sort(compareRegistryRows)
   return list
 })
 
@@ -232,6 +292,15 @@ const registryStatusFilterOptions = computed(() => [
   ...contractStatusOptions.map((s) => ({ value: s, text: t(`contracts.contractStatuses.${s}`) })),
 ])
 
+const hasActiveRegistryFilters = computed(
+  () =>
+    Boolean(registryFilters.contractSearch.trim()) ||
+    Boolean(registryFilters.status) ||
+    Boolean(registryFilters.from.trim()) ||
+    Boolean(registryFilters.to.trim()) ||
+    registryFilters.dateField !== 'contractDate',
+)
+
 const formError = ref<string | null>(null)
 const formErrorCode = ref<string | null>(null)
 
@@ -259,6 +328,10 @@ const freezeOpen = ref(false)
 const freezeLoading = ref(false)
 const freezeTargetId = ref<string | null>(null)
 const freezeUiError = ref<string | null>(null)
+const resumeOpen = ref(false)
+const resumeLoading = ref(false)
+const resumeTargetId = ref<string | null>(null)
+const resumeUiError = ref<string | null>(null)
 const cancelOpen = ref(false)
 const cancelLoading = ref(false)
 const cancelTarget = ref<{ id: string; contractNumber: string } | null>(null)
@@ -721,6 +794,10 @@ function parseRegistryStatusFromQuery(raw: string): string {
   return contractStatusOptions.includes(raw as (typeof contractStatusOptions)[number]) ? raw : ''
 }
 
+function parseRegistryDateFieldFromQuery(raw: string): RegistryDateField {
+  return (REGISTRY_DATE_FIELDS as readonly string[]).includes(raw) ? (raw as RegistryDateField) : 'contractDate'
+}
+
 function applyRegistryFiltersFromRoute() {
   const st = typeof route.query.fcStatus === 'string' ? route.query.fcStatus : ''
   registryFilters.status = parseRegistryStatusFromQuery(st)
@@ -728,13 +805,16 @@ function applyRegistryFiltersFromRoute() {
   const toRaw = typeof route.query.fcTo === 'string' ? route.query.fcTo.slice(0, 10) : ''
   registryFilters.from = /^\d{4}-\d{2}-\d{2}$/.test(fromRaw) ? fromRaw : ''
   registryFilters.to = /^\d{4}-\d{2}-\d{2}$/.test(toRaw) ? toRaw : ''
+  const df = typeof route.query.fcDateField === 'string' ? route.query.fcDateField : ''
+  registryFilters.dateField = parseRegistryDateFieldFromQuery(df)
 }
 
 function readRegistryFilterRouteSnapshot(q: typeof route.query): string {
   const st = typeof q.fcStatus === 'string' ? q.fcStatus : ''
   const from = typeof q.fcFrom === 'string' ? q.fcFrom.slice(0, 10) : ''
   const to = typeof q.fcTo === 'string' ? q.fcTo.slice(0, 10) : ''
-  return `${st}|${from}|${to}`
+  const df = typeof q.fcDateField === 'string' ? q.fcDateField : ''
+  return `${st}|${from}|${to}|${df}`
 }
 
 function stripLegacyRegistryQueryParams() {
@@ -751,12 +831,13 @@ let registryFilterRouteSnapshot = ''
 function pushRegistryFiltersToUrl() {
   const base = normalizeRouteQuery(route.query)
   const next: Record<string, string> = { ...base }
-  for (const k of ['fcClient', 'fcStatus', 'fcFrom', 'fcTo'] as const) {
+  for (const k of ['fcClient', 'fcStatus', 'fcFrom', 'fcTo', 'fcDateField'] as const) {
     delete next[k]
   }
   if (registryFilters.status.trim()) next.fcStatus = registryFilters.status.trim()
   if (registryFilters.from.trim()) next.fcFrom = registryFilters.from.trim().slice(0, 10)
   if (registryFilters.to.trim()) next.fcTo = registryFilters.to.trim().slice(0, 10)
+  if (registryFilters.dateField !== 'contractDate') next.fcDateField = registryFilters.dateField
   if (routeQueryEquals(next, route.query)) return
   void router.replace({ query: next })
 }
@@ -767,8 +848,11 @@ function resetContractsRegistryFilters() {
   registryFilters.status = ''
   registryFilters.from = ''
   registryFilters.to = ''
+  registryFilters.dateField = 'contractDate'
+  registrySortBy.value = 'contractDate'
+  registrySortOrder.value = 'desc'
   const base = normalizeRouteQuery(route.query)
-  for (const k of ['fcClient', 'fcStatus', 'fcFrom', 'fcTo'] as const) {
+  for (const k of ['fcClient', 'fcStatus', 'fcFrom', 'fcTo', 'fcDateField'] as const) {
     delete base[k]
   }
   void router.replace({ query: base }).finally(() => {
@@ -799,12 +883,16 @@ watch(
 )
 
 watch(
-  () => [registryFilters.status, registryFilters.from, registryFilters.to],
+  () => [registryFilters.status, registryFilters.from, registryFilters.to, registryFilters.dateField],
   () => {
     if (applyingRegistryFromRoute) return
     pushRegistryFiltersToUrl()
   },
 )
+
+watch([registrySortBy, registrySortOrder], () => {
+  registryPage.value = 1
+})
 
 watch(
   () => registryFilters.contractSearch,
@@ -1119,16 +1207,6 @@ function parseDateIso(value: string) {
   return new Date(yy, mm - 1, dd)
 }
 
-const registryDateRangeModel = computed(() => {
-  const hasFrom = Boolean(registryFilters.from)
-  const hasTo = Boolean(registryFilters.to)
-  if (!hasFrom && !hasTo) return undefined
-  return {
-    start: hasFrom ? parseDateIso(registryFilters.from) ?? undefined : undefined,
-    end: hasTo ? parseDateIso(registryFilters.to) ?? undefined : undefined,
-  }
-})
-
 function formatDateIso(value: Date) {
   const y = value.getFullYear()
   const m = String(value.getMonth() + 1).padStart(2, '0')
@@ -1360,6 +1438,7 @@ async function loadContractsRegistry() {
     if (registryFilters.status.trim()) params.status = registryFilters.status.trim()
     if (from) params.from = from.slice(0, 10)
     if (to) params.to = to.slice(0, 10)
+    if (registryFilters.dateField !== 'contractDate') params.dateField = registryFilters.dateField
     const { data } = await api.get('/contracts', { params })
     contractsRegistry.value = (Array.isArray(data) ? data : []) as ContractRegistryRow[]
   } catch (e: unknown) {
@@ -1414,19 +1493,8 @@ function formatRegistryDbDateRu(raw: string | Date | null | undefined): string |
   return new Date(y, mo - 1, d).toLocaleDateString(tag)
 }
 
-/** Начало периода оказания услуги (как в карточке клиента): serviceStart → дата договора → дата записи в журнале. */
-function formatRegistryServicePeriodStart(row: ContractRegistryRow): string {
-  const fromService = formatRegistryDbDateRu(row.serviceStartDate)
-  if (fromService) return fromService
-  const fromContract = formatRegistryDbDateRu(row.contractDate)
-  if (fromContract) return fromContract
-  const d = new Date(row.createdAt)
-  if (Number.isNaN(d.getTime())) return '—'
-  return d.toLocaleDateString(locale.value === 'en' ? 'en-US' : 'ru-RU')
-}
-
-function formatRegistryServiceEnd(row: ContractRegistryRow) {
-  return formatRegistryDbDateRu(row.serviceEndDate) ?? '—'
+function formatRegistryDateCell(raw: string | Date | null | undefined): string {
+  return formatRegistryDbDateRu(raw) ?? '—'
 }
 
 function registryClientFullName(client: ContractRegistryRow['client']): string {
@@ -1539,12 +1607,30 @@ async function submitFreezeContract(payload: { startDate: string; endDate: strin
   }
 }
 
-async function resumeContract(contractId: string) {
+function askResumeContract(contractId: string) {
+  resumeTargetId.value = contractId
+  resumeUiError.value = null
+  resumeOpen.value = true
+}
+
+async function submitResumeContract() {
+  if (!resumeTargetId.value) return
+  resumeLoading.value = true
+  resumeUiError.value = null
   try {
-    await api.patch(`/contracts/${contractId}/resume`)
+    await api.patch(`/contracts/${resumeTargetId.value}/resume`)
+    resumeOpen.value = false
+    resumeTargetId.value = null
     await loadContractsRegistry()
   } catch (e: unknown) {
-    formError.value = resolveApiErrorMessage(e, { defaultMessage: t('contracts.statusUpdateFailed') })
+    resumeUiError.value = resolveApiErrorMessage(e, {
+      defaultMessage: t('contracts.statusUpdateFailed'),
+      byCode: {
+        ONLY_PAUSED_CAN_RESUME: t('contracts.onlyPausedCanResume'),
+      },
+    })
+  } finally {
+    resumeLoading.value = false
   }
 }
 
@@ -1584,32 +1670,38 @@ async function submitCancelContract() {
   }
 }
 
-function applyContractStatusFilter(status: string) {
-  registryFilters.status = status
+function applyRegistryDatePreset(preset: QuickDatePreset) {
+  const range = quickDatePresetRange(preset)
+  registryFilters.from = range.from
+  registryFilters.to = range.to
+  registryPage.value = 1
+}
+
+function applyRegistryDateField(field: RegistryDateField) {
+  if (registryFilters.dateField === field) return
+  registryFilters.dateField = field
+  registryPage.value = 1
+}
+
+function onRegistrySortByUpdate(next?: string) {
+  if (!next || !(REGISTRY_SORT_KEYS as readonly string[]).includes(next)) return
+  const key = next as RegistrySortKey
+  if (registrySortBy.value === key) {
+    registrySortOrder.value = registrySortOrder.value === 'asc' ? 'desc' : 'asc'
+    return
+  }
+  registrySortBy.value = key
+  registrySortOrder.value =
+    key === 'contractDate' || key === 'serviceStartDate' || key === 'serviceEndDate' ? 'desc' : 'asc'
+}
+
+function onRegistrySortOrderUpdate(next?: string) {
+  registrySortOrder.value = next === 'desc' ? 'desc' : 'asc'
 }
 
 function onRegistryStatusFilter(value: unknown) {
   const v = typeof value === 'string' ? value : ''
   registryFilters.status = v === REGISTRY_STATUS_ALL || v === '' ? '' : v
-}
-
-function onRegistryDateRange(value: unknown) {
-  if (value == null || value === '' || value === false) {
-    registryFilters.from = ''
-    registryFilters.to = ''
-    return
-  }
-  if (Array.isArray(value)) {
-    const [a, b] = value
-    registryFilters.from = a != null && a !== '' ? toIsoDate(a) : ''
-    registryFilters.to = b != null && b !== '' ? toIsoDate(b) : ''
-    return
-  }
-  if (typeof value === 'object' && value !== null && ('start' in value || 'end' in value)) {
-    const r = value as { start?: Date | string | null; end?: Date | string | null }
-    registryFilters.from = r.start != null && r.start !== '' ? toIsoDate(r.start) : ''
-    registryFilters.to = r.end != null && r.end !== '' ? toIsoDate(r.end) : ''
-  }
 }
 
 function askDeleteContract(row: { id: string; contractNumber: string }) {
@@ -1686,41 +1778,36 @@ void (async () => {
 
       <template #filters>
         <AppListFiltersToolbar>
-          <div class="contracts-registry-filters">
-            <VaInput
-              v-model="registryFilters.contractSearch"
-              :label="t('contracts.filterContract')"
-              :placeholder="t('contracts.filterContractPlaceholder')"
-              icon="search"
-              clearable
-            />
-            <VaSelect
-              :model-value="registryFilters.status === '' ? REGISTRY_STATUS_ALL : registryFilters.status"
-              :label="t('contracts.filterStatus')"
-              :options="registryStatusFilterOptions"
-              text-by="text"
-              value-by="value"
-              @update:model-value="onRegistryStatusFilter"
-            />
-            <VaDateInput
-              mode="range"
-              :model-value="registryDateRangeModel"
-              :label="t('contracts.filterDateRange')"
-              clearable
-              @update:model-value="onRegistryDateRange"
-            />
+          <div class="contracts-filter-bar">
+            <div class="contracts-filters-grid">
+              <VaInput
+                v-model="registryFilters.contractSearch"
+                :label="t('contracts.filterContract')"
+                :placeholder="t('contracts.filterContractPlaceholder')"
+                icon="search"
+                clearable
+              />
+              <VaSelect
+                :model-value="registryFilters.status === '' ? REGISTRY_STATUS_ALL : registryFilters.status"
+                :label="t('contracts.filterStatus')"
+                :options="registryStatusFilterOptions"
+                text-by="text"
+                value-by="value"
+                @update:model-value="onRegistryStatusFilter"
+              />
+              <AppDateRangeFilter
+                v-model:from="registryFilters.from"
+                v-model:to="registryFilters.to"
+                :label="t('contracts.filterDateRange')"
+              />
+            </div>
           </div>
           <template #actions>
             <VaButton
               size="small"
               preset="secondary"
               icon="close"
-              :disabled="
-                !registryFilters.contractSearch &&
-                !registryFilters.status &&
-                !registryFilters.from &&
-                !registryFilters.to
-              "
+              :disabled="!hasActiveRegistryFilters"
               @click="resetContractsRegistryFilters"
             >
               {{ t('contracts.resetFilters') }}
@@ -1733,23 +1820,62 @@ void (async () => {
         {{ formError }}
       </VaAlert>
 
-      <div class="contracts-registry-presets-row">
-        <VaButton
-          size="small"
-          :preset="registryFilters.status === '' ? 'primary' : 'secondary'"
-          @click="applyContractStatusFilter('')"
+      <div class="contracts-presets-row">
+        <div
+          class="app-preset-strip preset-strip--date"
+          :class="{ 'app-preset-strip--active': Boolean(activeRegistryDatePreset) }"
+          role="group"
+          :aria-label="t('contracts.datePresetsLabel')"
         >
-          {{ t('common.all') }}
-        </VaButton>
-        <VaButton
-          v-for="status in contractStatusOptions"
-          :key="status"
-          size="small"
-          :preset="registryFilters.status === status ? 'primary' : 'secondary'"
-          @click="applyContractStatusFilter(status)"
+          <VaIcon name="event" size="16px" color="secondary" />
+          <span class="app-preset-label">{{ t('contracts.datePresetsLabel') }}</span>
+          <VaButton
+            type="button"
+            size="small"
+            class="app-preset-chip"
+            :preset="activeRegistryDatePreset === 'today' ? 'primary' : 'secondary'"
+            @click="applyRegistryDatePreset('today')"
+          >
+            {{ t('clients.presetToday') }}
+          </VaButton>
+          <VaButton
+            type="button"
+            size="small"
+            class="app-preset-chip"
+            :preset="activeRegistryDatePreset === '7d' ? 'primary' : 'secondary'"
+            @click="applyRegistryDatePreset('7d')"
+          >
+            {{ t('clients.preset7Days') }}
+          </VaButton>
+          <VaButton
+            type="button"
+            size="small"
+            class="app-preset-chip"
+            :preset="activeRegistryDatePreset === '30d' ? 'primary' : 'secondary'"
+            @click="applyRegistryDatePreset('30d')"
+          >
+            {{ t('clients.preset30Days') }}
+          </VaButton>
+        </div>
+        <div
+          class="app-preset-strip preset-strip--date-field"
+          role="group"
+          :aria-label="t('contracts.dateFilterFieldLabel')"
         >
-          {{ contractStatusLabel(status) }}
-        </VaButton>
+          <VaIcon name="date_range" size="16px" color="secondary" />
+          <span class="app-preset-label">{{ t('contracts.dateFilterFieldLabel') }}</span>
+          <VaButton
+            v-for="choice in registryDateFieldChoices"
+            :key="choice.value"
+            type="button"
+            size="small"
+            class="app-preset-chip"
+            :preset="registryFilters.dateField === choice.value ? 'primary' : 'secondary'"
+            @click="applyRegistryDateField(choice.value as RegistryDateField)"
+          >
+            {{ choice.label }}
+          </VaButton>
+        </div>
       </div>
 
       <AppDataTableShell
@@ -1762,15 +1888,11 @@ void (async () => {
           class="contracts-registry-table app-table-actions-last-col"
           :items="pagedContractsRegistry"
           :loading="loadingRegistry"
-          :columns="[
-            { key: 'contractNumber', label: t('contracts.contractNumber') },
-            { key: 'client', label: t('clients.title') },
-            { key: 'status', label: t('clients.statusLabel') },
-            { key: 'servicePrice', label: t('contracts.servicePrice') },
-            { key: 'serviceStartDate', label: t('contracts.registryPeriodStartColumn') },
-            { key: 'serviceEndDate', label: t('contracts.registryPeriodEndColumn') },
-            { key: 'actions', label: t('clients.actions') },
-          ]"
+          :sort-by="registrySortBy"
+          :sorting-order="registrySortOrder"
+          :columns="registryTableColumns"
+          @update:sort-by="onRegistrySortByUpdate"
+          @update:sorting-order="onRegistrySortOrderUpdate"
         >
           <template #cell(client)="{ rowData }">
             <span v-if="!rowData.clientId" class="contracts-registry-client-cell">{{ registryClientFullName(rowData.client) }}</span>
@@ -1787,11 +1909,14 @@ void (async () => {
           <template #cell(servicePrice)="{ rowData }">
             {{ rowData.servicePrice == null ? '—' : Number(rowData.servicePrice).toFixed(2) }}
           </template>
+          <template #cell(contractDate)="{ rowData }">
+            {{ formatRegistryDateCell(rowData.contractDate) }}
+          </template>
           <template #cell(serviceStartDate)="{ rowData }">
-            {{ formatRegistryServicePeriodStart(rowData) }}
+            {{ formatRegistryDateCell(rowData.serviceStartDate) }}
           </template>
           <template #cell(serviceEndDate)="{ rowData }">
-            {{ formatRegistryServiceEnd(rowData) }}
+            {{ formatRegistryDateCell(rowData.serviceEndDate) }}
           </template>
           <template #cell(status)="{ rowData }">
             <StatusBadge
@@ -1873,7 +1998,7 @@ void (async () => {
                 type="button"
                 role="menuitem"
                 class="contracts-row-menu__item"
-                @click="runContractRowMenuAction(contractsRowMenuRow, (r) => resumeContract(r.id))"
+                @click="runContractRowMenuAction(contractsRowMenuRow, (r) => askResumeContract(r.id))"
               >
                 <VaIcon :name="TableActionIcon.contractResume" size="18px" />
                 {{ t('contracts.resume') }}
@@ -2288,6 +2413,14 @@ void (async () => {
       @submit="submitFreezeContract"
     />
 
+    <ContractResumeModal
+      v-model="resumeOpen"
+      :contract-id="resumeTargetId"
+      :loading="resumeLoading"
+      :submit-error="resumeUiError"
+      @submit="submitResumeContract"
+    />
+
     <VaModal v-model="cancelOpen" hide-default-actions fixed-layout max-width="520px">
       <h3 class="modal-title">{{ t('contracts.cancelRefundTitle') }}</h3>
       <div class="contracts-form-grid">
@@ -2336,23 +2469,60 @@ void (async () => {
   gap: var(--app-page-gap);
 }
 
-.contracts-registry-filters {
+.contracts-filter-bar {
+  width: 100%;
+}
+
+.contracts-filter-bar :deep(.va-input-wrapper) {
+  background: transparent !important;
+}
+
+.contracts-filter-bar :deep(.va-input-wrapper__field::after) {
+  background: color-mix(in srgb, var(--app-surface) 97%, white 3%) !important;
+  opacity: 1 !important;
+}
+
+.contracts-filter-bar :deep(.va-input-label) {
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.contracts-filter-bar :deep(.va-select),
+.contracts-filter-bar :deep(.va-date-input) {
+  background: transparent;
+}
+
+.contracts-filters-grid {
   width: 100%;
   display: grid;
-  grid-template-columns: minmax(11rem, 1.35fr) minmax(9rem, 0.95fr) minmax(13rem, 1.55fr);
-  gap: 0.75rem;
+  gap: 0.6rem;
+  grid-template-columns: minmax(10rem, 1.25fr) minmax(9rem, 1fr) minmax(13rem, 1.35fr);
   align-items: end;
 }
 
-.contracts-registry-presets-row {
+.contracts-presets-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.5rem 0.65rem;
   width: 100%;
-  padding: 0.35rem 0 0.15rem;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 0.4rem 0 0.2rem;
   border-top: 1px solid color-mix(in srgb, var(--app-border) 86%, transparent);
   margin-top: 0.05rem;
+}
+
+.contracts-presets-row .preset-strip--date,
+.contracts-presets-row .preset-strip--date-field {
+  flex: 1 1 16rem;
+  min-width: 16rem;
+}
+
+.contracts-presets-row .preset-strip--date-field {
+  flex: 1 1 22rem;
+  min-width: 22rem;
 }
 
 .contracts-registry-table.app-table-actions-last-col :deep(thead th:last-child),
@@ -2367,8 +2537,17 @@ void (async () => {
 }
 
 .contracts-table-scroll {
-  overflow: auto;
+  width: 100%;
   max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: visible;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+}
+
+.contracts-table-scroll :deep(.va-data-table:not(.va-data-table--virtual-scroller)) {
+  overflow: visible;
 }
 
 .contracts-row-menu {
@@ -2466,7 +2645,7 @@ void (async () => {
 }
 
 @media (max-width: 960px) {
-  .contracts-registry-filters {
+  .contracts-filters-grid {
     grid-template-columns: 1fr;
   }
 }

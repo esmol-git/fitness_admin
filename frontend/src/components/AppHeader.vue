@@ -11,6 +11,11 @@ import { useScannerModalUrlSync } from '@/composables/useScannerModalUrlSync'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
 import { api } from '@/utils/api'
 import { clientPhotoDisplayUrl } from '@/utils/clientPhotoUrl'
+import {
+  LOCKER_NUMBER_MAX_LEN,
+  onLockerDigitKeydown,
+  sanitizeLockerDigits,
+} from '@/utils/lockerNumber'
 import axios from 'axios'
 const props = withDefaults(
   defineProps<{
@@ -31,6 +36,7 @@ const { init: notify } = useToast()
 function refreshRegistriesAfterVisitMutation() {
   ui.bumpClientsTableRefresh()
   ui.bumpVisitsTableRefresh()
+  ui.bumpServiceStaffTableRefresh()
 }
 
 /** Создание клиента из сканера — администратор и менеджер. */
@@ -46,7 +52,7 @@ const scannerModalRef = ref<HTMLElement | null>(null)
 const scannerLoading = ref(false)
 const scannerLockerNumber = ref('')
 const scannerLockerInputRef = ref<HTMLInputElement | null>(null)
-const SCANNER_LOCKER_MAX_LEN = 4
+const scannerEntityType = ref<'client' | 'staff' | null>(null)
 const scannerClientCard = ref<{
   id: string
   fullName: string
@@ -56,18 +62,31 @@ const scannerClientCard = ref<{
   photoUrl?: string | null
   contractUnpaid?: { contractNumber: string; balanceDue: string } | null
 } | null>(null)
+const scannerStaffCard = ref<{
+  id: string
+  fullName: string
+  phone: string | null
+  cardNumber: string | null
+  position: string | null
+  status: string
+  photoUrl?: string | null
+} | null>(null)
 const scannerPhotoLoadFailed = ref(false)
-const scannerClientPhotoSrc = computed(() => clientPhotoDisplayUrl(scannerClientCard.value?.photoUrl))
+const scannerActivePhotoUrl = computed(
+  () => scannerClientCard.value?.photoUrl ?? scannerStaffCard.value?.photoUrl,
+)
+const scannerClientPhotoSrc = computed(() => clientPhotoDisplayUrl(scannerActivePhotoUrl.value))
 const scannerPhotoShowImg = computed(
   () => Boolean(scannerClientPhotoSrc.value) && !scannerPhotoLoadFailed.value,
 )
+const scannerHasResolvedCard = computed(() => Boolean(scannerClientCard.value || scannerStaffCard.value))
 
 function onScannerPhotoError() {
   scannerPhotoLoadFailed.value = true
 }
 
 watch(
-  () => [scannerClientCard.value?.id, scannerClientCard.value?.photoUrl] as const,
+  () => [scannerClientCard.value?.id, scannerStaffCard.value?.id, scannerActivePhotoUrl.value] as const,
   () => {
     scannerPhotoLoadFailed.value = false
   },
@@ -94,11 +113,11 @@ function isLookupNotFoundError(error: unknown): boolean {
   if (!axios.isAxiosError(error)) return false
   if (error.response?.status === 404) return true
   const data = error.response?.data as { code?: string } | undefined
-  return data?.code === 'CLIENT_NOT_FOUND'
+  return data?.code === 'CLIENT_NOT_FOUND' || data?.code === 'SERVICE_STAFF_NOT_FOUND'
 }
 
 function onScannerCodeInput() {
-  if (scannerClientCard.value) return
+  if (scannerHasResolvedCard.value) return
   if (
     scannerHintTone.value === 'notFound' ||
     scannerHintTone.value === 'error' ||
@@ -111,13 +130,19 @@ function onScannerCodeInput() {
 
 /** Only ACTIVE clients may enter per club rules — highlight others (no valid membership / paused / blocked). */
 const scannerClientEntryNotAllowed = computed(
-  () => Boolean(scannerClientCard.value && scannerClientCard.value.status !== 'ACTIVE'),
+  () =>
+    scannerEntityType.value === 'client' &&
+    Boolean(scannerClientCard.value && scannerClientCard.value.status !== 'ACTIVE'),
 )
 
-/** Незакрытая сессия: IN_GYM — обычный выход; OVERDUE (после 00:00) — выход через «ключ сдан / не сдан». */
-const scannerHasOpenVisit = computed(
-  () => scannerVisitStatus.value === 'IN_GYM' || scannerVisitStatus.value === 'OVERDUE',
+const scannerStaffEntryNotAllowed = computed(
+  () =>
+    scannerEntityType.value === 'staff' &&
+    Boolean(scannerStaffCard.value && scannerStaffCard.value.status !== 'ACTIVE'),
 )
+
+/** Незакрытый визит (exitedAt=null) — только ручной выход, без автосмены статуса в полночь. */
+const scannerHasOpenVisit = computed(() => Boolean(scannerVisitStatus.value))
 
 function scannerClientStatusTone(status: string): 'success' | 'warning' | 'danger' | 'info' | 'neutral' {
   if (status === 'ACTIVE') return 'success'
@@ -128,17 +153,14 @@ function scannerClientStatusTone(status: string): 'success' | 'warning' | 'dange
 
 const scannerVisitBadgeLabel = computed(() => {
   if (scannerHasOpenVisit.value) {
-    if (scannerVisitStatus.value === 'OVERDUE') {
-      return t('header.scannerOverdueWithLocker', { locker: scannerCurrentLocker.value || '—' })
-    }
+    if (scannerEntityType.value === 'staff') return t('header.scannerStaffInGym')
     return t('header.scannerInGymWithLocker', { locker: scannerCurrentLocker.value || '—' })
   }
   return t('header.scannerNotInGymLabel')
 })
 
 const scannerVisitBadgeTone = computed((): 'success' | 'warning' | 'info' => {
-  if (scannerVisitStatus.value === 'IN_GYM') return 'success'
-  if (scannerVisitStatus.value === 'OVERDUE') return 'warning'
+  if (scannerHasOpenVisit.value) return 'success'
   return 'info'
 })
 
@@ -156,19 +178,9 @@ const showScannerBottomHint = computed(() => {
 
 function onScannerLockerNativeInput(event: Event) {
   const el = event.target as HTMLInputElement
-  const next = el.value.replace(/\D/g, '').slice(0, SCANNER_LOCKER_MAX_LEN)
+  const next = sanitizeLockerDigits(el.value)
   scannerLockerNumber.value = next
   if (el.value !== next) el.value = next
-}
-
-function onScannerLockerKeydown(event: KeyboardEvent) {
-  if (event.ctrlKey || event.metaKey || event.altKey) return
-  const key = event.key
-  if (key === 'Backspace' || key === 'Delete' || key === 'Tab' || key === 'Enter' || key.startsWith('Arrow')) {
-    return
-  }
-  if (/^\d$/.test(key)) return
-  event.preventDefault()
 }
 
 function focusScannerInput() {
@@ -218,7 +230,9 @@ async function goToClientProfile() {
 }
 
 function clearScannerResolvedState() {
+  scannerEntityType.value = null
   scannerClientCard.value = null
+  scannerStaffCard.value = null
   scannerVisitStatus.value = null
   scannerCurrentLocker.value = null
   scannerLockerNumber.value = ''
@@ -243,6 +257,7 @@ type ScannerLookupPayload = {
     status: string
     photoUrl?: string | null
     contractUnpaid?: { contractNumber: string; balanceDue: string } | null
+    lockerNumber?: string | null
   }
   inGym: boolean
   openSession?: { lockerNumber: string; status: 'IN_GYM' | 'OVERDUE' | 'LEFT' | 'FORCE_CLOSED' } | null
@@ -252,19 +267,64 @@ function scannerCodeFromClient(client: { cardNumber?: string | null; accessKey?:
   return (client.cardNumber?.trim() || client.accessKey?.trim() || '').trim()
 }
 
+type StaffScannerLookupPayload = {
+  staff: {
+    id: string
+    fullName: string
+    phone: string | null
+    cardNumber: string | null
+    accessKey?: string | null
+    position: string | null
+    status: string
+    photoUrl?: string | null
+  }
+  inGym: boolean
+  openSession?: { id: string; enteredAt: string; status: string } | null
+}
+
+function applyStaffScannerLookupPayload(payload: StaffScannerLookupPayload) {
+  scannerStaffCard.value = {
+    id: payload.staff.id,
+    fullName: payload.staff.fullName,
+    phone: payload.staff.phone,
+    cardNumber: payload.staff.cardNumber,
+    position: payload.staff.position,
+    status: payload.staff.status,
+    photoUrl: payload.staff.photoUrl,
+  }
+  const sessionStatus = payload.openSession?.status
+  scannerVisitStatus.value =
+    sessionStatus === 'IN_GYM' ||
+    sessionStatus === 'OVERDUE' ||
+    sessionStatus === 'LEFT' ||
+    sessionStatus === 'FORCE_CLOSED'
+      ? sessionStatus
+      : null
+  scannerCurrentLocker.value = null
+  scannerLockerNumber.value = ''
+  scannerHintTone.value = 'default'
+  if (payload.openSession) {
+    scannerHint.value = t('header.scannerStaffInGym')
+  } else if (payload.staff.status !== 'ACTIVE') {
+    scannerHint.value = t('header.scannerInactiveStaffHint')
+  } else {
+    scannerHint.value = null
+  }
+  return !payload.openSession && payload.staff.status === 'ACTIVE'
+}
+
 function applyScannerLookupPayload(payload: ScannerLookupPayload) {
   scannerClientCard.value = payload.client
   scannerVisitStatus.value = payload.openSession?.status ?? null
   scannerCurrentLocker.value = payload.openSession?.lockerNumber ?? null
-  scannerLockerNumber.value = (payload.openSession?.lockerNumber ?? '')
+  const sessionLocker = payload.openSession?.lockerNumber ?? ''
+  const clientLocker = payload.client.lockerNumber ?? ''
+  scannerLockerNumber.value = (sessionLocker || clientLocker)
     .replace(/\D/g, '')
-    .slice(0, SCANNER_LOCKER_MAX_LEN)
+    .slice(0, LOCKER_NUMBER_MAX_LEN)
   scannerHintTone.value = 'default'
-  if (payload.inGym) {
+  if (payload.openSession) {
     scannerHint.value = t('header.scannerClientInGym')
-  } else if (payload.openSession?.status === 'OVERDUE') {
-    scannerHintTone.value = 'callout'
-    scannerHint.value = t('header.scannerOverdueCloseFirstHint')
   } else if (payload.client.status === 'BLOCKED') {
     scannerHint.value = t('header.scannerClientBlockedHint')
   } else if (payload.client.status !== 'ACTIVE') {
@@ -296,8 +356,32 @@ async function runScannerLookup(params: { code?: string; clientId?: string }) {
     if (lookupCode) {
       scannerInputValue.value = lookupCode
     }
+    scannerEntityType.value = 'client'
     focusLockerAfterLookup = applyScannerLookupPayload(data)
   } catch (error: unknown) {
+    if (isLookupNotFoundError(error) && code && !clientId) {
+      try {
+        const { data: staffData } = await api.get<StaffScannerLookupPayload>('/service-staff-visits/lookup', {
+          params: { code },
+        })
+        scannerEntityType.value = 'staff'
+        const lookupCode = staffData.staff.cardNumber?.trim() || staffData.staff.accessKey?.trim() || code
+        if (lookupCode) scannerInputValue.value = lookupCode
+        applyStaffScannerLookupPayload(staffData)
+        return
+      } catch (staffError: unknown) {
+        clearScannerResolvedState()
+        scannerHintTone.value = isLookupNotFoundError(staffError) ? 'notFound' : 'error'
+        scannerHint.value = resolveApiErrorMessage(staffError, {
+          defaultMessage: t('header.scannerLookupFailed'),
+          byStatus: { 404: t('header.scannerCardNotInDatabase') },
+          byCode: {
+            SERVICE_STAFF_NOT_FOUND: t('header.scannerCardNotInDatabase'),
+          },
+        })
+        return
+      }
+    }
     clearScannerResolvedState()
     scannerHintTone.value = isLookupNotFoundError(error) ? 'notFound' : 'error'
     scannerHint.value = resolveApiErrorMessage(error, {
@@ -331,8 +415,30 @@ async function onScannerSubmit() {
 
 async function scannerCheckIn() {
   const code = scannerInputValue.value.trim()
+  if (!code) return
+  if (scannerEntityType.value === 'staff') {
+    scannerLoading.value = true
+    try {
+      await api.post('/service-staff-visits/check-in', { code })
+      notify({ color: 'success', message: t('header.scannerStaffCheckInSuccess') })
+      refreshRegistriesAfterVisitMutation()
+      closeScannerModal()
+    } catch (error: unknown) {
+      scannerHintTone.value = 'error'
+      scannerHint.value = resolveApiErrorMessage(error, {
+        defaultMessage: t('header.scannerCheckInFailed'),
+        byCode: {
+          ONLY_ACTIVE_ALLOWED: t('header.scannerOnlyActiveAllowed'),
+          OPEN_VISIT_EXISTS: t('header.scannerAlreadyInGym'),
+        },
+      })
+    } finally {
+      scannerLoading.value = false
+    }
+    return
+  }
   const lockerNumber = scannerLockerNumber.value.trim()
-  if (!code || !lockerNumber) {
+  if (!lockerNumber) {
     scannerHintTone.value = 'callout'
     scannerHint.value = t('header.scannerLockerRequired')
     return
@@ -364,8 +470,10 @@ async function scannerCheckOut() {
   const code = scannerInputValue.value.trim()
   if (!code) return
   scannerLoading.value = true
+  const checkOutUrl =
+    scannerEntityType.value === 'staff' ? '/service-staff-visits/check-out' : '/visits/check-out'
   try {
-    await api.post('/visits/check-out', { code })
+    await api.post(checkOutUrl, { code })
     notify({ color: 'success', message: t('header.scannerCheckOutSuccess') })
     refreshRegistriesAfterVisitMutation()
     closeScannerModal()
@@ -385,8 +493,10 @@ async function scannerForceClose(reason: 'LOST_KEY' | 'FOUND_LATER' | 'ADMIN_COR
   const code = scannerInputValue.value.trim()
   if (!code) return
   scannerLoading.value = true
+  const forceCloseUrl =
+    scannerEntityType.value === 'staff' ? '/service-staff-visits/force-close' : '/visits/force-close'
   try {
-    await api.post('/visits/force-close', { code, reason })
+    await api.post(forceCloseUrl, { code, reason })
     notify({ color: 'success', message: t('header.scannerCheckOutSuccess') })
     refreshRegistriesAfterVisitMutation()
     closeScannerModal()
@@ -433,8 +543,10 @@ onBeforeUnmount(() => {
 
 watch(scannerOpen, async (open, prevOpen) => {
   if (!open) {
-    if (prevOpen === true && router.currentRoute.value.name === 'clients') {
-      ui.bumpClientsTableRefresh()
+    if (prevOpen === true) {
+      const routeName = router.currentRoute.value.name
+      if (routeName === 'clients') ui.bumpClientsTableRefresh()
+      if (routeName === 'service-staff') ui.bumpServiceStaffTableRefresh()
     }
     scannerInputValue.value = ''
     scannerHint.value = null
@@ -636,7 +748,7 @@ const clockTime = computed(() =>
             class="scanner-modal__card scanner-modal__code-wrap"
             :class="{
               'scanner-modal__code-wrap--not-found': scannerHintTone === 'notFound',
-              'scanner-modal__code-wrap--locked': Boolean(scannerClientCard),
+              'scanner-modal__code-wrap--locked': scannerHasResolvedCard,
             }"
           >
             <VaInput
@@ -644,7 +756,7 @@ const clockTime = computed(() =>
               :label="t('header.scannerInputLabel')"
               autocomplete="off"
               autofocus
-              :readonly="Boolean(scannerClientCard)"
+              :readonly="scannerHasResolvedCard"
               :disabled="scannerLoading"
               @keydown.enter.prevent="onScannerSubmit"
               @update:model-value="onScannerCodeInput"
@@ -656,9 +768,7 @@ const clockTime = computed(() =>
             :class="{
               'scanner-pass-card--entry-blocked': scannerClientEntryNotAllowed,
               'scanner-pass-card--in-gym':
-                scannerVisitStatus === 'IN_GYM' && !scannerClientEntryNotAllowed,
-              'scanner-pass-card--overdue-visit':
-                scannerVisitStatus === 'OVERDUE' && !scannerClientEntryNotAllowed,
+                scannerHasOpenVisit && !scannerClientEntryNotAllowed,
             }"
             role="group"
           >
@@ -738,14 +848,61 @@ const clockTime = computed(() =>
                   class="scanner-locker-field__input"
                   type="text"
                   inputmode="numeric"
-                  maxlength="4"
+                  :maxlength="LOCKER_NUMBER_MAX_LEN"
                   autocomplete="off"
                   :disabled="scannerLoading"
                   @input="onScannerLockerNativeInput"
-                  @keydown="onScannerLockerKeydown"
+                  @keydown="onLockerDigitKeydown"
                   @keydown.enter.prevent="scannerCheckIn"
                 />
               </label>
+            </div>
+          </div>
+          <div
+            v-else-if="scannerStaffCard"
+            class="scanner-pass-card"
+            :class="{
+              'scanner-pass-card--entry-blocked': scannerStaffEntryNotAllowed,
+              'scanner-pass-card--in-gym': scannerHasOpenVisit && !scannerStaffEntryNotAllowed,
+            }"
+            role="group"
+          >
+            <div
+              v-if="scannerStaffEntryNotAllowed"
+              class="scanner-pass-card__banner scanner-pass-card__banner--danger"
+              role="status"
+            >
+              {{ t('header.scannerInactiveStaffHint') }}
+            </div>
+            <div class="scanner-pass-card__main">
+              <div class="scanner-pass-card__photo-wrap">
+                <div class="scanner-pass-card__photo" aria-hidden="true">
+                  <img
+                    v-if="scannerPhotoShowImg"
+                    class="scanner-pass-card__photo-img"
+                    :src="scannerClientPhotoSrc"
+                    alt=""
+                    @error="onScannerPhotoError"
+                  />
+                  <VaIcon v-else name="engineering" class="scanner-pass-card__photo-placeholder" size="72px" />
+                </div>
+              </div>
+              <div class="scanner-pass-card__info">
+                <h4 class="scanner-pass-card__name">{{ scannerStaffCard.fullName }}</h4>
+                <div v-if="scannerStaffCard.position" class="scanner-pass-card__phone">
+                  {{ scannerStaffCard.position }}
+                </div>
+                <div v-if="scannerStaffCard.phone" class="scanner-pass-card__phone">
+                  {{ scannerStaffCard.phone }}
+                </div>
+                <div class="scanner-pass-card__badges">
+                  <StatusBadge
+                    :label="t(`serviceStaff.status${scannerStaffCard.status === 'ACTIVE' ? 'Active' : 'Inactive'}`)"
+                    :tone="scannerStaffCard.status === 'ACTIVE' ? 'success' : 'neutral'"
+                  />
+                  <StatusBadge :label="scannerVisitBadgeLabel" :tone="scannerVisitBadgeTone" />
+                </div>
+              </div>
             </div>
           </div>
           <div
@@ -780,7 +937,7 @@ const clockTime = computed(() =>
             />
             <span class="scanner-modal__hint-text">{{ scannerHint ?? t('header.scannerHint') }}</span>
           </div>
-          <div v-if="scannerClientCard" class="scanner-modal__another-wrap">
+          <div v-if="scannerHasResolvedCard" class="scanner-modal__another-wrap">
             <VaButton
               type="button"
               preset="plain"
@@ -798,7 +955,7 @@ const clockTime = computed(() =>
         <footer class="scanner-modal__footer">
           <div class="scanner-modal__actions">
             <VaButton
-              v-if="!scannerClientCard"
+              v-if="!scannerHasResolvedCard"
               type="submit"
               form="scanner-lookup-form"
               size="large"
@@ -825,7 +982,12 @@ const clockTime = computed(() =>
               {{ t('header.scannerCreateClientButton') }}
             </VaButton>
             <VaButton
-              v-if="scannerClientCard && !scannerHasOpenVisit && !scannerClientEntryNotAllowed"
+              v-if="
+                scannerHasResolvedCard &&
+                !scannerHasOpenVisit &&
+                !scannerClientEntryNotAllowed &&
+                !scannerStaffEntryNotAllowed
+              "
               type="button"
               size="large"
               icon="login"
@@ -836,45 +998,18 @@ const clockTime = computed(() =>
             >
               {{ t('header.scannerCheckIn') }}
             </VaButton>
-            <template v-if="scannerClientCard && scannerHasOpenVisit">
-              <VaButton
-                v-if="scannerVisitStatus === 'IN_GYM'"
-                type="button"
-                size="large"
-                color="warning"
-                icon="logout"
-                class="scanner-modal__action-span"
-                :loading="scannerLoading"
-                @click="scannerCheckOut"
-              >
-                {{ t('header.scannerCheckOut') }}
-              </VaButton>
-              <div v-if="scannerVisitStatus === 'OVERDUE'" class="scanner-modal__force-close-span">
-                <VaButton
-                  type="button"
-                  size="large"
-                  preset="secondary"
-                  color="primary"
-                  icon="vpn_key"
-                  class="scanner-modal__force-close-btn"
-                  :loading="scannerLoading"
-                  @click="scannerForceClose('ADMIN_CORRECTION')"
-                >
-                  {{ t('header.scannerForceCloseKeyReturned') }}
-                </VaButton>
-                <VaButton
-                  type="button"
-                  size="large"
-                  color="danger"
-                  icon="lock_reset"
-                  class="scanner-modal__force-close-btn"
-                  :loading="scannerLoading"
-                  @click="scannerForceClose('LOST_KEY')"
-                >
-                  {{ t('header.scannerForceCloseNoKey') }}
-                </VaButton>
-              </div>
-            </template>
+            <VaButton
+              v-if="scannerHasResolvedCard && scannerHasOpenVisit"
+              type="button"
+              size="large"
+              color="warning"
+              icon="logout"
+              class="scanner-modal__action-span"
+              :loading="scannerLoading"
+              @click="scannerCheckOut"
+            >
+              {{ t('header.scannerCheckOut') }}
+            </VaButton>
           </div>
         </footer>
       </div>

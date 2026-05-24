@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Cron } from '@nestjs/schedule';
 import { ClientStatus, Prisma, VisitCloseReason, VisitSessionStatus } from '@prisma/client';
+import { normalizeLockerNumber } from '../common/locker-number';
 import { RequestContextService } from '../common/request-context.service';
 import { ContractsService } from '../contracts/contracts.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -52,10 +52,6 @@ export class VisitsService {
     return value.trim();
   }
 
-  private normalizeLocker(value: string) {
-    return value.trim().toUpperCase();
-  }
-
   /** TTL подписанного GET для photoUrl (приватный MinIO). Совпадает с ClientsService. */
   private photoReadTtlSec() {
     const v = Number(this.config.get('S3_PHOTO_READ_TTL_SEC'));
@@ -66,33 +62,6 @@ export class VisitsService {
     if (!row.photoUrl?.trim()) return row;
     const url = await this.storage.presignGetUrlForStoredPublicUrl(row.photoUrl, this.photoReadTtlSec());
     return { ...row, photoUrl: url };
-  }
-
-  /**
-   * Открытый визит IN_GYM без выхода: если календарная дата входа (Europe/Moscow)
-   * меньше сегодняшней в Москве → OVERDUE + AUTO_TIMEOUT («не сдал ключ» по смыслу для UI).
-   */
-  private async markOverdueSessions(): Promise<number> {
-    const n = await this.prisma.$executeRaw(
-      Prisma.sql`
-        UPDATE "VisitSession"
-        SET
-          status = 'OVERDUE'::"VisitSessionStatus",
-          "closeReason" = 'AUTO_TIMEOUT'::"VisitCloseReason"
-        WHERE "exitedAt" IS NULL
-          AND status = 'IN_GYM'::"VisitSessionStatus"
-          AND (("enteredAt" AT TIME ZONE 'Europe/Moscow')::date < (NOW() AT TIME ZONE 'Europe/Moscow')::date)
-      `,
-    );
-    return Number(n);
-  }
-
-  @Cron('0 0 * * *', { name: 'visitCalendarOverdue', timeZone: 'Europe/Moscow' })
-  async visitSessionsCalendarOverdueJob() {
-    const updated = await this.markOverdueSessions();
-    if (updated > 0) {
-      this.logger.log(`visit sessions marked OVERDUE (calendar day): ${updated}`);
-    }
   }
 
   private async findClientById(clientId: string) {
@@ -108,6 +77,7 @@ export class VisitsService {
         phone: true,
         cardNumber: true,
         accessKey: true,
+        lockerNumber: true,
         status: true,
         photoUrl: true,
       },
@@ -129,6 +99,7 @@ export class VisitsService {
         phone: true,
         cardNumber: true,
         accessKey: true,
+        lockerNumber: true,
         status: true,
         photoUrl: true,
       },
@@ -145,6 +116,7 @@ export class VisitsService {
     phone: string;
     cardNumber: string | null;
     accessKey: string | null;
+    lockerNumber: string | null;
     status: ClientStatus;
     photoUrl: string | null;
   }) {
@@ -161,7 +133,7 @@ export class VisitsService {
         fullName: [client.lastName, client.firstName, client.middleName].filter(Boolean).join(' '),
         contractUnpaid,
       },
-      inGym: openSession?.status === VisitSessionStatus.IN_GYM,
+      inGym: Boolean(openSession),
       openSession,
     };
   }
@@ -170,16 +142,14 @@ export class VisitsService {
     const code = params.code?.trim() ?? '';
     const clientId = params.clientId?.trim() ?? '';
     if (!code && !clientId) throw new BadRequestException(this.errors.clientNotFound);
-    await this.markOverdueSessions();
     const client = clientId ? await this.findClientById(clientId) : await this.findClientByCode(code);
     return this.buildLookupResponse(client);
   }
 
   async checkIn(code: string, lockerNumber: string, actorId: string) {
-    await this.markOverdueSessions();
     const client = await this.findClientByCode(code);
     if (client.status !== ClientStatus.ACTIVE) throw new BadRequestException(this.errors.onlyActiveAllowed);
-    const locker = this.normalizeLocker(lockerNumber);
+    const locker = normalizeLockerNumber(lockerNumber);
     if (!locker) throw new BadRequestException(this.errors.lockerRequired);
 
     let session: { id: string; lockerNumber: string; enteredAt: Date };
@@ -201,7 +171,17 @@ export class VisitsService {
         });
         if (lockerOpen) throw new BadRequestException(this.errors.lockerBusy);
 
+        const lockerAssigned = await tx.client.findFirst({
+          where: { lockerNumber: locker, NOT: { id: client.id } },
+          select: { id: true },
+        });
+        if (lockerAssigned) throw new BadRequestException(this.errors.lockerBusy);
+
         const enteredAt = new Date();
+        await tx.client.update({
+          where: { id: client.id },
+          data: { lockerNumber: locker },
+        });
         return tx.visitSession.create({
           data: {
             clientId: client.id,
@@ -234,7 +214,6 @@ export class VisitsService {
   }
 
   async checkOut(code: string, actorId: string) {
-    await this.markOverdueSessions();
     const client = await this.findClientByCode(code);
     const openSession = await this.prisma.visitSession.findFirst({
       where: { clientId: client.id, exitedAt: null },
@@ -260,7 +239,6 @@ export class VisitsService {
   }
 
   async forceClose(code: string, reason: 'LOST_KEY' | 'FOUND_LATER' | 'ADMIN_CORRECTION', actorId: string, comment?: string) {
-    await this.markOverdueSessions();
     const client = await this.findClientByCode(code);
     const openSession = await this.prisma.visitSession.findFirst({
       where: { clientId: client.id, exitedAt: null },
@@ -287,7 +265,6 @@ export class VisitsService {
   }
 
   async listCurrent() {
-    await this.markOverdueSessions();
     return this.prisma.visitSession.findMany({
       where: { exitedAt: null },
       orderBy: { enteredAt: 'asc' },
@@ -315,7 +292,6 @@ export class VisitsService {
   }
 
   async list(filters: ListVisitsQueryDto) {
-    await this.markOverdueSessions();
     const page = filters.page ?? 1;
     const limit = filters.limit ?? 20;
     const skip = (page - 1) * limit;

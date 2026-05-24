@@ -1,7 +1,16 @@
 <script setup lang="ts">
 import { computed, reactive, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { formatIsoDate, pickerValueToIsoYmd, toDateValue } from '@/utils/ruDateInput'
+import {
+  addUtcCalendarDaysInclusiveEndIsoYmd,
+  addUtcCalendarDaysIsoYmd,
+  diffDaysInclusiveUtcYmd,
+  formatIsoDate,
+  isoYmdFromDateField,
+  pickerValueToIsoYmd,
+  toDateValue,
+  toRuDateText,
+} from '@/utils/ruDateInput'
 
 const props = defineProps<{
   modelValue: boolean
@@ -37,45 +46,25 @@ function isoToPickerDate(value: string) {
   return toDateValue(value.trim()) ?? undefined
 }
 
-function parseIso(value: string) {
-  return toDateValue(value.trim()) ?? null
-}
-
-function diffDaysInclusive(startDate: Date, endDate: Date) {
-  const start = startOfDay(startDate).getTime()
-  const end = startOfDay(endDate).getTime()
-  return Math.floor((end - start) / 86400000) + 1
-}
-
 function addDays(iso: string, days: number) {
-  const base = parseIso(iso)
-  if (!base) return ''
-  const next = new Date(base)
-  next.setDate(next.getDate() + days - 1)
-  return formatIsoDate(next)
+  return addUtcCalendarDaysInclusiveEndIsoYmd(iso, days)
 }
 
 function formatDisplayDate(value?: string | null) {
-  const parsed = value ? parseIso(String(value).slice(0, 10)) : null
-  if (!parsed) return ''
-  return parsed.toLocaleDateString(locale.value === 'en' ? 'en-US' : 'ru-RU')
+  const iso = value?.trim().slice(0, 10) ?? ''
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return ''
+  const ru = toRuDateText(iso)
+  if (!ru) return iso
+  return locale.value === 'en'
+    ? iso
+    : ru
 }
 
 const todayIso = computed(() => formatIsoDate(startOfDay(new Date())))
 
-const contractStartIso = computed(() => {
-  const raw = props.serviceStartDate
-  if (!raw) return null
-  if (raw instanceof Date && !Number.isNaN(raw.getTime())) return formatIsoDate(raw)
-  return String(raw).slice(0, 10)
-})
+const contractStartIso = computed(() => isoYmdFromDateField(props.serviceStartDate))
 
-const contractEndIso = computed(() => {
-  const raw = props.serviceEndDate
-  if (!raw) return null
-  if (raw instanceof Date && !Number.isNaN(raw.getTime())) return formatIsoDate(raw)
-  return String(raw).slice(0, 10)
-})
+const contractEndIso = computed(() => isoYmdFromDateField(props.serviceEndDate))
 
 const defaultStartIso = computed(() => {
   const today = todayIso.value
@@ -97,38 +86,37 @@ const freezeDaysCount = computed(() => {
   const s = form.startDate.trim()
   const e = form.endDate.trim()
   if (!s || !e) return null
-  const sd = parseIso(s)
-  const ed = parseIso(e)
-  if (!sd || !ed || ed < sd) return null
-  return diffDaysInclusive(sd, ed)
+  return diffDaysInclusiveUtcYmd(s, e)
 })
 
 const datesInvalid = computed(() => {
   const s = form.startDate.trim()
   const e = form.endDate.trim()
   if (!s || !e) return false
-  const sd = parseIso(s)
-  const ed = parseIso(e)
-  if (!sd || !ed) return true
-  return ed < sd
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s) || !/^\d{4}-\d{2}-\d{2}$/.test(e)) return true
+  return e < s
 })
 
-const outOfContractRange = computed(() => {
+/** Начало заморозки — в периоде действия договора; окончание может быть позже текущей даты окончания (срок продлится). */
+const freezeStartOutOfRange = computed(() => {
   const s = form.startDate.trim()
-  const e = form.endDate.trim()
-  if (!s || !e || datesInvalid.value) return false
-  const sd = parseIso(s)
-  const ed = parseIso(e)
-  if (!sd || !ed) return false
-  const cStart = contractStartIso.value ? parseIso(contractStartIso.value) : null
-  const cEnd = contractEndIso.value ? parseIso(contractEndIso.value) : null
-  if (cStart && sd < cStart) return true
-  if (cEnd && ed > cEnd) return true
+  if (!s || datesInvalid.value || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false
+  const cStart = contractStartIso.value
+  const cEnd = contractEndIso.value
+  if (cStart && s < cStart) return true
+  if (cEnd && s > cEnd) return true
   return false
 })
 
+const extendedContractEndIso = computed(() => {
+  const days = freezeDaysCount.value
+  const endIso = contractEndIso.value
+  if (!endIso || typeof days !== 'number' || days < 1) return null
+  return addUtcCalendarDaysIsoYmd(endIso, days)
+})
+
 const canSubmit = computed(() => {
-  if (datesInvalid.value || outOfContractRange.value) return false
+  if (datesInvalid.value || freezeStartOutOfRange.value) return false
   return typeof freezeDaysCount.value === 'number' && freezeDaysCount.value >= 1
 })
 
@@ -161,11 +149,7 @@ function onEndDateChange(value: unknown) {
 
 function onStartDateChange(value: unknown) {
   form.startDate = toIsoDate(value)
-  if (form.endDate.trim()) {
-    const sd = parseIso(form.startDate)
-    const ed = parseIso(form.endDate)
-    if (sd && ed && ed < sd) form.endDate = ''
-  }
+  if (form.endDate.trim() && form.endDate < form.startDate) form.endDate = ''
 }
 
 function submit() {
@@ -196,7 +180,7 @@ watch(
     <div class="freeze-shell">
       <header class="freeze-header">
         <div class="freeze-icon" aria-hidden="true">
-          <VaIcon name="pause_circle" size="22px" />
+          <VaIcon name="ac_unit" size="22px" />
         </div>
         <div class="freeze-heading">
           <h3 class="freeze-title">{{ t('contracts.freezeTitle') }}</h3>
@@ -241,8 +225,8 @@ watch(
         <div
           class="freeze-summary"
           :class="{
-            'freeze-summary--invalid': datesInvalid || outOfContractRange,
-            'freeze-summary--ready': freezeDaysCount != null && !datesInvalid && !outOfContractRange,
+            'freeze-summary--invalid': datesInvalid || freezeStartOutOfRange,
+            'freeze-summary--ready': freezeDaysCount != null && !datesInvalid && !freezeStartOutOfRange,
           }"
         >
           <div class="freeze-summary__icon" aria-hidden="true">
@@ -252,18 +236,32 @@ watch(
             <template v-if="datesInvalid">
               <span class="freeze-summary__hint">{{ t('contracts.freezeManualDaysInvalid') }}</span>
             </template>
-            <template v-else-if="outOfContractRange">
+            <template v-else-if="freezeStartOutOfRange">
               <span class="freeze-summary__hint">{{ t('contracts.freezeOutOfRange') }}</span>
             </template>
             <template v-else-if="freezeDaysCount != null">
-              <span class="freeze-summary__message">
+              <p class="freeze-summary__message">
                 {{ t('contracts.freezeManualDaysSummary', { days: freezeDaysCount }) }}
-              </span>
+              </p>
+              <p v-if="extendedContractEndIso" class="freeze-summary__detail">
+                {{
+                  t('contracts.freezeExtendPreview', {
+                    date: formatDisplayDate(extendedContractEndIso),
+                  })
+                }}
+              </p>
             </template>
             <template v-else>
               <span class="freeze-summary__hint">{{ t('contracts.freezePickDatesHint') }}</span>
             </template>
           </div>
+        </div>
+
+        <div v-if="props.error" class="freeze-error" role="alert">
+          <div class="freeze-error__icon" aria-hidden="true">
+            <VaIcon name="error_outline" size="20px" />
+          </div>
+          <p class="freeze-error__text">{{ props.error }}</p>
         </div>
 
         <VaTextarea
@@ -274,8 +272,6 @@ watch(
           autosize
           class="freeze-reason"
         />
-
-        <VaAlert v-if="props.error" color="danger" outline>{{ props.error }}</VaAlert>
       </section>
 
       <footer class="freeze-actions">
@@ -284,7 +280,7 @@ watch(
         </VaButton>
         <VaButton
           color="primary"
-          icon="pause"
+          icon="ac_unit"
           :loading="props.loading"
           :disabled="!canSubmit"
           @click="submit"
@@ -409,13 +405,13 @@ watch(
 
 .freeze-summary {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.75rem;
   border-radius: 12px;
   border: 1px solid var(--app-border);
   background: color-mix(in srgb, var(--app-accent) 5%, var(--app-surface));
   padding: 0.85rem 1rem;
-  min-height: 4.5rem;
+  min-height: auto;
 }
 
 .freeze-summary--ready {
@@ -447,22 +443,62 @@ watch(
 
 .freeze-summary__content {
   display: flex;
-  align-items: baseline;
-  gap: 0.4rem;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.3rem;
   min-width: 0;
+  flex: 1;
 }
 
 .freeze-summary__message {
-  font-size: 1rem;
+  margin: 0;
+  font-size: 0.98rem;
   font-weight: 600;
-  line-height: 1.35;
+  line-height: 1.4;
   color: var(--app-text);
 }
 
-.freeze-summary__hint {
-  font-size: 0.92rem;
-  line-height: 1.35;
+.freeze-summary__detail {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.4;
   color: var(--app-text-muted, color-mix(in srgb, var(--app-text) 70%, transparent));
+}
+
+.freeze-summary__hint {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.4;
+  color: var(--app-text-muted, color-mix(in srgb, var(--app-text) 70%, transparent));
+}
+
+.freeze-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--va-danger) 38%, var(--app-border));
+  background: color-mix(in srgb, var(--va-danger) 8%, var(--app-surface));
+  padding: 0.75rem 0.9rem;
+}
+
+.freeze-error__icon {
+  flex-shrink: 0;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--va-danger) 14%, white);
+  color: var(--va-danger);
+}
+
+.freeze-error__text {
+  margin: 0.15rem 0 0;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  color: color-mix(in srgb, var(--va-danger) 82%, var(--app-text));
 }
 
 .freeze-reason :deep(textarea) {

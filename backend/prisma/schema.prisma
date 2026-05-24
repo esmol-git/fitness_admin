@@ -88,6 +88,11 @@ enum VisitCloseReason {
   BLOCKED
 }
 
+enum ServiceStaffStatus {
+  ACTIVE
+  INACTIVE
+}
+
 /** Производный статус договора для фильтров и UI (синхронизируется cron + мутациями). */
 enum ContractDerivedStatus {
   SAVED
@@ -131,6 +136,8 @@ model User {
   createdFreezes ContractFreeze[] @relation("ContractFreezeCreatedBy")
   enteredVisitSessions VisitSession[] @relation("VisitEnteredBy")
   exitedVisitSessions  VisitSession[] @relation("VisitExitedBy")
+  enteredServiceStaffVisitSessions ServiceStaffVisitSession[] @relation("ServiceStaffVisitEnteredBy")
+  exitedServiceStaffVisitSessions  ServiceStaffVisitSession[] @relation("ServiceStaffVisitExitedBy")
   refreshTokens RefreshToken[]
 
   @@index([role])
@@ -172,6 +179,7 @@ model Client {
   contractEndDate   DateTime?    @db.Date
   paymentDate       DateTime?    @db.Date
   cardNumber        String?      @unique
+  lockerNumber      String?      @unique
   accessKey         String?
   membershipType    String?
   photoUrl          String?
@@ -220,6 +228,51 @@ model VisitSession {
   @@index([clientId, status])
 }
 
+/** Обслуживающий персонал (уборщики, техники и т.д.) — без доступа в админку, проход по карте. */
+model ServiceStaff {
+  id         String             @id @default(cuid())
+  firstName  String
+  lastName   String
+  middleName String?
+  position   String?
+  phone      String?
+  cardNumber String             @unique
+  accessKey  String?
+  status     ServiceStaffStatus @default(ACTIVE)
+  photoUrl   String?
+  notes      String?
+  createdAt  DateTime           @default(now())
+  updatedAt  DateTime           @updatedAt
+
+  visitSessions ServiceStaffVisitSession[]
+
+  @@index([lastName, firstName])
+  @@index([status])
+  @@index([accessKey])
+}
+
+model ServiceStaffVisitSession {
+  id          String   @id @default(cuid())
+  staffId     String
+  enteredAt   DateTime @default(now())
+  exitedAt    DateTime?
+  status      VisitSessionStatus @default(IN_GYM)
+  closeReason VisitCloseReason?
+  enteredById String?
+  exitedById  String?
+  comment     String?
+
+  staff     ServiceStaff @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  enteredBy User?        @relation("ServiceStaffVisitEnteredBy", fields: [enteredById], references: [id], onDelete: SetNull)
+  exitedBy  User?        @relation("ServiceStaffVisitExitedBy", fields: [exitedById], references: [id], onDelete: SetNull)
+
+  @@index([staffId, enteredAt])
+  @@index([exitedAt])
+  @@index([status, enteredAt])
+  @@index([enteredAt])
+  @@index([staffId, status])
+}
+
 model ContractDocument {
   id             String   @id @default(cuid())
   clientId       String
@@ -248,19 +301,22 @@ model ContractDocument {
 }
 
 model ContractFreeze {
-  id           String   @id @default(cuid())
+  id           String    @id @default(cuid())
   contractId   String
-  startDate    DateTime @db.Date
-  endDate      DateTime @db.Date
+  startDate    DateTime  @db.Date
+  endDate      DateTime  @db.Date
   durationDays Int
   reason       String?
   createdById  String?
-  createdAt    DateTime @default(now())
+  createdAt    DateTime  @default(now())
+  /** Досрочное возобновление — период не участвует в проверке пересечений. */
+  cancelledAt  DateTime?
 
   contract  ContractDocument @relation(fields: [contractId], references: [id], onDelete: Cascade)
   createdBy User?            @relation("ContractFreezeCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
 
   @@index([contractId, startDate, endDate])
+  @@index([contractId, cancelledAt])
   @@index([endDate])
 }
 

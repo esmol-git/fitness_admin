@@ -386,8 +386,14 @@ a:hover {
 }
 
 .app-table-actions-last-col thead th:last-child,
-.app-table-actions-last-col tbody td:last-child {
+.app-table-actions-last-col tbody td:last-child,
+.app-table-actions-last-col .va-data-table__table-th:last-child,
+.app-table-actions-last-col .va-data-table__table-td:last-child {
   text-align: right;
+}
+
+.app-table-actions-last-col .va-data-table__table-th:last-child .va-data-table__table-th-content {
+  justify-content: flex-end;
 }
 
 .app-filter-row {

@@ -15,9 +15,9 @@ export const TableActionIcon = {
   viewDocument: 'description',
   /** Сгенерировать договор (список клиентов) */
   generateContract: 'post_add',
-  /** Пауза договора (заморозка) */
-  contractPause: 'pause_circle',
-  /** Возобновление договора */
+  /** Заморозка договора */
+  contractPause: 'ac_unit',
+  /** Разморозка договора */
   contractResume: 'play_circle',
   /** Запуск ожидающего договора (дата начала услуги) */
   contractActivate: 'play_arrow',

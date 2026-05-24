@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useToast } from 'vuestic-ui'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { DEFAULT_TABLE_PAGE_LIMIT, TABLE_PAGE_SIZES, type TablePageSizeOption } from '@/config/tablePagination'
 import AppDataTableShell from '@/components/ui/AppDataTableShell.vue'
+import AppDateRangeFilter from '@/components/ui/AppDateRangeFilter.vue'
 import AppEmptyState from '@/components/ui/AppEmptyState.vue'
 import AppListFiltersToolbar from '@/components/ui/AppListFiltersToolbar.vue'
+import AppExportMenu from '@/components/ui/AppExportMenu.vue'
 import AppPageCard from '@/components/ui/AppPageCard.vue'
 import AppTablePagerRow from '@/components/ui/AppTablePagerRow.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
@@ -13,9 +16,15 @@ import { normalizeRouteQuery, routeQueryEquals } from '@/composables/tableListUr
 import { resolveApiErrorMessage } from '@/composables/useApiErrorMap'
 import { useUiStore } from '@/stores/ui'
 import { api } from '@/utils/api'
+import { buildVisitsListApiParams } from '@/utils/visitsListApiParams'
+import { ExportTooManyRowsError, fetchAllPaginatedItems } from '@/utils/fetchAllPages'
+import { formatExportPeriodCaption } from '@/utils/exportPeriodCaption'
+import { detectQuickDatePreset, quickDatePresetRange, type QuickDatePreset } from '@/utils/dateRangePresets'
+import { downloadTableExport, type TableExportFormat } from '@/utils/tableExport'
 import { clientPhotoDisplayUrl } from '@/utils/clientPhotoUrl'
 
 const { t } = useI18n()
+const { init: notify } = useToast()
 const ui = useUiStore()
 const route = useRoute()
 const router = useRouter()
@@ -68,15 +77,14 @@ const filters = reactive({
   to: '',
 })
 
-const VISIT_STATE_OPTIONS = ['IN_GYM', 'LEFT', 'OVERDUE', 'FORCE_CLOSED'] as const
+/** Статусы в фильтрах списка (без устаревших OVERDUE / FORCE_CLOSED). */
+const VISIT_STATE_FILTER_OPTIONS = ['IN_GYM', 'LEFT'] as const
 const VISITS_STATE_ALL = '__ALL__'
 
 const visitStateFilterOptions = computed(() => [
   { value: VISITS_STATE_ALL, text: t('common.all') },
   { value: 'IN_GYM', text: t('visits.stateInGym') },
   { value: 'LEFT', text: t('visits.stateLeft') },
-  { value: 'OVERDUE', text: t('visits.stateOverdue') },
-  { value: 'FORCE_CLOSED', text: t('visits.stateForceClosed') },
 ])
 
 /** Vuestic: без sortable: true у колонки не рисуются стрелки и клик по заголовку не сортирует (по умолчанию false). */
@@ -95,6 +103,9 @@ let applyingFromRoute = false
 let searchUrlTimer: ReturnType<typeof setTimeout> | null = null
 
 const hasItems = computed(() => visits.value.length > 0)
+const exportLoading = ref(false)
+const visitsTodayCount = ref<number | null>(null)
+const visitsTodayLoading = ref(false)
 const pages = computed(() => Math.max(1, Math.ceil(total.value / limit.value)))
 
 const sortDeviates = computed(() => sortBy.value !== 'enteredAt' || sortOrder.value !== 'desc')
@@ -110,38 +121,11 @@ const hasActiveFilters = computed(
     sortDeviates.value,
 )
 
-function toIsoDate(value: unknown): string {
-  if (!value) return ''
-  if (typeof value === 'string') return value.slice(0, 10)
-  if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    const y = value.getFullYear()
-    const m = String(value.getMonth() + 1).padStart(2, '0')
-    const d = String(value.getDate()).padStart(2, '0')
-    return `${y}-${m}-${d}`
-  }
-  return ''
-}
-
-function parseDateIso(value: string) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null
-  const [yy, mm, dd] = value.split('-').map((v) => Number(v))
-  if (!yy || !mm || !dd) return null
-  return new Date(yy, mm - 1, dd)
-}
-
-const visitsDateRangeModel = computed(() => {
-  const hasFrom = Boolean(filters.from)
-  const hasTo = Boolean(filters.to)
-  if (!hasFrom && !hasTo) return undefined
-  return {
-    start: hasFrom ? parseDateIso(filters.from) ?? undefined : undefined,
-    end: hasTo ? parseDateIso(filters.to) ?? undefined : undefined,
-  }
-})
+const activeDatePreset = computed(() => detectQuickDatePreset(filters.from, filters.to))
 
 function parseStateFromQuery(raw: string): string {
   if (!raw) return ''
-  return (VISIT_STATE_OPTIONS as readonly string[]).includes(raw) ? raw : ''
+  return (VISIT_STATE_FILTER_OPTIONS as readonly string[]).includes(raw) ? raw : ''
 }
 
 function parsePage(raw: string): number {
@@ -229,7 +213,7 @@ function resetVisitsFilters() {
     void nextTick(() => {
       applyingFromRoute = false
     })
-    if (noopNav) void loadVisits()
+    if (noopNav) void refreshVisitsPage()
   })
 }
 
@@ -242,7 +226,7 @@ watch(
     }
     applyingFromRoute = true
     applyVisitsFromRoute()
-    void loadVisits()
+    void refreshVisitsPage()
     void nextTick(() => {
       applyingFromRoute = false
     })
@@ -281,23 +265,18 @@ function onFilterState(value: unknown) {
   filters.state = v === VISITS_STATE_ALL || v === '' ? '' : v
 }
 
-function onFilterDateRange(value: unknown) {
-  if (value == null || value === '' || value === false) {
-    filters.from = ''
-    filters.to = ''
-    return
-  }
-  if (Array.isArray(value)) {
-    const [a, b] = value
-    filters.from = a != null && a !== '' ? toIsoDate(a) : ''
-    filters.to = b != null && b !== '' ? toIsoDate(b) : ''
-    return
-  }
-  if (typeof value === 'object' && value !== null && ('start' in value || 'end' in value)) {
-    const r = value as { start?: Date | string | null; end?: Date | string | null }
-    filters.from = r.start != null && r.start !== '' ? toIsoDate(r.start) : ''
-    filters.to = r.end != null && r.end !== '' ? toIsoDate(r.end) : ''
-  }
+function applyVisitDatePreset(preset: QuickDatePreset) {
+  const range = quickDatePresetRange(preset)
+  filters.from = range.from
+  filters.to = range.to
+  page.value = 1
+  pushVisitsQueryToUrl()
+}
+
+function applyVisitStatePreset(state: '' | (typeof VISIT_STATE_FILTER_OPTIONS)[number]) {
+  filters.state = state
+  page.value = 1
+  pushVisitsQueryToUrl()
 }
 
 function fullName(row: { firstName: string; lastName: string; middleName?: string | null }) {
@@ -346,38 +325,109 @@ function formatDate(value: string | null) {
   return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('ru-RU')
 }
 
-function exportCsv() {
-  if (!visits.value.length) return
-  const rows = visits.value.map((row) => [
-    fullName(row.client),
-    row.client.phone,
-    row.lockerNumber,
-    formatDate(row.enteredAt),
-    formatDate(row.exitedAt),
-    stateLabel(row.status),
-    closeReasonLabel(row.closeReason),
-    actorName(row.exitedBy),
-  ])
-  const header = [
-    t('clients.fullName'),
-    t('clients.phone'),
-    t('visits.locker'),
-    t('visits.enteredAt'),
-    t('visits.exitedAt'),
-    t('clients.statusLabel'),
-    t('visits.closeReasonLabel'),
-    t('visits.closedBy'),
-  ]
-  const csv = [header, ...rows]
-    .map((line) => line.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(','))
-    .join('\n')
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = `visits-${new Date().toISOString().slice(0, 10)}.csv`
-  link.click()
-  URL.revokeObjectURL(url)
+async function exportVisitsTable(format: TableExportFormat) {
+  if (!total.value) {
+    notify({ color: 'warning', message: t('common.exportEmpty') })
+    return
+  }
+  exportLoading.value = true
+  try {
+    const listQuery = {
+      page: 1,
+      limit: 200,
+      search: filters.search,
+      state: filters.state,
+      from: filters.from,
+      to: filters.to,
+      sortBy: sortBy.value,
+      sortOrder: sortOrder.value,
+    }
+    const { items: exportItems } = await fetchAllPaginatedItems({
+      pageSize: 200,
+      fetchPage: async (pageNum, pageLimit) => {
+        const params = buildVisitsListApiParams({ ...listQuery, page: pageNum, limit: pageLimit })
+        const { data } = await api.get('/visits', { params })
+        if (Array.isArray(data)) {
+          return { items: data, total: data.length }
+        }
+        const typed = data as { items?: typeof visits.value; meta?: { total?: number } }
+        const itemsList = Array.isArray(typed.items) ? typed.items : []
+        const tot = Number.isFinite(typed.meta?.total) ? Number(typed.meta?.total) : itemsList.length
+        return { items: itemsList, total: tot }
+      },
+    })
+    if (!exportItems.length) {
+      notify({ color: 'warning', message: t('common.exportEmpty') })
+      return
+    }
+    const headers = [
+      t('clients.fullName'),
+      t('clients.phone'),
+      t('visits.locker'),
+      t('visits.enteredAt'),
+      t('visits.exitedAt'),
+      t('clients.statusLabel'),
+      t('visits.closeReasonLabel'),
+      t('visits.closedBy'),
+    ]
+    const rows = exportItems.map((row) => [
+      fullName(row.client),
+      row.client.phone,
+      row.lockerNumber,
+      formatDate(row.enteredAt),
+      formatDate(row.exitedAt),
+      stateLabel(row.status),
+      closeReasonLabel(row.closeReason),
+      actorName(row.exitedBy),
+    ])
+    const periodCaption = formatExportPeriodCaption(filters.from, filters.to, t)
+    downloadTableExport({
+      format,
+      filenameBase: 'visits',
+      headers,
+      rows,
+      preamble: periodCaption ? [periodCaption] : undefined,
+      csvDelimiter: ';',
+    })
+    notify({ color: 'success', message: t('common.exported') })
+  } catch (e: unknown) {
+    if (e instanceof ExportTooManyRowsError) {
+      notify({
+        color: 'warning',
+        message: t('common.exportTooMany', { total: e.total, max: e.max }),
+      })
+      return
+    }
+    notify({ color: 'danger', message: t('common.exportFailed') })
+  } finally {
+    exportLoading.value = false
+  }
+}
+
+function parseVisitsListTotal(data: unknown): number {
+  if (Array.isArray(data)) return data.length
+  const typed = data as { items?: unknown[]; meta?: { total?: number } }
+  if (Number.isFinite(typed.meta?.total)) return Number(typed.meta?.total)
+  return Array.isArray(typed.items) ? typed.items.length : 0
+}
+
+async function loadVisitsTodayCount() {
+  visitsTodayLoading.value = true
+  try {
+    const { from, to } = quickDatePresetRange('today')
+    const { data } = await api.get('/visits', {
+      params: { page: '1', limit: '1', from, to },
+    })
+    visitsTodayCount.value = parseVisitsListTotal(data)
+  } catch {
+    visitsTodayCount.value = null
+  } finally {
+    visitsTodayLoading.value = false
+  }
+}
+
+async function refreshVisitsPage() {
+  await Promise.all([loadVisits(), loadVisitsTodayCount()])
 }
 
 async function loadVisits() {
@@ -390,7 +440,7 @@ async function loadVisits() {
     params.sortBy = sortBy.value
     params.sortOrder = sortOrder.value
     if (filters.search.trim()) params.search = filters.search.trim()
-    if (filters.state === 'IN_GYM' || filters.state === 'LEFT' || filters.state === 'OVERDUE' || filters.state === 'FORCE_CLOSED') {
+    if (filters.state === 'IN_GYM' || filters.state === 'LEFT') {
       params.state = filters.state
     }
     if (filters.from) params.from = filters.from
@@ -421,7 +471,7 @@ watch([pages, limit], () => {
 watch(
   () => ui.visitsTableRefreshTick,
   () => {
-    void loadVisits()
+    void refreshVisitsPage()
   },
 )
 
@@ -448,13 +498,31 @@ onBeforeUnmount(() => {
 
 <template>
   <AppPageCard :title="t('visits.title')">
+    <template #title>
+      <div class="visits-page-title">
+        <span class="visits-page-title__text">{{ t('visits.title') }}</span>
+        <div class="visits-today-badge" aria-live="polite">
+          <VaIcon name="event_available" size="15px" class="visits-today-badge__icon" />
+          <div class="visits-today-badge__content">
+            <span class="visits-today-badge__label">{{ t('visits.todayCountLabel') }}</span>
+            <span class="visits-today-badge__value">
+              <template v-if="visitsTodayCount != null">{{ visitsTodayCount }}</template>
+              <span v-else-if="visitsTodayLoading" class="visits-today-badge__placeholder">…</span>
+              <span v-else>—</span>
+            </span>
+          </div>
+        </div>
+      </div>
+    </template>
     <template #actions>
-      <VaButton preset="secondary" icon="refresh" :loading="loading" @click="loadVisits">
+      <VaButton preset="secondary" icon="refresh" :loading="loading" @click="refreshVisitsPage">
         {{ t('common.refresh') }}
       </VaButton>
-      <VaButton preset="secondary" icon="download" :disabled="!hasItems" @click="exportCsv">
-        {{ t('reports.exportCsv') }}
-      </VaButton>
+      <AppExportMenu
+        :disabled="!total || loading"
+        :loading="exportLoading"
+        @export="exportVisitsTable"
+      />
     </template>
     <template #filters>
       <AppListFiltersToolbar>
@@ -474,13 +542,11 @@ onBeforeUnmount(() => {
             text-by="text"
             @update:model-value="onFilterState"
           />
-          <VaDateInput
-            mode="range"
-            :model-value="visitsDateRangeModel"
+          <AppDateRangeFilter
+            v-model:from="filters.from"
+            v-model:to="filters.to"
             :label="t('visits.filterDateRange')"
-            :placeholder="t('visits.dateRangePlaceholder')"
-            clearable
-            @update:model-value="onFilterDateRange"
+            :range-placeholder="t('visits.dateRangePlaceholder')"
           />
         </div>
         <template #actions>
@@ -496,6 +562,74 @@ onBeforeUnmount(() => {
         </template>
       </AppListFiltersToolbar>
     </template>
+
+    <div class="visits-presets-row">
+      <div
+        class="app-preset-strip preset-strip--date"
+        :class="{ 'app-preset-strip--active': Boolean(activeDatePreset) }"
+        role="group"
+        :aria-label="t('visits.datePresetsLabel')"
+      >
+        <VaIcon name="event" size="16px" color="secondary" />
+        <span class="app-preset-label">{{ t('visits.datePresetsLabel') }}</span>
+        <VaButton
+          type="button"
+          size="small"
+          class="app-preset-chip"
+          :preset="activeDatePreset === 'today' ? 'primary' : 'secondary'"
+          @click="applyVisitDatePreset('today')"
+        >
+          {{ t('clients.presetToday') }}
+        </VaButton>
+        <VaButton
+          type="button"
+          size="small"
+          class="app-preset-chip"
+          :preset="activeDatePreset === '7d' ? 'primary' : 'secondary'"
+          @click="applyVisitDatePreset('7d')"
+        >
+          {{ t('clients.preset7Days') }}
+        </VaButton>
+        <VaButton
+          type="button"
+          size="small"
+          class="app-preset-chip"
+          :preset="activeDatePreset === '30d' ? 'primary' : 'secondary'"
+          @click="applyVisitDatePreset('30d')"
+        >
+          {{ t('clients.preset30Days') }}
+        </VaButton>
+      </div>
+      <div
+        class="app-preset-strip preset-strip--status"
+        :class="{ 'app-preset-strip--active': Boolean(filters.state) }"
+        role="group"
+        :aria-label="t('visits.filterState')"
+      >
+        <VaIcon name="history" size="16px" color="secondary" />
+        <span class="app-preset-label">{{ t('visits.filterState') }}</span>
+        <VaButton
+          type="button"
+          size="small"
+          class="app-preset-chip"
+          :preset="filters.state === '' ? 'primary' : 'secondary'"
+          @click="applyVisitStatePreset('')"
+        >
+          {{ t('common.all') }}
+        </VaButton>
+        <VaButton
+          v-for="state in VISIT_STATE_FILTER_OPTIONS"
+          :key="state"
+          type="button"
+          size="small"
+          class="app-preset-chip"
+          :preset="filters.state === state ? 'primary' : 'secondary'"
+          @click="applyVisitStatePreset(state)"
+        >
+          {{ stateLabel(state) }}
+        </VaButton>
+      </div>
+    </div>
 
     <VaAlert v-if="error" color="danger" outline class="visits-error">{{ error }}</VaAlert>
 
@@ -557,11 +691,90 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.visits-page-title {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.visits-page-title__text {
+  font-size: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+}
+
+.visits-today-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.32rem 0.75rem 0.32rem 0.55rem;
+  border-radius: var(--app-radius-md);
+  border: 1px solid color-mix(in srgb, var(--app-accent) 34%, var(--app-border));
+  background: color-mix(in srgb, var(--app-accent) 11%, var(--app-surface));
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--app-accent) 8%, transparent);
+}
+
+.visits-today-badge__icon {
+  flex-shrink: 0;
+  color: var(--app-accent);
+}
+
+.visits-today-badge__content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.02rem;
+  min-width: 0;
+}
+
+.visits-today-badge__label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--app-muted);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.visits-today-badge__value {
+  font-size: 1.2rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  color: var(--app-accent);
+}
+
+.visits-today-badge__placeholder {
+  color: var(--app-muted);
+}
+
+.visits-presets-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.65rem;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 0.4rem 0 0.2rem;
+  border-top: 1px solid color-mix(in srgb, var(--app-border) 86%, transparent);
+  margin-top: 0.05rem;
+}
+
+.preset-strip--date,
+.preset-strip--status {
+  flex: 1 1 18rem;
+  min-width: 18rem;
+}
+
 .visits-filters-grid {
   width: 100%;
   display: grid;
   gap: 0.6rem;
-  grid-template-columns: minmax(12rem, 1.65fr) minmax(11rem, 1fr) minmax(14rem, 1.45fr);
+  grid-template-columns: minmax(10rem, 1.25fr) minmax(9rem, 1fr) minmax(13rem, 1.35fr);
   align-items: end;
 }
 
@@ -621,4 +834,5 @@ onBeforeUnmount(() => {
     grid-template-columns: 1fr;
   }
 }
+
 </style>

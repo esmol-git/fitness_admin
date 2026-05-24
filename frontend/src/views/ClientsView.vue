@@ -11,9 +11,12 @@ import {
 import { TableActionIcon } from '@/config/tableActionIcons'
 import { DEFAULT_TABLE_PAGE_LIMIT } from '@/config/tablePagination'
 import AppDataTableShell from '@/components/ui/AppDataTableShell.vue'
+import AppDateRangeFilter from '@/components/ui/AppDateRangeFilter.vue'
 import ContractFreezeModal from '@/components/contracts/ContractFreezeModal.vue'
+import ContractResumeModal from '@/components/contracts/ContractResumeModal.vue'
 import AppEmptyState from '@/components/ui/AppEmptyState.vue'
 import AppListFiltersToolbar from '@/components/ui/AppListFiltersToolbar.vue'
+import AppExportMenu from '@/components/ui/AppExportMenu.vue'
 import AppPageCard from '@/components/ui/AppPageCard.vue'
 import AppSectionCard from '@/components/ui/AppSectionCard.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
@@ -34,9 +37,14 @@ import { useTableState } from '@/composables/useTableState'
 import type { ClientForm, ClientRow, ClientStatus } from '@/types/clients'
 import type { TableHeaderConfig, TableSortOrder } from '@/types/table'
 import { api } from '@/utils/api'
-import { clientPhotoDisplayUrl } from '@/utils/clientPhotoUrl'
+import { clientPhotoDisplayUrl, clientPhotoUrlForApiPayload } from '@/utils/clientPhotoUrl'
+import { buildClientsListApiParams } from '@/utils/clientsListApiParams'
 import { getClientContractDaysLeft } from '@/utils/clientContractRemaining'
+import { ExportTooManyRowsError, fetchAllPaginatedItems } from '@/utils/fetchAllPages'
+import { formatExportPeriodCaption } from '@/utils/exportPeriodCaption'
+import { downloadTableExport, type TableExportFormat } from '@/utils/tableExport'
 import { meaningfulAlertText } from '@/utils/meaningfulAlertText'
+import { sanitizeLockerDigits } from '@/utils/lockerNumber'
 import { isoCalendarDateAtNowLocalTimeToUtcIso, pickerValueToIsoYmd } from '@/utils/ruDateInput'
 
 const { t } = useI18n()
@@ -87,6 +95,7 @@ const {
   page,
   limit,
   items,
+  total,
   pages,
   query,
   filters,
@@ -117,7 +126,6 @@ const inGymFilterOptions = computed(() => [
   { value: ALL_GYM_VALUE, text: t('common.all') },
   { value: 'IN_GYM', text: t('clients.inGymYes') },
   { value: 'OUT_GYM', text: t('clients.inGymNo') },
-  { value: 'VISIT_OVERDUE', text: t('clients.inGymOverdueVisit') },
 ])
 const genderFilterOptions = computed(() => [
   { value: ALL_GENDER_VALUE, text: t('common.all') },
@@ -163,6 +171,7 @@ const createState = useCrudForm<ClientForm>(() => ({
   paymentDate: '',
   membershipType: '',
   cardNumber: '',
+  lockerNumber: '',
   photoUrl: '',
 }))
 
@@ -186,6 +195,7 @@ const editState = useCrudForm<ClientForm>(() => ({
   paymentDate: '',
   membershipType: '',
   cardNumber: '',
+  lockerNumber: '',
   photoUrl: '',
 }))
 const editModalOpen = editState.open
@@ -240,6 +250,8 @@ const createCardChecking = ref(false)
 const editCardChecking = ref(false)
 const createCardTaken = ref(false)
 const editCardTaken = ref(false)
+const editLockerChecking = ref(false)
+const editLockerTaken = ref(false)
 const editContractsHistory = ref<
   Array<{
     id: string
@@ -317,6 +329,10 @@ const freezeOpen = ref(false)
 const freezeLoading = ref(false)
 const freezeTargetId = ref<string | null>(null)
 const freezeUiError = ref<string | null>(null)
+const resumeOpen = ref(false)
+const resumeLoading = ref(false)
+const resumeTargetId = ref<string | null>(null)
+const resumeUiError = ref<string | null>(null)
 const cancelOpen = ref(false)
 const cancelLoading = ref(false)
 const cancelTarget = ref<{ id: string; contractNumber: string } | null>(null)
@@ -325,6 +341,7 @@ const statusActionLoadingId = ref<string | null>(null)
 const contractGenerateLoadingId = ref<string | null>(null)
 let createCardTimer: ReturnType<typeof setTimeout> | null = null
 let editCardTimer: ReturnType<typeof setTimeout> | null = null
+let editLockerTimer: ReturnType<typeof setTimeout> | null = null
 
 const { onTableSortBy, onTableSortOrder, resetSort } = useTableSortingSync({
   sortBy,
@@ -381,19 +398,25 @@ function getPersonHeadline(form: ClientForm) {
   return age ? `${fio}, ${age}` : fio
 }
 
+function resolveClientGymHeaderState(
+  client: Pick<ClientRow, 'inGym' | 'openVisitStatus'>,
+): { inGym: boolean | null; openVisitStatus: ClientRow['openVisitStatus'] } {
+  const openVisitStatus = client.openVisitStatus ?? null
+  if (openVisitStatus != null) {
+    return { inGym: true, openVisitStatus }
+  }
+  if (typeof client.inGym === 'boolean') {
+    return { inGym: client.inGym, openVisitStatus: null }
+  }
+  return { inGym: null, openVisitStatus: null }
+}
+
 function clientGymTableChip(row: Pick<ClientRow, 'inGym' | 'openVisitStatus'>) {
-  if (row.inGym === true) {
+  if (row.inGym === true || row.openVisitStatus != null) {
     return {
       label: t('clients.inGymYes'),
       tone: 'success' as const,
       title: t('clients.openScannerFromGymChip'),
-    }
-  }
-  if (row.openVisitStatus === 'OVERDUE') {
-    return {
-      label: t('clients.inGymOverdueVisit'),
-      tone: 'warning' as const,
-      title: t('clients.inGymOverdueVisitChipTitle'),
     }
   }
   return {
@@ -454,60 +477,14 @@ function handleSortOrderUpdate(value: unknown) {
   }
 }
 
+const exportLoading = ref(false)
+
 const clientsSource = useTableDataSource<ClientRow, typeof query.value>({
   query,
   loading,
   setResult,
   fetcher: async (params) => {
-    const safeParams: Record<string, string | number> = { page: params.page, limit: params.limit }
-    const trimmedSearch = typeof params.search === 'string' ? params.search.trim() : ''
-    if (trimmedSearch) safeParams.search = trimmedSearch
-    if (
-      params.status === 'ACTIVE' ||
-      params.status === 'PAUSED' ||
-      params.status === 'INACTIVE' ||
-      params.status === 'BLOCKED'
-    ) {
-      safeParams.status = params.status
-    }
-    if (params.inGym === 'IN_GYM' || params.inGym === 'OUT_GYM' || params.inGym === 'VISIT_OVERDUE') {
-      safeParams.inGym = params.inGym
-    }
-    const membershipType = typeof params.membershipType === 'string' ? params.membershipType.trim() : ''
-    if (membershipType) {
-      safeParams.membershipType = membershipType
-    }
-    if (typeof params.lastVisitFrom === 'string' && params.lastVisitFrom) {
-      safeParams.lastVisitFrom = params.lastVisitFrom
-    }
-    if (typeof params.lastVisitTo === 'string' && params.lastVisitTo) {
-      safeParams.lastVisitTo = params.lastVisitTo
-    }
-    if (params.gender === 'MALE' || params.gender === 'FEMALE') {
-      safeParams.gender = params.gender
-    }
-    const ageFrom = typeof params.ageFrom === 'string' ? Number(params.ageFrom) : Number.NaN
-    if (Number.isFinite(ageFrom) && ageFrom > 0) {
-      safeParams.ageFrom = Math.trunc(ageFrom)
-    }
-    const ageTo = typeof params.ageTo === 'string' ? Number(params.ageTo) : Number.NaN
-    if (Number.isFinite(ageTo) && ageTo > 0) {
-      safeParams.ageTo = Math.trunc(ageTo)
-    }
-    if (
-      params.sortBy === 'fullName' ||
-      params.sortBy === 'phone' ||
-      params.sortBy === 'createdAt' ||
-      params.sortBy === 'inGym' ||
-      params.sortBy === 'status' ||
-      params.sortBy === 'age' ||
-      params.sortBy === 'lastVisitAt'
-    ) {
-      safeParams.sortBy = params.sortBy
-    }
-    if (params.sortOrder === 'asc' || params.sortOrder === 'desc') {
-      safeParams.sortOrder = params.sortOrder
-    }
+    const safeParams = buildClientsListApiParams(params)
     const { data } = await api.get('/clients', { params: safeParams })
     return { items: data.items as ClientRow[], total: data.total as number }
   },
@@ -517,6 +494,101 @@ const clientsSource = useTableDataSource<ClientRow, typeof query.value>({
       byStatus: { 403: t('clients.forbidden') },
     }),
 })
+
+function formatExportDateTime(value: string | null | undefined) {
+  if (!value) return '—'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('ru-RU')
+}
+
+function clientExportFullName(row: ClientRow) {
+  return [row.lastName, row.firstName, row.middleName].map((v) => String(v ?? '').trim()).filter(Boolean).join(' ')
+}
+
+async function exportClientsTable(format: TableExportFormat) {
+  if (!total.value) {
+    notify({ color: 'warning', message: t('common.exportEmpty') })
+    return
+  }
+  exportLoading.value = true
+  try {
+    const listQuery = { ...query.value }
+    const { items: exportItems } = await fetchAllPaginatedItems<ClientRow>({
+      pageSize: 100,
+      fetchPage: async (pageNum, pageLimit) => {
+        const { data } = await api.get('/clients', {
+          params: buildClientsListApiParams({ ...listQuery, page: pageNum, limit: pageLimit }),
+        })
+        return { items: data.items as ClientRow[], total: data.total as number }
+      },
+    })
+    if (!exportItems.length) {
+      notify({ color: 'warning', message: t('common.exportEmpty') })
+      return
+    }
+    const headers = [
+      t('clients.fullName'),
+      t('clients.inGym'),
+      t('clients.phone'),
+      t('clients.membership'),
+      t('clients.daysLeftColumn'),
+      t('clients.statusLabel'),
+      t('clients.age'),
+      t('clients.genderLabel'),
+      t('clients.lastVisitDate'),
+      t('clients.cardNumber'),
+    ]
+    const rows = exportItems.map((row) => {
+      const remaining = getClientContractDaysLeft(
+        row.effectiveContractStartDate ?? row.contractStartDate,
+        row.effectiveContractEndDate ?? row.contractEndDate,
+      )
+      const gym = clientGymTableChip(row)
+      const age = row.birthDate ? getAgeValue(row.birthDate.slice(0, 10)) : null
+      const membershipLabel =
+        row.membershipCatalogName?.trim() ||
+        memberships.value.find((m) => m.value === row.membershipType)?.text ||
+        '—'
+      return [
+        clientExportFullName(row),
+        gym.label,
+        row.phone ?? '',
+        membershipLabel,
+        remaining.daysLeft == null ? '—' : t('clients.daysLeftShort', { n: Math.max(0, remaining.daysLeft) }),
+        t(`clients.status.${row.status}`),
+        age == null ? '—' : String(age),
+        row.gender ? t(`clients.gender.${row.gender}`) : t('clients.genderEmpty'),
+        formatExportDateTime(row.lastVisitAt),
+        row.cardNumber?.trim() || '—',
+      ]
+    })
+    const periodCaption = formatExportPeriodCaption(
+      filters.value.lastVisitFrom ?? '',
+      filters.value.lastVisitTo ?? '',
+      t,
+    )
+    downloadTableExport({
+      format,
+      filenameBase: 'clients',
+      headers,
+      rows,
+      preamble: periodCaption ? [periodCaption] : undefined,
+      csvDelimiter: ';',
+    })
+    notify({ color: 'success', message: t('common.exported') })
+  } catch (e: unknown) {
+    if (e instanceof ExportTooManyRowsError) {
+      notify({
+        color: 'warning',
+        message: t('common.exportTooMany', { total: e.total, max: e.max }),
+      })
+      return
+    }
+    notify({ color: 'danger', message: t('common.exportFailed') })
+  } finally {
+    exportLoading.value = false
+  }
+}
 
 const tableItems = computed(() =>
   items.value.map((item) => {
@@ -557,12 +629,6 @@ const membershipOptionsForEdit = computed(() => {
     return [...base, extra]
   }
   return base
-})
-const currentManagerName = computed(() => {
-  const user = auth.user
-  if (!user) return t('clients.noManager')
-  const fullName = [user.lastName, user.firstName].filter(Boolean).join(' ').trim()
-  return fullName || user.login
 })
 const editorStatusOptions = computed(
   () => statusFilterOptions.value.slice(1) as Array<{ value: ClientStatus; text: string }>,
@@ -620,12 +686,13 @@ const editPauseUntilCompactLabel = computed(() => {
 const editGymChip = computed(() => {
   const s = editHeaderSnapshot.value
   if (s.status !== 'ACTIVE') return null
-  if (s.inGym == null) return { label: '—', tone: 'neutral' as const }
-  if (s.openVisitStatus === 'OVERDUE' && !s.inGym) {
-    return { label: t('clients.inGymOverdueVisit'), tone: 'warning' as const }
+  if (s.openVisitStatus != null || s.inGym === true) {
+    return { label: t('clients.inGymYes'), tone: 'success' as const }
   }
-  if (s.inGym) return { label: t('clients.inGymYes'), tone: 'success' as const }
-  return { label: t('clients.inGymNo'), tone: 'neutral' as const }
+  if (s.inGym === false) {
+    return { label: t('clients.inGymNo'), tone: 'neutral' as const }
+  }
+  return null
 })
 
 function generateContractNumber(baseDate = new Date()) {
@@ -663,7 +730,8 @@ function toPayload(form: ClientForm, includeContractFields = true) {
     notes: form.notes.trim() || undefined,
     membershipType: form.membershipType || undefined,
     cardNumber: form.cardNumber.trim() || undefined,
-    photoUrl: form.photoUrl.trim() || undefined,
+    lockerNumber: form.lockerNumber.trim() || null,
+    photoUrl: clientPhotoUrlForApiPayload(form.photoUrl),
   }
   if (!includeContractFields) return basePayload
   return {
@@ -814,20 +882,24 @@ async function openEdit(
     paymentDate: toDateOnly(client.paymentDate) || toDateOnly(client.contractStartDate) || toDateOnly(client.createdAt),
     membershipType: catalogId,
     cardNumber: client.cardNumber || '',
+    lockerNumber: sanitizeLockerDigits(client.lockerNumber ?? ''),
     photoUrl: client.photoUrl || '',
   })
   void nextTick(() => {
     editModalOpening = false
   })
+  const gymHeader = resolveClientGymHeaderState(client)
   editHeaderSnapshot.value = {
     headline: getPersonHeadline(editState.form.value),
     status: client.status || 'ACTIVE',
-    inGym: typeof client.inGym === 'boolean' ? client.inGym : null,
-    openVisitStatus: client.openVisitStatus ?? null,
+    inGym: gymHeader.inGym,
+    openVisitStatus: gymHeader.openVisitStatus,
   }
   editInitialSnapshot.value = JSON.stringify(editState.form.value)
   editCardChecking.value = false
   editCardTaken.value = false
+  editLockerTaken.value = false
+  editLockerChecking.value = false
   const requestId = ++editHistoryRequestId.value
   resetEditVisitsHistoryState()
   void Promise.all([loadEditContractsHistory(client.id, requestId), loadEditPaymentsHistory(client.id, requestId)])
@@ -1037,6 +1109,7 @@ async function createClient() {
   try {
     const photoOk = await flushClientFormPhoto(createFormRef.value)
     if (!photoOk) {
+      createState.error.value = t('clients.photoUploadFailed')
       return
     }
     await api.post('/clients', toPayload(createState.form.value))
@@ -1053,6 +1126,7 @@ async function createClient() {
         CONTRACT_NUMBER_EXISTS: t('clients.contractNumberTaken'),
         CARD_NUMBER_REQUIRED: t('clients.apiFormError'),
         CONTRACT_NUMBER_REQUIRED: t('clients.apiFormError'),
+        PHOTO_DATA_URL_NOT_ALLOWED: t('clients.photoDataUrlNotAllowed'),
       },
     })
   } finally {
@@ -1065,7 +1139,7 @@ async function updateClient() {
   editAttempted.value = true
   await nextTick()
   editFormRef.value?.validateSubmitFields()
-  if (requiredInvalid(editState.form.value) || editCardTaken.value) {
+  if (requiredInvalid(editState.form.value) || editCardTaken.value || editLockerTaken.value) {
     editState.error.value = null
     editFormRef.value?.focusFirstInvalid()
     return
@@ -1075,6 +1149,7 @@ async function updateClient() {
   try {
     const photoOk = await flushClientFormPhoto(editFormRef.value)
     if (!photoOk) {
+      editState.error.value = t('clients.photoUploadFailed')
       return
     }
     await api.patch(`/clients/${editingId.value}`, toPayload(editState.form.value, false))
@@ -1093,6 +1168,9 @@ async function updateClient() {
         CONTRACT_NUMBER_EXISTS: t('clients.contractNumberTaken'),
         CARD_NUMBER_REQUIRED: t('clients.apiFormError'),
         CONTRACT_NUMBER_REQUIRED: t('clients.apiFormError'),
+        LOCKER_REQUIRES_ACTIVE_CONTRACT: t('clients.lockerRequiresActiveContract'),
+        LOCKER_NUMBER_EXISTS: t('clients.lockerNumberTaken'),
+        PHOTO_DATA_URL_NOT_ALLOWED: t('clients.photoDataUrlNotAllowed'),
       },
     })
   } finally {
@@ -1439,7 +1517,7 @@ async function saveAndGenerateContract() {
   editAttempted.value = true
   await nextTick()
   editFormRef.value?.validateSubmitFields()
-  if (requiredInvalid(editState.form.value) || editCardTaken.value) {
+  if (requiredInvalid(editState.form.value) || editCardTaken.value || editLockerTaken.value) {
     editState.error.value = null
     editFormRef.value?.focusFirstInvalid()
     return
@@ -1449,6 +1527,7 @@ async function saveAndGenerateContract() {
   try {
     const photoOk = await flushClientFormPhoto(editFormRef.value)
     if (!photoOk) {
+      editState.error.value = t('clients.photoUploadFailed')
       return
     }
     await api.patch(`/clients/${editingId.value}`, toPayload(editState.form.value, false))
@@ -1465,6 +1544,9 @@ async function saveAndGenerateContract() {
         CONTRACT_NUMBER_EXISTS: t('clients.contractNumberTaken'),
         CARD_NUMBER_REQUIRED: t('clients.apiFormError'),
         CONTRACT_NUMBER_REQUIRED: t('clients.apiFormError'),
+        LOCKER_REQUIRES_ACTIVE_CONTRACT: t('clients.lockerRequiresActiveContract'),
+        LOCKER_NUMBER_EXISTS: t('clients.lockerNumberTaken'),
+        PHOTO_DATA_URL_NOT_ALLOWED: t('clients.photoDataUrlNotAllowed'),
       },
     })
   } finally {
@@ -1528,11 +1610,12 @@ function applyEditedClientRowFromList(clientId: string) {
     row.status === 'BLOCKED'
   ) {
     editState.form.value.status = row.status
+    const gymHeader = resolveClientGymHeaderState(row)
     editHeaderSnapshot.value = {
       ...editHeaderSnapshot.value,
       status: row.status,
-      inGym: row.inGym ?? editHeaderSnapshot.value.inGym,
-      openVisitStatus: row.openVisitStatus ?? editHeaderSnapshot.value.openVisitStatus,
+      inGym: gymHeader.inGym,
+      openVisitStatus: gymHeader.openVisitStatus,
     }
   }
 }
@@ -1677,17 +1760,30 @@ async function submitFreezeFromHistory(payload: { startDate: string; endDate: st
   }
 }
 
-async function resumeContractFromHistory(contractId: string) {
+function askResumeContractFromHistory(contractId: string) {
+  resumeTargetId.value = contractId
+  resumeUiError.value = null
+  resumeOpen.value = true
+}
+
+async function submitResumeFromHistory() {
+  if (!resumeTargetId.value) return
+  resumeLoading.value = true
+  resumeUiError.value = null
   try {
-    await api.patch(`/contracts/${contractId}/resume`)
+    await api.patch(`/contracts/${resumeTargetId.value}/resume`)
+    resumeOpen.value = false
+    resumeTargetId.value = null
     await reloadEditedClientContractState()
   } catch (e: unknown) {
-    editState.error.value = resolveApiErrorMessage(e, {
+    resumeUiError.value = resolveApiErrorMessage(e, {
       defaultMessage: t('contracts.statusUpdateFailed'),
       byCode: {
-        ONLY_PAUSED_CAN_RESUME: t('contracts.statusUpdateFailed'),
+        ONLY_PAUSED_CAN_RESUME: t('contracts.onlyPausedCanResume'),
       },
     })
+  } finally {
+    resumeLoading.value = false
   }
 }
 
@@ -1863,6 +1959,8 @@ watch(
       editInitialSnapshot.value = ''
       editCardChecking.value = false
       editCardTaken.value = false
+  editLockerTaken.value = false
+  editLockerChecking.value = false
       clearEditClientUrlState()
     }
   },
@@ -1906,6 +2004,8 @@ watch(
   (value) => {
     const candidate = value.trim()
     editCardTaken.value = false
+  editLockerTaken.value = false
+  editLockerChecking.value = false
     if (editCardTimer) clearTimeout(editCardTimer)
     if (!candidate) {
       editCardChecking.value = false
@@ -1920,8 +2020,41 @@ watch(
         editCardTaken.value = !(data as { available: boolean }).available
       } catch {
         editCardTaken.value = false
+  editLockerTaken.value = false
+  editLockerChecking.value = false
       } finally {
         editCardChecking.value = false
+      }
+    }, 320)
+  },
+)
+
+watch(
+  () => editState.form.value.lockerNumber,
+  (value) => {
+    const candidate = sanitizeLockerDigits(value)
+    editLockerTaken.value = false
+    if (editLockerTimer) clearTimeout(editLockerTimer)
+    if (!candidate) {
+      editLockerChecking.value = false
+      return
+    }
+    const status = editState.form.value.status
+    if (status !== 'ACTIVE' && status !== 'PAUSED') {
+      editLockerChecking.value = false
+      return
+    }
+    editLockerTimer = setTimeout(async () => {
+      editLockerChecking.value = true
+      try {
+        const { data } = await api.get('/clients/validate-locker', {
+          params: { lockerNumber: candidate, excludeId: editingId.value || undefined },
+        })
+        editLockerTaken.value = !(data as { available: boolean }).available
+      } catch {
+        editLockerTaken.value = false
+      } finally {
+        editLockerChecking.value = false
       }
     }, 320)
   },
@@ -1973,39 +2106,8 @@ function isoToDate(value?: string) {
   return new Date(yy, mm - 1, dd)
 }
 
-/** Как VisitsView: VaDateInput range отдаёт `{ start, end }`, не массив — иначе фильтр очищался. */
-const visitRangeValue = computed(() => {
-  const fromStr = filters.value.lastVisitFrom || ''
-  const toStr = filters.value.lastVisitTo || ''
-  const hasFrom = Boolean(fromStr)
-  const hasTo = Boolean(toStr)
-  if (!hasFrom && !hasTo) return undefined
-  return {
-    start: hasFrom ? isoToDate(fromStr) ?? undefined : undefined,
-    end: hasTo ? isoToDate(toStr) ?? undefined : undefined,
-  }
-})
-
-function onVisitRangeFilter(value: unknown) {
-  if (value == null || value === '' || value === false) {
-    patchFilters({ lastVisitFrom: '', lastVisitTo: '' })
-    return
-  }
-  if (Array.isArray(value)) {
-    const [a, b] = value
-    patchFilters({
-      lastVisitFrom: a != null && a !== '' ? toIsoDate(a) : '',
-      lastVisitTo: b != null && b !== '' ? toIsoDate(b) : '',
-    })
-    return
-  }
-  if (typeof value === 'object' && value !== null && ('start' in value || 'end' in value)) {
-    const r = value as { start?: Date | string | null; end?: Date | string | null }
-    patchFilters({
-      lastVisitFrom: r.start != null && r.start !== '' ? toIsoDate(r.start) : '',
-      lastVisitTo: r.end != null && r.end !== '' ? toIsoDate(r.end) : '',
-    })
-  }
+function onClientsLastVisitDateChange() {
+  page.value = 1
 }
 
 const ageRangeValue = ref<[number, number]>([18, 99])
@@ -2183,6 +2285,7 @@ watch(
         <VaButton preset="secondary" :disabled="loading" icon="refresh" @click="clientsSource.reload(true)">
           {{ t('common.refresh') }}
         </VaButton>
+        <AppExportMenu :disabled="!total || loading" :loading="exportLoading" @export="exportClientsTable" />
         <VaButton color="primary" :disabled="loading" icon="add" @click="openCreate">
           {{ t('clients.add') }}
         </VaButton>
@@ -2236,6 +2339,17 @@ watch(
                 class="cf-gender toolbar-select"
                 @update:model-value="onGenderFilter"
               />
+              <AppDateRangeFilter
+                v-model:from="filters.lastVisitFrom"
+                v-model:to="filters.lastVisitTo"
+                :label="t('clients.lastVisitRange')"
+                :day-placeholder="t('clients.lastVisitDayPlaceholder')"
+                :range-placeholder="t('clients.lastVisitRangePlaceholder')"
+                input-class="app-date-range-filter__input toolbar-select toolbar-range"
+                class="cf-visit"
+                @change="onClientsLastVisitDateChange"
+                @cleared="onClientsLastVisitDateChange"
+              />
               <div class="cf-age toolbar-select toolbar-age-slider">
                 <div class="age-slider__head">
                   <span class="age-slider__label">{{ t('clients.filterAgeRange') }}</span>
@@ -2252,15 +2366,6 @@ watch(
                   @drag-end="commitAgeRange"
                 />
               </div>
-              <VaDateInput
-                :model-value="visitRangeValue"
-                mode="range"
-                clearable
-                :label="t('clients.lastVisitRange')"
-                :placeholder="t('clients.lastVisitRangePlaceholder')"
-                class="cf-visit toolbar-select toolbar-range"
-                @update:model-value="onVisitRangeFilter"
-              />
               <VaButton
                 type="button"
                 preset="secondary"
@@ -2539,7 +2644,6 @@ watch(
             :attempted="createAttempted"
             :status-options="editorStatusOptions"
             :membership-options="membershipOptions"
-            :current-manager-name="currentManagerName"
             :card-number-checking="createCardChecking"
             :card-number-taken="createCardTaken"
             @generate-contract-number="regenerateCreateContractNumber"
@@ -2598,10 +2702,21 @@ watch(
             <div class="person-headline-wrap">
               <div class="person-headline">{{ editHeaderSnapshot.headline }}</div>
             </div>
-            <div class="person-status-wrap">
-              <StatusBadge :label="statusLabel(editHeaderSnapshot.status)" :tone="statusColor(editHeaderSnapshot.status)" />
-              <StatusBadge v-if="editGymChip" :label="editGymChip.label" :tone="editGymChip.tone" />
-              <span v-if="editPauseUntilCompactLabel" class="person-status-note">{{ editPauseUntilCompactLabel }}</span>
+            <div class="person-header__end">
+              <div class="person-status-wrap">
+                <StatusBadge :label="statusLabel(editHeaderSnapshot.status)" :tone="statusColor(editHeaderSnapshot.status)" />
+                <StatusBadge v-if="editGymChip" :label="editGymChip.label" :tone="editGymChip.tone" />
+                <span v-if="editPauseUntilCompactLabel" class="person-status-note">{{ editPauseUntilCompactLabel }}</span>
+              </div>
+              <button
+                type="button"
+                class="person-header__close"
+                :disabled="editState.loading.value"
+                :aria-label="t('common.cancel')"
+                @click="requestCloseEdit"
+              >
+                <VaIcon name="close" size="22px" />
+              </button>
             </div>
           </div>
           <ClientFormFields
@@ -2613,9 +2728,10 @@ watch(
             :attempted="editAttempted"
             :status-options="editorStatusOptions"
             :membership-options="membershipOptionsForEdit"
-            :current-manager-name="currentManagerName"
             :card-number-checking="editCardChecking"
             :card-number-taken="editCardTaken"
+            :locker-number-checking="editLockerChecking"
+            :locker-number-taken="editLockerTaken"
             :contract-history="editContractsHistory"
             :contract-history-loading="editContractsLoading"
             :payments-history="editPaymentsHistory"
@@ -2632,7 +2748,7 @@ watch(
             @open-contract-history-item="openContractFromHistory"
             @activate-contract-history-item="openActivateContractFromHistory"
             @pause-contract-history-item="pauseContractFromHistory"
-            @resume-contract-history-item="resumeContractFromHistory"
+            @resume-contract-history-item="askResumeContractFromHistory"
             @terminate-contract-history-item="terminateContractFromHistory"
             @add-contract-payment="onAddContractPayment"
             @visits-tab-open="onEditVisitsTabOpen"
@@ -2780,6 +2896,14 @@ watch(
       @submit="submitFreezeFromHistory"
     />
 
+    <ContractResumeModal
+      v-model="resumeOpen"
+      :contract-id="resumeTargetId"
+      :loading="resumeLoading"
+      :submit-error="resumeUiError"
+      @submit="submitResumeFromHistory"
+    />
+
     <VaModal v-model="cancelOpen" hide-default-actions fixed-layout max-width="520px">
       <h3 class="modal-title">{{ t('contracts.cancelRefundTitle') }}</h3>
       <div class="modal-grid">
@@ -2826,12 +2950,24 @@ watch(
 .clients-filters-grid {
   width: 100%;
   display: grid;
-  grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) minmax(5.5rem, auto);
+  grid-template-columns: minmax(0, 1.65fr) repeat(3, minmax(0, 1fr)) minmax(5.5rem, auto);
   grid-template-areas:
-    'search mship status ingym .'
-    'gender age age visit reset';
+    'search mship status ingym gender'
+    'visit age age ingym reset';
   gap: 0.45rem 0.5rem;
   align-items: stretch;
+}
+.clients-filters-grid > .cf-search,
+.clients-filters-grid > .cf-visit,
+.clients-filters-grid > .cf-mship,
+.clients-filters-grid > .cf-status,
+.clients-filters-grid > .cf-ingym,
+.clients-filters-grid > .cf-gender,
+.clients-filters-grid > .cf-age,
+.clients-filters-grid > .cf-reset {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
 }
 .cf-search {
   grid-area: search;
@@ -2855,12 +2991,11 @@ watch(
 }
 .cf-age {
   grid-area: age;
-  min-width: 0;
-  width: 100%;
+  align-self: end;
 }
 .cf-visit {
   grid-area: visit;
-  min-width: 0;
+  align-self: end;
 }
 .cf-reset {
   grid-area: reset;
@@ -2908,11 +3043,13 @@ watch(
 .toolbar-age-slider {
   min-width: 0;
   max-width: none;
-  padding: 0.2rem 0.45rem 0.2rem 0.35rem;
-  min-height: 3rem;
+  width: 100%;
+  padding: 0.15rem 0.35rem 0.15rem 0.25rem;
+  min-height: 2.85rem;
   display: flex;
   flex-direction: column;
   justify-content: center;
+  box-sizing: border-box;
 }
 .age-slider__head {
   display: flex;
@@ -3095,13 +3232,46 @@ watch(
   color: color-mix(in srgb, var(--app-text) 88%, var(--app-muted));
   line-height: 1.15;
 }
+.person-header__end {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-shrink: 0;
+  max-width: 58%;
+}
+.person-header__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--app-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.person-header__close:hover:not(:disabled) {
+  color: var(--app-text);
+  background: color-mix(in srgb, var(--app-surface) 86%, var(--app-border) 14%);
+}
+.person-header__close:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--app-accent) 55%, transparent);
+  outline-offset: 2px;
+}
+.person-header__close:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 .person-status-wrap {
   display: flex;
   flex-wrap: nowrap;
   justify-content: flex-end;
   align-items: center;
   gap: 0.45rem;
-  max-width: 52%;
+  min-width: 0;
 }
 .person-status-note {
   font-size: 0.82rem;
@@ -3130,6 +3300,12 @@ watch(
     word-break: break-word;
     overflow-wrap: anywhere;
     hyphens: auto;
+  }
+
+  .person-header__end {
+    max-width: 100%;
+    flex-wrap: wrap;
+    justify-content: space-between;
   }
 
   .person-status-wrap {
@@ -3233,7 +3409,14 @@ watch(
   min-width: 0;
   box-sizing: border-box;
   overflow-x: auto;
+  overflow-y: visible;
   -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+}
+
+/* VaDataTable сам ставит overflow-x: auto — без этого два горизонтальных скролла */
+.clients-table-scroll :deep(.va-data-table:not(.va-data-table--virtual-scroller)) {
+  overflow: visible;
 }
 
 .clients-data-table {
@@ -3379,7 +3562,7 @@ watch(
 
 @media (min-width: 1201px) {
   .cf-reset {
-    justify-self: end;
+    justify-self: stretch;
     align-self: end;
   }
 }
@@ -3394,8 +3577,8 @@ watch(
       'status'
       'ingym'
       'gender'
-      'age'
       'visit'
+      'age'
       'reset';
     gap: 0.55rem 0;
     align-items: stretch;
@@ -3406,8 +3589,22 @@ watch(
     align-self: stretch;
   }
 
+  .cf-age {
+    max-width: none;
+    justify-self: stretch;
+    align-self: stretch;
+  }
+
+  .cf-visit {
+    align-self: stretch;
+  }
+
   .clients-filters-reset {
     width: 100%;
+  }
+
+  .toolbar-age-slider {
+    max-width: none;
   }
 
   .clients-presets-row {
@@ -3477,6 +3674,17 @@ watch(
 
   .cf-visit {
     overflow: visible;
+  }
+
+  .visit-date-filter__label {
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .visit-date-filter__seg {
+    min-width: 2.45rem;
+    font-size: 0.72rem;
   }
 
   .clients-filter-bar :deep(.va-date-input) {

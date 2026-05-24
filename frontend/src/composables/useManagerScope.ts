@@ -8,6 +8,7 @@ export const MANAGER_ALLOWED_ROUTE_NAMES = new Set([
   'visits',
   'contracts',
   'payments',
+  'service-staff',
   'not-found',
 ])
 

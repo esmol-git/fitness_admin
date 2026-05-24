@@ -76,13 +76,21 @@ const items = computed(() => {
       { to: '/visits', label: t('app.visits'), icon: 'meeting_room', kind: 'link' as const },
       { to: '/contracts', label: t('app.contracts'), icon: 'description', kind: 'link' as const },
       { to: '/payments', label: t('app.payments'), icon: 'payments', kind: 'link' as const },
+      { to: '/service-staff', label: t('app.serviceStaff'), icon: 'engineering', kind: 'link' as const },
     ]
+  }
+  const serviceStaffNav = {
+    to: '/service-staff',
+    label: t('app.serviceStaff'),
+    icon: 'engineering',
+    kind: 'link' as const,
   }
   const base = [
     { to: '/', label: t('app.home'), icon: 'home', kind: 'link' as const },
     { to: '/clients', label: t('app.clients'), icon: 'badge', kind: 'link' as const },
     { to: '/payments', label: t('app.payments'), icon: 'payments', kind: 'link' as const },
     { to: '/visits', label: t('app.visits'), icon: 'meeting_room', kind: 'link' as const },
+    ...(auth.user?.role !== 'ADMIN' ? [serviceStaffNav] : []),
     { to: '/reports', label: t('app.reports'), icon: 'assessment', kind: 'link' as const },
     { to: '/contracts', label: t('app.contracts'), icon: 'description', kind: 'link' as const },
     { to: '/settings', label: t('app.settings'), icon: 'settings', kind: 'link' as const },
@@ -91,6 +99,7 @@ const items = computed(() => {
   ]
   if (auth.user?.role === 'ADMIN') {
     base.push({ to: '/users', label: t('app.users'), icon: 'group', kind: 'link' as const })
+    base.push(serviceStaffNav)
   }
   return base
 })
@@ -269,7 +278,7 @@ const userCard = computed(() => {
   background: var(--app-surface);
   color: var(--app-text);
   border: none;
-  padding: 1rem 0.75rem;
+  padding: 1rem 0.9rem;
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
@@ -297,8 +306,10 @@ const userCard = computed(() => {
   gap: 0.25rem;
   flex: 1;
   min-height: 0;
-  overflow: auto;
-  padding-right: 0.2rem;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-inline: 0.2rem;
+  padding-right: 0.35rem;
 }
 
 .sidebar-link {
@@ -321,7 +332,6 @@ const userCard = computed(() => {
 
 .sidebar-link:hover {
   background: var(--app-sidebar-hover);
-  transform: translateX(2px);
 }
 
 .sidebar-link.router-link-active {
@@ -370,7 +380,7 @@ const userCard = computed(() => {
   flex-direction: column;
   align-items: stretch;
   gap: 0.5rem;
-  padding: 0.5rem 0.25rem 0.25rem;
+  padding: 0.5rem 0.2rem 0.25rem;
 }
 
 .sidebar-logout {
@@ -486,7 +496,7 @@ const userCard = computed(() => {
     height: auto;
     max-height: calc(100vh - 1.5rem);
     margin: 0;
-    padding: 1rem 0.75rem;
+    padding: 1rem 0.9rem;
     box-shadow: var(--app-shadow-soft);
     overflow: hidden;
     animation: sidebar-slide-in 0.22s ease-out;
@@ -495,8 +505,10 @@ const userCard = computed(() => {
   .sidebar.sidebar--mobile.sidebar--mobile-open .sidebar-nav {
     flex-direction: column;
     flex-wrap: nowrap;
-    overflow: auto;
-    padding-right: 0.2rem;
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding-inline: 0.2rem;
+    padding-right: 0.35rem;
   }
 
   .sidebar-toggle {

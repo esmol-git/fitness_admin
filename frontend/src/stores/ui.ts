@@ -12,6 +12,8 @@ export const useUiStore = defineStore('ui', {
     visitsTableRefreshTick: 0,
     /** После записи платежа из карточки клиента / сохранения договора — PaymentsView перезагружает реестр. */
     paymentsTableRefreshTick: 0,
+    /** После входа/выхода персонала из сканера — ServiceStaffView перезагружает список. */
+    serviceStaffTableRefreshTick: 0,
     /** Открыть модалку сканера и выполнить lookup по карте/ключу или по id клиента. */
     scannerLookupTick: 0,
     scannerLookupCode: '',
@@ -57,6 +59,9 @@ export const useUiStore = defineStore('ui', {
     },
     bumpPaymentsTableRefresh() {
       this.paymentsTableRefreshTick += 1
+    },
+    bumpServiceStaffTableRefresh() {
+      this.serviceStaffTableRefreshTick += 1
     },
     toggleMobileSidebar() {
       this.mobileSidebarOpen = !this.mobileSidebarOpen

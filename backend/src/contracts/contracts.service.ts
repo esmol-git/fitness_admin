@@ -24,8 +24,13 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RequestContextService } from '../common/request-context.service';
 import {
   addCalendarDurationUtc,
+  actualFreezeDaysOnResumeUtc,
+  addUtcCalendarDays,
+  addUtcCalendarDaysInclusiveEnd,
   diffDaysInclusiveUtc,
   isoYmdFromUtcDate,
+  maxUtcCalendarDate,
+  utcCalendarDateFromDate,
   utcCalendarDayMs,
   utcDateFromIsoYmd,
   utcTodayCalendarDayMs,
@@ -104,7 +109,7 @@ export class ContractsService implements OnModuleInit {
       message: 'Payment amount cannot exceed service price',
     },
     serviceDateRangeInvalid: { code: 'SERVICE_DATE_RANGE_INVALID', message: 'Service end date must be after service start date' },
-    freezeOutOfRange: { code: 'FREEZE_OUT_OF_CONTRACT_RANGE', message: 'Freeze must be within contract dates' },
+    freezeOutOfRange: { code: 'FREEZE_OUT_OF_CONTRACT_RANGE', message: 'Freeze start must be within the contract service period' },
     freezeDurationInvalid: { code: 'FREEZE_DURATION_INVALID', message: 'Freeze duration must be at least 1 day' },
     freezeOverlaps: { code: 'FREEZE_OVERLAPS', message: 'Freeze overlaps existing freeze period' },
     onlyActiveCanFreeze: { code: 'ONLY_ACTIVE_CAN_FREEZE', message: 'Only active contract can be frozen' },
@@ -353,7 +358,21 @@ export class ContractsService implements OnModuleInit {
     });
   }
 
+  /** Заморозка в БД без PAUSED у договора — после старого «возобновить» без cancelledAt. */
+  private async closeOrphanedFreezes() {
+    const todayStart = new Date(utcTodayCalendarDayMs());
+    await this.prisma.contractFreeze.updateMany({
+      where: {
+        cancelledAt: null,
+        endDate: { gte: todayStart },
+        contract: { status: { not: 'PAUSED' } },
+      },
+      data: { cancelledAt: new Date() },
+    });
+  }
+
   private async syncExpiredFreezes() {
+    await this.closeOrphanedFreezes();
     const todayStart = new Date(utcTodayCalendarDayMs());
     const ended = await this.prisma.contractFreeze.findMany({
       where: { endDate: { lt: todayStart } },
@@ -516,6 +535,7 @@ export class ContractsService implements OnModuleInit {
           contractNumber: null,
           contractStartDate: null,
           contractEndDate: null,
+          lockerNumber: null,
         },
       });
       return;
@@ -558,6 +578,8 @@ export class ContractsService implements OnModuleInit {
       contractEndDate = best.serviceEndDate ?? null;
     }
 
+    const clearLocker = !hasActive && !hasPaused;
+
     await db.client.update({
       where: { id: clientId },
       data: {
@@ -565,6 +587,7 @@ export class ContractsService implements OnModuleInit {
         contractNumber,
         contractStartDate,
         contractEndDate,
+        ...(clearLocker ? { lockerNumber: null } : {}),
       },
     });
   }
@@ -789,6 +812,7 @@ export class ContractsService implements OnModuleInit {
         createdAt: true,
         payload: true,
         freezes: {
+          where: { cancelledAt: null },
           select: { endDate: true, durationDays: true },
           orderBy: { endDate: 'desc' },
           take: 1,
@@ -830,11 +854,12 @@ export class ContractsService implements OnModuleInit {
       const serviceName =
         typeof payloadObj?.serviceName === 'string' ? payloadObj.serviceName.trim() : null;
       const { payload: _p, ...rest } = row;
+      const isPaused = row.derivedStatus === ContractDerivedStatus.PAUSED;
       return {
         ...rest,
         status: row.derivedStatus,
-        pauseUntil: row.freezes[0]?.endDate ?? null,
-        pauseDurationDays: row.freezes[0]?.durationDays ?? null,
+        pauseUntil: isPaused ? row.freezes[0]?.endDate ?? null : null,
+        pauseDurationDays: isPaused ? row.freezes[0]?.durationDays ?? null : null,
         paidTotal,
         balanceDue,
         fullyPaid,
@@ -907,29 +932,42 @@ export class ContractsService implements OnModuleInit {
     status?: string;
     from?: string;
     to?: string;
+    dateField?: 'contractDate' | 'serviceStartDate' | 'serviceEndDate';
   }) {
     await this.ensureCalendarDayContractState();
     const fromDate = filters?.from ? this.toDate(filters.from) : null;
-    const toDate = filters?.to ? this.toDate(filters.to) : null;
+    let toDate: Date | null = null;
+    if (filters?.to) {
+      toDate = this.toDate(filters.to);
+      if (toDate) {
+        toDate = new Date(toDate);
+        toDate.setUTCHours(23, 59, 59, 999);
+      }
+    }
     if ((filters?.from && !fromDate) || (filters?.to && !toDate)) {
       throw new BadRequestException(this.errors.invalidDateFilter);
     }
     if (fromDate && toDate && fromDate > toDate) {
       throw new BadRequestException(this.errors.invalidDateRange);
     }
+    const dateField =
+      filters?.dateField === 'serviceStartDate' || filters?.dateField === 'serviceEndDate'
+        ? filters.dateField
+        : 'contractDate';
+    const dateRange =
+      fromDate || toDate
+        ? {
+            ...(fromDate ? { gte: fromDate } : {}),
+            ...(toDate ? { lte: toDate } : {}),
+          }
+        : undefined;
     const rows = await this.prisma.contractDocument.findMany({
       where: {
         clientId: filters?.clientId || undefined,
         derivedStatus: filters?.status
           ? (filters.status as ContractDerivedStatus)
           : undefined,
-        createdAt:
-          filters?.from || filters?.to
-            ? {
-                gte: fromDate ?? undefined,
-                lte: toDate ?? undefined,
-              }
-            : undefined,
+        ...(dateRange ? { [dateField]: dateRange } : {}),
       },
       orderBy: { createdAt: 'desc' },
       select: {
@@ -981,31 +1019,50 @@ export class ContractsService implements OnModuleInit {
       startDate = start;
       endDate = end;
     } else {
-      const durationDays = dto.durationDays ?? 7;
+      const presetDays = dto.durationDays ?? 7;
       startDate = today;
-      endDate = new Date(today);
-      endDate.setDate(endDate.getDate() + durationDays - 1);
+      endDate = addUtcCalendarDaysInclusiveEnd(startDate, presetDays);
     }
-    startDate = new Date(startDate);
-    endDate = new Date(endDate);
-    startDate.setHours(0, 0, 0, 0);
-    endDate.setHours(0, 0, 0, 0);
+    startDate = utcCalendarDateFromDate(startDate);
+    endDate = utcCalendarDateFromDate(endDate);
     const durationDays = this.diffDaysInclusive(startDate, endDate);
     if (durationDays < ContractsService.FREEZE_MIN_DAYS) {
       throw new BadRequestException(this.errors.freezeDurationInvalid);
     }
-    const contractStart = existing.serviceStartDate ? new Date(existing.serviceStartDate) : null;
-    const contractEnd = existing.serviceEndDate ? new Date(existing.serviceEndDate) : null;
-    if (contractStart) contractStart.setHours(0, 0, 0, 0);
-    if (contractEnd) contractEnd.setHours(0, 0, 0, 0);
-    if ((contractStart && startDate < contractStart) || (contractEnd && endDate > contractEnd)) {
+    endDate = addUtcCalendarDaysInclusiveEnd(startDate, durationDays);
+
+    const contractStartMs = existing.serviceStartDate
+      ? utcCalendarDayMs(existing.serviceStartDate)
+      : null;
+    const contractEndMs = existing.serviceEndDate ? utcCalendarDayMs(existing.serviceEndDate) : null;
+    const startMs = utcCalendarDayMs(startDate);
+    if (contractStartMs != null && startMs < contractStartMs) {
       throw new BadRequestException(this.errors.freezeOutOfRange);
     }
+    if (contractEndMs != null && startMs > contractEndMs) {
+      throw new BadRequestException(this.errors.freezeOutOfRange);
+    }
+
+    let nextServiceEndDate: Date | null = existing.serviceEndDate
+      ? utcCalendarDateFromDate(existing.serviceEndDate)
+      : null;
+    if (nextServiceEndDate) {
+      nextServiceEndDate = addUtcCalendarDays(nextServiceEndDate, durationDays);
+    }
+
+    await this.prisma.contractFreeze.updateMany({
+      where: { contractId, cancelledAt: null },
+      data: { cancelledAt: new Date() },
+    });
+
+    const overlapMinEnd = maxUtcCalendarDate(today, startDate);
     const overlaps = await this.prisma.contractFreeze.findFirst({
       where: {
         contractId,
+        cancelledAt: null,
         startDate: { lte: endDate },
-        endDate: { gte: startDate },
+        endDate: { gte: overlapMinEnd },
+        contract: { status: 'PAUSED' },
       },
       select: { id: true },
     });
@@ -1026,8 +1083,12 @@ export class ContractsService implements OnModuleInit {
       });
       return tx.contractDocument.update({
         where: { id: contractId },
-        data: { status: 'PAUSED', derivedStatus: ContractDerivedStatus.PAUSED },
-        select: { id: true, status: true },
+        data: {
+          status: 'PAUSED',
+          derivedStatus: ContractDerivedStatus.PAUSED,
+          ...(nextServiceEndDate ? { serviceEndDate: nextServiceEndDate } : {}),
+        },
+        select: { id: true, status: true, serviceEndDate: true },
       });
     });
     await this.refreshClientStatus(existing.clientId);
@@ -1035,6 +1096,96 @@ export class ContractsService implements OnModuleInit {
       `AUDIT contract.pause reqId=${this.requestContext.getRequestId()} actorId=${actorId} contractId=${contractId} clientId=${existing.clientId}`,
     );
     return updated;
+  }
+
+  private buildResumePlan(
+    existing: { serviceStartDate: Date | null; serviceEndDate: Date | null },
+    activeFreeze: { startDate: Date; endDate: Date; durationDays: number } | null,
+    resumeAt: Date,
+  ) {
+    let nextServiceEndDate: Date | null = existing.serviceEndDate
+      ? new Date(utcCalendarDayMs(existing.serviceEndDate))
+      : null;
+    const plannedFreezeDays = activeFreeze?.durationDays ?? 0;
+    let actualFreezeDays = 0;
+    let daysReverted = 0;
+    let freezeStartDate: Date | null = null;
+    let freezeEndPlannedDate: Date | null = null;
+    let freezeEndActualDate: Date | null = null;
+
+    if (activeFreeze) {
+      freezeStartDate = utcCalendarDateFromDate(activeFreeze.startDate);
+      freezeEndPlannedDate = addUtcCalendarDaysInclusiveEnd(
+        freezeStartDate,
+        activeFreeze.durationDays,
+      );
+      freezeEndActualDate = maxUtcCalendarDate(resumeAt, freezeStartDate);
+      actualFreezeDays = actualFreezeDaysOnResumeUtc(freezeStartDate, resumeAt);
+      daysReverted = Math.max(0, activeFreeze.durationDays - actualFreezeDays);
+      if (nextServiceEndDate && daysReverted > 0) {
+        nextServiceEndDate.setUTCDate(nextServiceEndDate.getUTCDate() - daysReverted);
+      }
+    }
+
+    const statusAfter = this.deriveContractStatus(
+      'ACTIVE',
+      existing.serviceStartDate,
+      nextServiceEndDate ?? existing.serviceEndDate,
+    );
+
+    return {
+      nextServiceEndDate,
+      statusAfter,
+      plannedFreezeDays,
+      actualFreezeDays,
+      daysReverted,
+      freezeStartDate,
+      freezeEndPlannedDate,
+      freezeEndActualDate,
+      resumeAt,
+    };
+  }
+
+  async resumePreview(contractId: string) {
+    await this.syncExpiredFreezes();
+    const existing = await this.prisma.contractDocument.findUnique({
+      where: { id: contractId },
+      select: {
+        contractNumber: true,
+        status: true,
+        serviceStartDate: true,
+        serviceEndDate: true,
+      },
+    });
+    if (!existing) throw new NotFoundException('Contract not found');
+    if (existing.status !== 'PAUSED') {
+      throw new BadRequestException(this.errors.onlyPausedCanResume);
+    }
+
+    const resumeAt = this.getTodayStart();
+    const activeFreeze = await this.prisma.contractFreeze.findFirst({
+      where: { contractId, cancelledAt: null },
+      orderBy: { createdAt: 'desc' },
+      select: { startDate: true, endDate: true, durationDays: true },
+    });
+    const plan = this.buildResumePlan(existing, activeFreeze, resumeAt);
+
+    return {
+      contractNumber: existing.contractNumber,
+      resumeDate: isoYmdFromUtcDate(plan.resumeAt),
+      hasActiveFreeze: Boolean(activeFreeze),
+      freezeStartDate: plan.freezeStartDate ? isoYmdFromUtcDate(plan.freezeStartDate) : null,
+      freezeEndPlannedDate: plan.freezeEndPlannedDate ? isoYmdFromUtcDate(plan.freezeEndPlannedDate) : null,
+      freezeEndActualDate: plan.freezeEndActualDate ? isoYmdFromUtcDate(plan.freezeEndActualDate) : null,
+      plannedFreezeDays: plan.plannedFreezeDays,
+      actualFreezeDays: plan.actualFreezeDays,
+      daysReverted: plan.daysReverted,
+      serviceEndDateBefore: existing.serviceEndDate
+        ? isoYmdFromUtcDate(new Date(utcCalendarDayMs(existing.serviceEndDate)))
+        : null,
+      serviceEndDateAfter: plan.nextServiceEndDate ? isoYmdFromUtcDate(plan.nextServiceEndDate) : null,
+      statusAfter: plan.statusAfter,
+    };
   }
 
   async resume(contractId: string) {
@@ -1047,15 +1198,38 @@ export class ContractsService implements OnModuleInit {
     if (existing.status !== 'PAUSED') {
       throw new BadRequestException(this.errors.onlyPausedCanResume);
     }
-    const nextDerived = this.deriveContractStatus('ACTIVE', existing.serviceStartDate, existing.serviceEndDate);
-    const updated = await this.prisma.contractDocument.update({
-      where: { id: contractId },
-      data: {
-        status: nextDerived,
-        derivedStatus: nextDerived,
-      },
-      select: { id: true, status: true },
+
+    const resumeAt = this.getTodayStart();
+    const activeFreeze = await this.prisma.contractFreeze.findFirst({
+      where: { contractId, cancelledAt: null },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, startDate: true, endDate: true, durationDays: true },
     });
+    const plan = this.buildResumePlan(existing, activeFreeze, resumeAt);
+
+    const updated = await this.prisma.$transaction(async (tx) => {
+      if (activeFreeze && plan.freezeEndActualDate) {
+        await tx.contractFreeze.update({
+          where: { id: activeFreeze.id },
+          data: {
+            endDate: plan.freezeEndActualDate,
+            durationDays: plan.actualFreezeDays,
+            cancelledAt: new Date(),
+          },
+        });
+      }
+
+      return tx.contractDocument.update({
+        where: { id: contractId },
+        data: {
+          status: plan.statusAfter,
+          derivedStatus: plan.statusAfter,
+          ...(plan.nextServiceEndDate ? { serviceEndDate: plan.nextServiceEndDate } : {}),
+        },
+        select: { id: true, status: true, serviceEndDate: true },
+      });
+    });
+
     await this.refreshClientStatus(existing.clientId);
     this.logger.warn(
       `AUDIT contract.resume reqId=${this.requestContext.getRequestId()} contractId=${contractId} clientId=${existing.clientId}`,

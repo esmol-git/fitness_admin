@@ -66,7 +66,7 @@ function goLast() {
 </script>
 
 <template>
-  <div v-if="pages > 1" class="app-table-pagination">
+  <div class="app-table-pagination">
     <VaButton
       preset="secondary"
       plain

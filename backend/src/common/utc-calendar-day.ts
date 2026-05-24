@@ -51,6 +51,39 @@ export function diffDaysInclusiveUtc(startDate: Date, endDate: Date): number {
   return Math.floor((end - start) / 86400000) + 1;
 }
 
+/**
+ * Фактические дни заморозки при досрочной разморозке.
+ * Заморозка и разморозка в один календарный день = 0 (отмена в день оформления).
+ */
+export function actualFreezeDaysOnResumeUtc(freezeStart: Date, resumeAt: Date): number {
+  if (utcCalendarDayMs(freezeStart) === utcCalendarDayMs(resumeAt)) return 0;
+  return diffDaysInclusiveUtc(freezeStart, resumeAt);
+}
+
+/** UTC midnight for the civil calendar day of `d` (ignores time-of-day / local TZ). */
+export function utcCalendarDateFromDate(d: Date): Date {
+  return new Date(utcCalendarDayMs(d));
+}
+
+/** Add whole calendar days on the UTC civil calendar. */
+export function addUtcCalendarDays(d: Date, daysToAdd: number): Date {
+  const out = utcCalendarDateFromDate(d);
+  out.setUTCDate(out.getUTCDate() + daysToAdd);
+  return out;
+}
+
+/** Inclusive end date for a span of `inclusiveDayCount` days starting at `start`. */
+export function addUtcCalendarDaysInclusiveEnd(start: Date, inclusiveDayCount: number): Date {
+  if (inclusiveDayCount < 1) return utcCalendarDateFromDate(start);
+  return addUtcCalendarDays(start, inclusiveDayCount - 1);
+}
+
+export function maxUtcCalendarDate(a: Date, b: Date): Date {
+  const am = utcCalendarDayMs(a);
+  const bm = utcCalendarDayMs(b);
+  return new Date(am >= bm ? am : bm);
+}
+
 /** End of service period from catalog duration (UTC calendar arithmetic). */
 export function addCalendarDurationUtc(
   serviceStartDate: Date,

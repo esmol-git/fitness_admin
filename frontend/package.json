@@ -32,7 +32,9 @@
     "vue-i18n": "^9.14.5",
     "vue-router": "^5.0.4",
     "vue3-apexcharts": "^1.11.1",
-    "vuestic-ui": "^1.10.3"
+    "vuestic-ui": "^1.10.3",
+    "xlsx": "^0.18.5",
+    "xlsx-js-style": "^1.2.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.2",

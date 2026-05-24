@@ -18,6 +18,7 @@ import { ReportsModule } from './reports/reports.module';
 import { SettingsModule } from './settings/settings.module';
 import { StorageModule } from './storage/storage.module';
 import { UsersModule } from './users/users.module';
+import { ServiceStaffModule } from './service-staff/service-staff.module';
 import { VisitsModule } from './visits/visits.module';
 import { CommonModule } from './common/common.module';
 
@@ -42,6 +43,7 @@ import { CommonModule } from './common/common.module';
     MembershipCatalogModule,
     PaymentsModule,
     VisitsModule,
+    ServiceStaffModule,
     SettingsModule,
     StorageModule,
     UsersModule,

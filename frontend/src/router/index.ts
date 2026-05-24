@@ -38,6 +38,12 @@ const router = createRouter({
       meta: { requiresAuth: true },
     },
     {
+      path: '/service-staff',
+      name: 'service-staff',
+      component: () => import('@/views/ServiceStaffView.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
       path: '/directories/memberships',
       name: 'directory-memberships',
       component: () => import('@/views/MembershipDirectoryView.vue'),

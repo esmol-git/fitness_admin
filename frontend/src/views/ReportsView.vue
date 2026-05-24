@@ -5,6 +5,7 @@ import { useToast } from 'vuestic-ui'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import type { LocationQuery } from 'vue-router'
 import { api } from '@/utils/api'
+import AppDateRangeFilter from '@/components/ui/AppDateRangeFilter.vue'
 import AppPageCard from '@/components/ui/AppPageCard.vue'
 import AppSectionCard from '@/components/ui/AppSectionCard.vue'
 import { resolveApiErrorMessage } from '@/composables/useApiErrorMap'
@@ -182,16 +183,6 @@ function parseDateIso(value: string): Date | null {
   return new Date(yy, mm - 1, dd)
 }
 
-const reportsDateRangeModel = computed(() => {
-  const hasFrom = Boolean(filters.from)
-  const hasTo = Boolean(filters.to)
-  if (!hasFrom && !hasTo) return undefined
-  return {
-    start: hasFrom ? parseDateIso(filters.from) ?? undefined : undefined,
-    end: hasTo ? parseDateIso(filters.to) ?? undefined : undefined,
-  }
-})
-
 const clientCount = computed(() => overview.value?.clients.totalClients ?? 0)
 const activeClients = computed(() => overview.value?.clients.activeClients ?? 0)
 const activeClientsShare = computed(() => overview.value?.clients.activeClientsSharePct ?? 0)
@@ -242,18 +233,6 @@ const periodAppliedLabel = computed(() => {
   return t('reports.periodApplied', { from: a, to: b })
 })
 
-function toIsoDate(value: unknown): string {
-  if (!value) return ''
-  if (typeof value === 'string') return value.slice(0, 10)
-  if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    const y = value.getFullYear()
-    const m = String(value.getMonth() + 1).padStart(2, '0')
-    const d = String(value.getDate()).padStart(2, '0')
-    return `${y}-${m}-${d}`
-  }
-  return ''
-}
-
 function dateToIso(date: Date): string {
   const y = date.getFullYear()
   const m = String(date.getMonth() + 1).padStart(2, '0')
@@ -274,31 +253,16 @@ function applyPreset(preset: 'today' | '7d' | '30d' | 'month' | 'quarter') {
   void syncReportsFiltersToUrl()
 }
 
-/** VaDateInput range: объект `{ start, end }` или массив — см. VisitsView. */
-function applyReportsDateRange(value: unknown) {
-  if (value == null || value === '' || value === false) {
-    applyPresetInner('today')
-    scheduleLoadReports()
-    void syncReportsFiltersToUrl()
-    return
-  }
-  if (Array.isArray(value)) {
-    const [a, b] = value
-    filters.from = a != null && a !== '' ? toIsoDate(a) : ''
-    filters.to = b != null && b !== '' ? toIsoDate(b) : ''
-    periodPreset.value = 'custom'
-    scheduleLoadReports()
-    void syncReportsFiltersToUrl()
-    return
-  }
-  if (typeof value === 'object' && value !== null && ('start' in value || 'end' in value)) {
-    const r = value as { start?: Date | string | null; end?: Date | string | null }
-    filters.from = r.start != null && r.start !== '' ? toIsoDate(r.start) : ''
-    filters.to = r.end != null && r.end !== '' ? toIsoDate(r.end) : ''
-    periodPreset.value = 'custom'
-    scheduleLoadReports()
-    void syncReportsFiltersToUrl()
-  }
+function onReportsDateFilterCleared() {
+  applyPresetInner('today')
+  scheduleLoadReports()
+  void syncReportsFiltersToUrl()
+}
+
+function onReportsDateFilterChange() {
+  periodPreset.value = 'custom'
+  scheduleLoadReports()
+  void syncReportsFiltersToUrl()
 }
 
 async function loadReports() {
@@ -397,12 +361,12 @@ onBeforeUnmount(() => {
             {{ t('reports.presets.quarter') }}
           </VaButton>
         </div>
-        <VaDateInput
-          mode="range"
-          clearable
-          :model-value="reportsDateRangeModel"
+        <AppDateRangeFilter
+          v-model:from="filters.from"
+          v-model:to="filters.to"
           :label="t('reports.periodRange')"
-          @update:model-value="applyReportsDateRange($event)"
+          @cleared="onReportsDateFilterCleared"
+          @change="onReportsDateFilterChange"
         />
       </div>
       <div class="reports-actions">
@@ -528,8 +492,25 @@ onBeforeUnmount(() => {
   line-height: 1.4;
   color: var(--app-muted);
 }
-.reports-filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--app-section-gap); margin-bottom: var(--app-section-gap); }
-.preset-row { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.reports-filters {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: flex-end;
+  gap: var(--app-section-gap);
+  margin-bottom: var(--app-section-gap);
+  min-width: 0;
+}
+.preset-row {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.5rem;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.reports-filters > :deep(.app-date-range-filter) {
+  flex: 1 1 14rem;
+  min-width: 12rem;
+}
 .reports-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-bottom: var(--app-section-gap); }
 .reports-error { margin-bottom: var(--app-section-gap); }
 .reports-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--app-page-gap); }
@@ -544,7 +525,9 @@ onBeforeUnmount(() => {
 .quick-link { display: flex; align-items: center; justify-content: center; border: 1px solid var(--app-border); border-radius: var(--app-radius-lg); min-height: var(--app-action-height); padding: 0.5rem 0.75rem; color: var(--app-text); text-decoration: none; font-weight: 600; transition: background-color 0.18s ease, color 0.18s ease; }
 .quick-link:hover { background: var(--app-sidebar-hover); color: var(--app-accent-strong); }
 @media (max-width: 900px) {
-  .reports-filters { grid-template-columns: 1fr; }
+  .reports-filters {
+    flex-wrap: wrap;
+  }
   .reports-grid { grid-template-columns: 1fr; }
 }
 </style>

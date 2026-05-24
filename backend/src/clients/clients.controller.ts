@@ -58,6 +58,19 @@ export class ClientsController {
     return { available };
   }
 
+  @Get('validate-locker')
+  @Roles(Role.ADMIN, Role.MANAGER, Role.RECEPTIONIST, Role.TRAINER)
+  async validateLocker(
+    @Query('lockerNumber') lockerNumber?: string,
+    @Query('excludeId') excludeId?: string,
+  ) {
+    const available = await this.clientsService.isLockerNumberAvailable(
+      lockerNumber ?? '',
+      excludeId?.trim() || undefined,
+    );
+    return { available };
+  }
+
   @Get('address-suggestions')
   @SkipThrottle()
   @Roles(Role.ADMIN, Role.MANAGER, Role.RECEPTIONIST, Role.TRAINER)

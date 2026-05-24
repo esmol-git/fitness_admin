@@ -129,6 +129,12 @@ export class ContractsController {
     return this.contracts.pause(contractId, dto, user.id);
   }
 
+  @Get(':contractId/resume/preview')
+  @Roles(Role.ADMIN, Role.MANAGER, Role.RECEPTIONIST)
+  resumePreview(@Param('contractId') contractId: string) {
+    return this.contracts.resumePreview(contractId);
+  }
+
   @Patch(':contractId/resume')
   @Roles(Role.ADMIN, Role.MANAGER, Role.RECEPTIONIST)
   resume(@Param('contractId') contractId: string) {

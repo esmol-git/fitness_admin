@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { detectQuickDatePreset, quickDatePresetRange, type QuickDatePreset } from '@/utils/dateRangePresets'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import { useToast } from 'vuestic-ui'
 import { DEFAULT_TABLE_PAGE_LIMIT, TABLE_PAGE_SIZES, type TablePageSizeOption } from '@/config/tablePagination'
 import AppDataTableShell from '@/components/ui/AppDataTableShell.vue'
+import AppDateRangeFilter from '@/components/ui/AppDateRangeFilter.vue'
 import AppEmptyState from '@/components/ui/AppEmptyState.vue'
 import AppListFiltersToolbar from '@/components/ui/AppListFiltersToolbar.vue'
+import AppExportMenu from '@/components/ui/AppExportMenu.vue'
 import AppPageCard from '@/components/ui/AppPageCard.vue'
 import AppTablePagerRow from '@/components/ui/AppTablePagerRow.vue'
 import StatusBadge from '@/components/ui/StatusBadge.vue'
@@ -16,6 +19,8 @@ import { resolveApiErrorMessage } from '@/composables/useApiErrorMap'
 import { useUiStore } from '@/stores/ui'
 import { api } from '@/utils/api'
 import { copyTextToClipboard } from '@/utils/clipboard'
+import { formatExportPeriodCaption } from '@/utils/exportPeriodCaption'
+import { downloadTableExport, type TableExportFormat } from '@/utils/tableExport'
 import type { LocationQuery } from 'vue-router'
 
 const { t } = useI18n()
@@ -75,6 +80,7 @@ const filters = reactive({
 const payments = ref<PaymentRow[]>([])
 const pages = computed(() => Math.max(1, Math.ceil(payments.value.length / limit.value)))
 const hasItems = computed(() => payments.value.length > 0)
+const exportLoading = ref(false)
 
 let applyingFromRoute = false
 let searchUrlTimer: ReturnType<typeof setTimeout> | null = null
@@ -99,6 +105,8 @@ const hasActiveFilters = computed(
     page.value > 1 ||
     limit.value !== DEFAULT_TABLE_PAGE_LIMIT,
 )
+
+const activeDatePreset = computed(() => detectQuickDatePreset(filters.from, filters.to))
 
 function paymentChannelLabel(channel?: string | null): string {
   const c = (channel || 'CASH').trim().toUpperCase()
@@ -143,35 +151,6 @@ function mapRows(list: PaymentApiRow[]): PaymentRow[] {
     managerName: formatManager(p.processedBy ?? null),
   }))
 }
-
-function toIsoDate(value: unknown): string {
-  if (!value) return ''
-  if (typeof value === 'string') return value.slice(0, 10)
-  if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    const y = value.getFullYear()
-    const m = String(value.getMonth() + 1).padStart(2, '0')
-    const d = String(value.getDate()).padStart(2, '0')
-    return `${y}-${m}-${d}`
-  }
-  return ''
-}
-
-function parseDateIso(value: string) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null
-  const [yy, mm, dd] = value.split('-').map((v) => Number(v))
-  if (!yy || !mm || !dd) return null
-  return new Date(yy, mm - 1, dd)
-}
-
-const paymentsDateRangeModel = computed(() => {
-  const hasFrom = Boolean(filters.from)
-  const hasTo = Boolean(filters.to)
-  if (!hasFrom && !hasTo) return undefined
-  return {
-    start: hasFrom ? parseDateIso(filters.from) ?? undefined : undefined,
-    end: hasTo ? parseDateIso(filters.to) ?? undefined : undefined,
-  }
-})
 
 function parseLimit(raw: string): TablePageSizeOption {
   const n = Number(raw)
@@ -336,6 +315,54 @@ watch(
   },
 )
 
+function formatExportDateTime(value: string) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('ru-RU')
+}
+
+async function exportPaymentsTable(format: TableExportFormat) {
+  const rowsSource = sortedPayments.value
+  if (!rowsSource.length) {
+    notify({ color: 'warning', message: t('common.exportEmpty') })
+    return
+  }
+  exportLoading.value = true
+  try {
+    const headers = [
+      t('payments.columnClient'),
+      t('payments.columnAmount'),
+      t('payments.columnChannel'),
+      t('clients.statusLabel'),
+      t('payments.columnContract'),
+      t('payments.columnPaidAt'),
+      t('payments.columnManager'),
+    ]
+    const rows = rowsSource.map((row) => [
+      row.clientShort,
+      Number(row.amount).toFixed(2),
+      paymentChannelLabel(row.channel),
+      paymentStatusLabel(row.status),
+      row.contractNumber || '—',
+      formatExportDateTime(row.paidAt),
+      row.managerName,
+    ])
+    const periodCaption = formatExportPeriodCaption(filters.from, filters.to, t)
+    downloadTableExport({
+      format,
+      filenameBase: 'payments',
+      headers,
+      rows,
+      preamble: periodCaption ? [periodCaption] : undefined,
+      csvDelimiter: ';',
+    })
+    notify({ color: 'success', message: t('common.exported') })
+  } catch {
+    notify({ color: 'danger', message: t('common.exportFailed') })
+  } finally {
+    exportLoading.value = false
+  }
+}
+
 async function loadPayments() {
   loading.value = true
   formError.value = null
@@ -378,29 +405,17 @@ function onFilterStatus(value: unknown) {
   pushPaymentsQueryToUrl()
 }
 
-function onFilterDateRange(value: unknown) {
-  if (value == null || value === '' || value === false) {
-    filters.from = ''
-    filters.to = ''
-    page.value = 1
-    pushPaymentsQueryToUrl()
-    return
-  }
-  if (Array.isArray(value)) {
-    const [a, b] = value
-    filters.from = a != null && a !== '' ? toIsoDate(a) : ''
-    filters.to = b != null && b !== '' ? toIsoDate(b) : ''
-    page.value = 1
-    pushPaymentsQueryToUrl()
-    return
-  }
-  if (typeof value === 'object' && value !== null && ('start' in value || 'end' in value)) {
-    const r = value as { start?: Date | string | null; end?: Date | string | null }
-    filters.from = r.start != null && r.start !== '' ? toIsoDate(r.start) : ''
-    filters.to = r.end != null && r.end !== '' ? toIsoDate(r.end) : ''
-    page.value = 1
-    pushPaymentsQueryToUrl()
-  }
+function applyDatePreset(preset: QuickDatePreset) {
+  const range = quickDatePresetRange(preset)
+  filters.from = range.from
+  filters.to = range.to
+  page.value = 1
+  pushPaymentsQueryToUrl()
+}
+
+function onPaymentsDateFilterChange() {
+  page.value = 1
+  pushPaymentsQueryToUrl()
 }
 
 function resetFilters() {
@@ -476,6 +491,7 @@ onBeforeUnmount(() => {
       <VaButton preset="secondary" icon="refresh" :loading="loading" @click="loadPayments">
         {{ t('common.refresh') }}
       </VaButton>
+      <AppExportMenu :disabled="!hasItems || loading" :loading="exportLoading" @export="exportPaymentsTable" />
     </template>
     <template #filters>
       <div class="payments-filter-bar">
@@ -496,13 +512,13 @@ onBeforeUnmount(() => {
               text-by="text"
               @update:model-value="onFilterStatus"
             />
-            <VaDateInput
-              mode="range"
-              :model-value="paymentsDateRangeModel"
+            <AppDateRangeFilter
+              v-model:from="filters.from"
+              v-model:to="filters.to"
               :label="t('payments.filterDateRange')"
-              :placeholder="t('payments.filterDateRangePlaceholder')"
-              clearable
-              @update:model-value="onFilterDateRange"
+              :range-placeholder="t('payments.filterDateRangePlaceholder')"
+              @change="onPaymentsDateFilterChange"
+              @cleared="onPaymentsDateFilterChange"
             />
           </div>
           <template #actions>
@@ -525,22 +541,71 @@ onBeforeUnmount(() => {
     </VaAlert>
 
     <div class="payments-presets-row">
-      <VaButton
-        size="small"
-        :preset="filters.status === '' ? 'primary' : 'secondary'"
-        @click="applyStatusPreset('')"
+      <div
+        class="app-preset-strip preset-strip--date"
+        :class="{ 'app-preset-strip--active': Boolean(activeDatePreset) }"
+        role="group"
+        :aria-label="t('payments.datePresetsLabel')"
       >
-        {{ t('common.all') }}
-      </VaButton>
-      <VaButton
-        v-for="status in paymentStatusOptions"
-        :key="status"
-        size="small"
-        :preset="filters.status === status ? 'primary' : 'secondary'"
-        @click="applyStatusPreset(status)"
+        <VaIcon name="event" size="16px" color="secondary" />
+        <span class="app-preset-label">{{ t('payments.datePresetsLabel') }}</span>
+        <VaButton
+          type="button"
+          size="small"
+          class="app-preset-chip"
+          :preset="activeDatePreset === 'today' ? 'primary' : 'secondary'"
+          @click="applyDatePreset('today')"
+        >
+          {{ t('clients.presetToday') }}
+        </VaButton>
+        <VaButton
+          type="button"
+          size="small"
+          class="app-preset-chip"
+          :preset="activeDatePreset === '7d' ? 'primary' : 'secondary'"
+          @click="applyDatePreset('7d')"
+        >
+          {{ t('clients.preset7Days') }}
+        </VaButton>
+        <VaButton
+          type="button"
+          size="small"
+          class="app-preset-chip"
+          :preset="activeDatePreset === '30d' ? 'primary' : 'secondary'"
+          @click="applyDatePreset('30d')"
+        >
+          {{ t('clients.preset30Days') }}
+        </VaButton>
+      </div>
+      <div
+        class="app-preset-strip preset-strip--status"
+        :class="{ 'app-preset-strip--active': Boolean(filters.status) }"
+        role="group"
+        :aria-label="t('payments.filterStatus')"
       >
-        {{ paymentStatusLabel(status) }}
-      </VaButton>
+        <VaIcon name="payments" size="16px" color="secondary" />
+        <span class="app-preset-label">{{ t('payments.filterStatus') }}</span>
+        <VaButton
+          type="button"
+          size="small"
+          class="app-preset-chip"
+          :preset="filters.status === '' ? 'primary' : 'secondary'"
+          @click="applyStatusPreset('')"
+        >
+          {{ t('common.all') }}
+        </VaButton>
+        <VaButton
+          v-for="status in paymentStatusOptions"
+          :key="status"
+          type="button"
+          size="small"
+          class="app-preset-chip"
+          :preset="filters.status === status ? 'primary' : 'secondary'"
+          @click="applyStatusPreset(status)"
+        >
+          {{ paymentStatusLabel(status) }}
+        </VaButton>
+      </div>
     </div>
 
     <AppDataTableShell :loading="loading" :has-items="hasItems" :show-pager="hasItems && pages > 1">
@@ -639,7 +704,7 @@ onBeforeUnmount(() => {
   width: 100%;
   display: grid;
   gap: 0.6rem;
-  grid-template-columns: minmax(12rem, 1.65fr) minmax(11rem, 1fr) minmax(14rem, 1.45fr);
+  grid-template-columns: minmax(10rem, 1.25fr) minmax(9rem, 1fr) minmax(13rem, 1.35fr);
   align-items: end;
 }
 
@@ -647,11 +712,20 @@ onBeforeUnmount(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.5rem 0.65rem;
   width: 100%;
-  padding: 0.35rem 0 0.15rem;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 0.4rem 0 0.2rem;
   border-top: 1px solid color-mix(in srgb, var(--app-border) 86%, transparent);
   margin-top: 0.05rem;
+}
+
+.preset-strip--date,
+.preset-strip--status {
+  flex: 1 1 18rem;
+  min-width: 18rem;
 }
 
 .payments-error {

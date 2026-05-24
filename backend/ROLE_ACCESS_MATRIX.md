@@ -75,6 +75,7 @@ Last updated: 2026-04-30
 | POST | `/api/contracts/client/:clientId/save` | `ADMIN`, `MANAGER`, `RECEPTIONIST` |
 | PATCH | `/api/contracts/:contractId/status` | `ADMIN`, `MANAGER`, `RECEPTIONIST` |
 | PATCH | `/api/contracts/:contractId/pause` | `ADMIN`, `MANAGER`, `RECEPTIONIST` |
+| GET | `/api/contracts/:contractId/resume/preview` | `ADMIN`, `MANAGER`, `RECEPTIONIST` |
 | PATCH | `/api/contracts/:contractId/resume` | `ADMIN`, `MANAGER`, `RECEPTIONIST` |
 | PATCH | `/api/contracts/:contractId/terminate` | `ADMIN`, `MANAGER`, `RECEPTIONIST` |
 | POST | `/api/contracts/:contractId/cancel-with-refund` | `ADMIN`, `MANAGER`, `RECEPTIONIST` |

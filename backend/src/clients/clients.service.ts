@@ -8,6 +8,8 @@ import { StorageService } from '../storage/storage.service';
 import { CreateClientDto } from './dto/create-client.dto';
 import { PaginationDto } from './dto/pagination.dto';
 import { UpdateClientDto } from './dto/update-client.dto';
+import { CardNumberRegistryService } from '../common/card-number-registry.service';
+import { normalizeLockerNumber } from '../common/locker-number';
 import { utcTodayCalendarDayMs } from '../common/utc-calendar-day';
 
 const CLIENT_LIST_SELECT = {
@@ -37,6 +39,7 @@ export class ClientsService {
     private readonly config: ConfigService,
     private readonly storage: StorageService,
     private readonly contracts: ContractsService,
+    private readonly cardNumbers: CardNumberRegistryService,
   ) {}
   private readonly errors = {
     clientNotFound: { code: 'CLIENT_NOT_FOUND', message: 'Client not found' },
@@ -47,7 +50,48 @@ export class ClientsService {
       code: 'PHOTO_DATA_URL_NOT_ALLOWED',
       message: 'Upload via POST /clients/.../photo/upload-url (S3), do not send base64 data URLs',
     },
+    lockerRequiresActiveContract: {
+      code: 'LOCKER_REQUIRES_ACTIVE_CONTRACT',
+      message: 'Locker number can only be assigned while the client has an active or frozen contract',
+    },
+    lockerNumberExists: {
+      code: 'LOCKER_NUMBER_EXISTS',
+      message: 'Locker number is already assigned to another client',
+    },
   } as const;
+
+  private async clientHasAssignableLockerContract(clientId: string): Promise<boolean> {
+    const count = await this.prisma.contractDocument.count({
+      where: {
+        clientId,
+        derivedStatus: { in: [ContractDerivedStatus.ACTIVE, ContractDerivedStatus.PAUSED] },
+      },
+    });
+    return count > 0;
+  }
+
+  private async assertCanAssignLocker(clientId: string) {
+    if (!(await this.clientHasAssignableLockerContract(clientId))) {
+      throw new BadRequestException(this.errors.lockerRequiresActiveContract);
+    }
+  }
+
+  async isLockerNumberAvailable(lockerNumber: string, excludeId?: string) {
+    const normalized = normalizeLockerNumber(lockerNumber);
+    if (!normalized) return true;
+    const item = await this.prisma.client.findFirst({
+      where: { lockerNumber: normalized },
+      select: { id: true },
+    });
+    if (!item) return true;
+    return excludeId ? item.id === excludeId : false;
+  }
+
+  private async assertLockerNumberAvailable(lockerNumber: string, excludeId: string) {
+    if (!(await this.isLockerNumberAvailable(lockerNumber, excludeId))) {
+      throw new ConflictException(this.errors.lockerNumberExists);
+    }
+  }
 
   private readonly allowedPhotoContentTypes = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 
@@ -172,12 +216,10 @@ export class ClientsService {
     if (query.membershipType) {
       where.membershipType = query.membershipType;
     }
-    if (query.inGym === 'IN_GYM') {
-      where.visitSessions = { some: { exitedAt: null, status: VisitSessionStatus.IN_GYM } };
+    if (query.inGym === 'IN_GYM' || query.inGym === 'VISIT_OVERDUE') {
+      where.visitSessions = { some: { exitedAt: null } };
     } else if (query.inGym === 'OUT_GYM') {
-      where.visitSessions = { none: { exitedAt: null, status: VisitSessionStatus.IN_GYM } };
-    } else if (query.inGym === 'VISIT_OVERDUE') {
-      where.visitSessions = { some: { exitedAt: null, status: VisitSessionStatus.OVERDUE } };
+      where.visitSessions = { none: { exitedAt: null } };
     }
     if (query.lastVisitFrom || query.lastVisitTo) {
       const enteredAt: Prisma.DateTimeFilter = {};
@@ -241,17 +283,13 @@ export class ClientsService {
     if (query.membershipType) {
       parts.push(Prisma.sql`c."membershipType" = ${query.membershipType}`);
     }
-    if (query.inGym === 'IN_GYM') {
+    if (query.inGym === 'IN_GYM' || query.inGym === 'VISIT_OVERDUE') {
       parts.push(
-        Prisma.sql`EXISTS (SELECT 1 FROM "VisitSession" v WHERE v."clientId" = c.id AND v."exitedAt" IS NULL AND v.status = 'IN_GYM'::"VisitSessionStatus")`,
+        Prisma.sql`EXISTS (SELECT 1 FROM "VisitSession" v WHERE v."clientId" = c.id AND v."exitedAt" IS NULL)`,
       );
     } else if (query.inGym === 'OUT_GYM') {
       parts.push(
-        Prisma.sql`NOT EXISTS (SELECT 1 FROM "VisitSession" v WHERE v."clientId" = c.id AND v."exitedAt" IS NULL AND v.status = 'IN_GYM'::"VisitSessionStatus")`,
-      );
-    } else if (query.inGym === 'VISIT_OVERDUE') {
-      parts.push(
-        Prisma.sql`EXISTS (SELECT 1 FROM "VisitSession" v WHERE v."clientId" = c.id AND v."exitedAt" IS NULL AND v.status = 'OVERDUE'::"VisitSessionStatus")`,
+        Prisma.sql`NOT EXISTS (SELECT 1 FROM "VisitSession" v WHERE v."clientId" = c.id AND v."exitedAt" IS NULL)`,
       );
     }
     if (query.lastVisitFrom || query.lastVisitTo) {
@@ -307,6 +345,21 @@ export class ClientsService {
   }
 
   /** Незакрытая сессия: приоритет IN_GYM, иначе любой другой открытый статус (например OVERDUE). */
+  private async attachClientVisitGymFields<T extends { id: string }>(
+    client: T,
+  ): Promise<T & { inGym: boolean; openVisitStatus: VisitSessionStatus | null }> {
+    const openRows = await this.prisma.visitSession.findMany({
+      where: { clientId: client.id, exitedAt: null },
+      select: { clientId: true, status: true },
+    });
+    const openSt = this.pickClientOpenVisitStatus(openRows).get(client.id) ?? null;
+    return {
+      ...client,
+      inGym: openSt != null,
+      openVisitStatus: openSt,
+    };
+  }
+
   private pickClientOpenVisitStatus(
     rows: Array<{ clientId: string; status: VisitSessionStatus }>,
   ): Map<string, VisitSessionStatus> {
@@ -359,7 +412,7 @@ export class ClientsService {
               SELECT c.id FROM "Client" c
               WHERE ${whereSql}
               ORDER BY (EXISTS (
-                SELECT 1 FROM "VisitSession" vi WHERE vi."clientId" = c.id AND vi."exitedAt" IS NULL AND vi.status = 'IN_GYM'::"VisitSessionStatus"
+                SELECT 1 FROM "VisitSession" vi WHERE vi."clientId" = c.id AND vi."exitedAt" IS NULL
               )) DESC,
               c."lastName" ASC,
               c."firstName" ASC
@@ -369,7 +422,7 @@ export class ClientsService {
               SELECT c.id FROM "Client" c
               WHERE ${whereSql}
               ORDER BY (EXISTS (
-                SELECT 1 FROM "VisitSession" vi WHERE vi."clientId" = c.id AND vi."exitedAt" IS NULL AND vi.status = 'IN_GYM'::"VisitSessionStatus"
+                SELECT 1 FROM "VisitSession" vi WHERE vi."clientId" = c.id AND vi."exitedAt" IS NULL
               )) ASC,
               c."lastName" ASC,
               c."firstName" ASC
@@ -494,7 +547,7 @@ export class ClientsService {
           openVisitStatus?: VisitSessionStatus | null;
           lastVisitAt?: Date | null;
         };
-        row.inGym = openSt === VisitSessionStatus.IN_GYM;
+        row.inGym = openSt != null;
         row.openVisitStatus = openSt ?? null;
         row.lastVisitAt = latestVisitByClient.get(item.id) ?? null;
         if (item.status !== 'BLOCKED') {
@@ -551,6 +604,7 @@ export class ClientsService {
   async create(dto: CreateClientDto, actorId: string) {
     this.assertNoDataUrlPhoto(dto.photoUrl);
     const data = this.mapCreateData(dto, actorId);
+    await this.cardNumbers.assertAvailable(data.cardNumber as string, undefined, this.errors.cardNumberExists);
     try {
       const created = await this.prisma.client.create({ data });
       return this.withReadablePhotoUrl(created);
@@ -564,7 +618,8 @@ export class ClientsService {
     await this.contracts.syncClientSnapshotFromContracts(id);
     const item = await this.prisma.client.findUnique({ where: { id } });
     if (!item) throw new NotFoundException(this.errors.clientNotFound);
-    return this.withReadablePhotoUrl(item);
+    const withGym = await this.attachClientVisitGymFields(item);
+    return this.withReadablePhotoUrl(withGym);
   }
 
   async findByCardOrAccessCode(code: string) {
@@ -579,23 +634,24 @@ export class ClientsService {
     await this.contracts.syncClientSnapshotFromContracts(row.id);
     const fresh = await this.prisma.client.findUnique({ where: { id: row.id } });
     if (!fresh) return null;
-    return this.withReadablePhotoUrl(fresh);
+    const withGym = await this.attachClientVisitGymFields(fresh);
+    return this.withReadablePhotoUrl(withGym);
   }
 
   async isCardNumberAvailable(cardNumber: string, excludeId?: string) {
-    const normalized = cardNumber.trim();
-    if (!normalized) return true;
-    const item = await this.prisma.client.findUnique({
-      where: { cardNumber: normalized },
-      select: { id: true },
-    });
-    if (!item) return true;
-    return excludeId ? item.id === excludeId : false;
+    return this.cardNumbers.isAvailable(cardNumber, { clientId: excludeId });
   }
 
   async update(id: string, dto: UpdateClientDto, actorId: string) {
     if (dto.photoUrl !== undefined) {
       this.assertNoDataUrlPhoto(dto.photoUrl);
+    }
+    if (dto.lockerNumber !== undefined) {
+      const normalized = normalizeLockerNumber(dto.lockerNumber);
+      if (normalized) {
+        await this.assertCanAssignLocker(id);
+        await this.assertLockerNumberAvailable(normalized, id);
+      }
     }
     const existing = await this.prisma.client.findUnique({
       where: { id },
@@ -603,6 +659,9 @@ export class ClientsService {
     });
     if (!existing) throw new NotFoundException(this.errors.clientNotFound);
     const data = this.mapUpdateData(dto, existing, actorId);
+    if (typeof data.cardNumber === 'string' && data.cardNumber.trim()) {
+      await this.cardNumbers.assertAvailable(data.cardNumber, { clientId: id }, this.errors.cardNumberExists);
+    }
     try {
       const updated = await this.prisma.client.update({ where: { id }, data });
       await this.contracts.syncClientSnapshotFromContracts(id);
@@ -641,7 +700,7 @@ export class ClientsService {
       });
       await tx.client.update({
         where: { id },
-        data: { status: 'BLOCKED' },
+        data: { status: 'BLOCKED', lockerNumber: null },
       });
     });
     return this.findOne(id);
@@ -761,6 +820,9 @@ export class ClientsService {
       if (target.includes('contractNumber')) {
         throw new ConflictException(this.errors.contractNumberExists);
       }
+      if (target.includes('lockerNumber')) {
+        throw new ConflictException(this.errors.lockerNumberExists);
+      }
     }
   }
 
@@ -820,6 +882,7 @@ export class ClientsService {
     if (dto.paymentDate !== undefined) data.paymentDate = this.parseDate(dto.paymentDate);
     if (dto.membershipType !== undefined) data.membershipType = this.nullable(dto.membershipType);
     if (dto.cardNumber !== undefined) data.cardNumber = this.nullable(dto.cardNumber);
+    if (dto.lockerNumber !== undefined) data.lockerNumber = normalizeLockerNumber(dto.lockerNumber);
     if (dto.accessKey !== undefined) data.accessKey = this.nullable(dto.accessKey);
     if (dto.photoUrl !== undefined) data.photoUrl = this.normalizePhotoUrlForStorage(dto.photoUrl);
 

@@ -32,6 +32,10 @@ const search = ref('')
 const statusFilter = ref<'' | ServiceStaffStatus>('')
 const inGymFilter = ref<'' | 'IN_GYM' | 'OUT_GYM'>('')
 
+/** VaSelect не показывает подпись для value "" — «Все» через отдельный маркер. */
+const ALL_STATUS_VALUE = '__ALL__'
+const ALL_IN_GYM_VALUE = '__ALL__'
+
 const formOpen = ref(false)
 const formMode = ref<'create' | 'edit'>('create')
 const editingId = ref<string | null>(null)
@@ -59,16 +63,41 @@ const form = ref<ServiceStaffForm>(emptyForm())
 const pages = computed(() => Math.max(1, Math.ceil(total.value / limit.value)))
 
 const statusFilterOptions = computed(() => [
-  { value: '', text: t('common.all') },
+  { value: ALL_STATUS_VALUE, text: t('common.all') },
   { value: 'ACTIVE', text: t('serviceStaff.statusActive') },
   { value: 'INACTIVE', text: t('serviceStaff.statusInactive') },
 ])
 
 const inGymFilterOptions = computed(() => [
-  { value: '', text: t('common.all') },
+  { value: ALL_IN_GYM_VALUE, text: t('common.all') },
   { value: 'IN_GYM', text: t('clients.inGymYes') },
   { value: 'OUT_GYM', text: t('clients.inGymNo') },
 ])
+
+const hasActiveFilters = computed(
+  () =>
+    Boolean(search.value.trim()) ||
+    Boolean(statusFilter.value) ||
+    Boolean(inGymFilter.value),
+)
+
+function onStatusFilter(value: unknown) {
+  const v = typeof value === 'string' ? value : ALL_STATUS_VALUE
+  statusFilter.value = v === ALL_STATUS_VALUE ? '' : (v as ServiceStaffStatus)
+}
+
+function onInGymFilter(value: unknown) {
+  const v = typeof value === 'string' ? value : ALL_IN_GYM_VALUE
+  inGymFilter.value =
+    v === ALL_IN_GYM_VALUE ? '' : v === 'IN_GYM' || v === 'OUT_GYM' ? v : ''
+}
+
+function resetFilters() {
+  search.value = ''
+  statusFilter.value = ''
+  inGymFilter.value = ''
+  page.value = 1
+}
 
 const columns = computed(() => [
   { key: 'fullName', label: t('clients.fullName') },
@@ -277,7 +306,11 @@ async function confirmDelete() {
       </VaButton>
     </template>
 
-    <AppFilterBar>
+    <AppFilterBar
+      :has-active-filters="hasActiveFilters"
+      :reset-label="t('common.reset')"
+      @reset="resetFilters"
+    >
       <VaInput
         v-model="search"
         :label="t('clients.searchLabel')"
@@ -285,18 +318,20 @@ async function confirmDelete() {
         clearable
       />
       <VaSelect
-        v-model="statusFilter"
+        :model-value="statusFilter || ALL_STATUS_VALUE"
         :label="t('clients.statusLabel')"
         :options="statusFilterOptions"
         value-by="value"
         text-by="text"
+        @update:model-value="onStatusFilter"
       />
       <VaSelect
-        v-model="inGymFilter"
+        :model-value="inGymFilter || ALL_IN_GYM_VALUE"
         :label="t('clients.filterInGym')"
         :options="inGymFilterOptions"
         value-by="value"
         text-by="text"
+        @update:model-value="onInGymFilter"
       />
     </AppFilterBar>
 

@@ -97,3 +97,7 @@
 | `docker-compose.yml` | Postgres 16 + Redis 7 для локальной разработки |
 
 Дальнейшие модули (auth, CRUD) — по [docs/ADMIN_PANEL_DEVELOPMENT_PLAN.md](docs/ADMIN_PANEL_DEVELOPMENT_PLAN.md).
+
+cd /opt/fitnessApp   # или ваш путь к клону
+git pull
+./deploy/scripts/vps-pull-up.sh --minio

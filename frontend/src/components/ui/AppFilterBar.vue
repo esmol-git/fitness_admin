@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
+
 defineProps<{
   hasActiveFilters?: boolean
   resetLabel?: string
@@ -7,6 +9,8 @@ defineProps<{
 const emit = defineEmits<{
   (e: 'reset'): void
 }>()
+
+const { t } = useI18n()
 </script>
 
 <template>
@@ -19,7 +23,7 @@ const emit = defineEmits<{
       icon="restart_alt"
       @click="emit('reset')"
     >
-      {{ resetLabel ?? 'Reset' }}
+      {{ resetLabel ?? t('common.reset') }}
     </VaButton>
   </div>
 </template>
